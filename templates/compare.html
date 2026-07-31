@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}AIツール比較 — ツールバコ{% endblock %}
+{% block page_styles %}<link rel="stylesheet" href="/static/ai-market.css?v={{ asset_version }}">{% endblock %}
+{% block content %}
+<section class="compare-page"><div class="compare-head"><span class="section-kicker">SMART COMPARE</span><h1>違いが、ひと目でわかる。</h1><p>料金だけでは見えない「安全性・権利・更新」まで並べて比較。</p></div>
+<form class="compare-picker" method="get"><span class="compare-picker-title">比較するツール（最大3件）</span><div>{% for i in range(3) %}<label class="sr-only" for="compare-pick-{{ i }}">比較するツール {{ i + 1 }}</label><select id="compare-pick-{{ i }}" name="pick"><option value="">選択してください</option>{% for item in all_tools %}<option value="{{ item.slug }}" {% if tools|length > i and tools[i].slug == item.slug %}selected{% endif %}>{{ item.name }}</option>{% endfor %}</select>{% endfor %}<input type="hidden" name="slugs" value=""><button class="button">比較を更新</button></div></form>
+{% if tools %}<p class="compare-scroll-hint" aria-hidden="true">表は左右にスワイプして比較できます →</p>
+<div class="compare-table compare-cols-{{ tools|length }}" role="table" aria-label="AIツール比較表">
+  <div class="compare-row" role="row"><div class="compare-label" role="columnheader">比較項目</div>{% for tool in tools %}<div class="compare-product thumb-{{ tool.accent }}" role="columnheader"><span>{{ tool.name[:1] }}</span><h2><a href="/tools/{{ tool.slug }}">{{ tool.name }}</a></h2><small>{{ tool.tagline }}</small></div>{% endfor %}</div>
+  {% for label,key in [('価格','price'),('適合度','quality_score'),('実行場所','execution'),('データの扱い','data_handling'),('利用ライセンス','license'),('ソースコード','source_included'),('商用利用','commercial_use'),('更新方針','update_policy'),('必要環境','requirements')] %}<div class="compare-row" role="row"><div class="compare-label" role="rowheader">{{ label }}</div>{% for tool in tools %}<div class="compare-cell" role="cell">{% if key == 'price' %}{% if tool.price_type == 'paid' %}<b>¥{{ '{:,}'.format(tool.price) }}</b>{% else %}{{ price_labels[tool.price_type] }}{% endif %}{% elif key == 'quality_score' %}<b>{{ tool.passport.quality_score }}/100</b>{% elif key in ['source_included','commercial_use'] %}{% if tool.passport[key] %}<span class="yes">✓ 対応</span>{% else %}<span class="no">— 非対応</span>{% endif %}{% else %}{{ tool.passport[key] }}{% endif %}</div>{% endfor %}</div>{% endfor %}
+</div>{% else %}<div class="empty"><b>比較するツールを選んでください</b><a class="button" href="/tools">ツールを探す</a></div>{% endif %}</section>
+{% endblock %}

@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}{{ tool.name }}の独占譲渡 — ツールバコ{% endblock %}
+{% block description %}{{ tool.name }}のソースコード・独占権の一括譲渡条件。{% endblock %}
+{% block content %}
+<section class="transfer-offer-page">
+  <div class="breadcrumbs"><a href="/transfers">独占譲渡</a><span>/</span><a href="/tools/{{ tool.slug }}">{{ tool.name }}</a></div>
+  <header class="transfer-offer-head"><div><span class="section-kicker">EXCLUSIVE TRANSFER</span><h1>{{ tool.name }}</h1><p>{{ tool.exclusive_summary }}</p><div class="card-author"><span class="avatar">{{ tool.author_name[:1] }}</span><a href="/u/{{ tool.author_username }}">{{ tool.author_name }}</a><span>·</span><span>★ {{ tool.rating }}</span><span>·</span><span>{{ tool.sales_count }}件販売</span></div></div><div class="transfer-ask"><small>譲渡希望価格</small><b>¥{{ '{:,}'.format(tool.exclusive_price_min) }}〜</b><span>条件は相談のうえ決定</span></div></header>
+  <div class="transfer-offer-layout"><main>
+    <section class="transfer-metrics"><article><small>月間売上</small><b>¥{{ '{:,}'.format(tool.monthly_revenue) }}</b></article><article><small>月間利益</small><b>¥{{ '{:,}'.format(tool.monthly_profit) }}</b></article><article><small>月間維持費</small><b>¥{{ '{:,}'.format(tool.monthly_cost) }}</b></article><article><small>運営時間</small><b>週 {{ tool.weekly_ops_hours }}時間</b></article></section>
+    <section class="transfer-info"><span class="section-kicker">ASSET DETAILS</span><h2>公開されている譲渡情報</h2><dl><div><dt>技術構成</dt><dd>{{ tool.tech_stack }}</dd></div><div><dt>引き継ぎ期間</dt><dd>{{ tool.handover_days }}日</dd></div><div><dt>譲渡対象</dt><dd><ul>{% for asset in tool.transfer_assets %}<li>✓ {{ transfer_asset_labels[asset] }}</li>{% endfor %}</ul></dd></div></dl></section>
+    <section class="transfer-disclosure"><h2>案件ごとのNDA後に確認する情報</h2><p>ソース構成の詳細、収益証憑、API・外部サービスの契約状況、知的財産権、引き継ぎ計画は、問い合わせ後に双方が同じ案件NDAを確認してから開示します。</p><div><span>本人確認</span><b>→</b><span>案件NDA</span><b>→</b><span>詳細開示</span><b>→</b><span>条件交渉</span></div></section>
+    <section class="transfer-caution"><b>重要</b><p>表示値は販売者の申告です。顧客情報・外部アカウント・OSS・AI API等は移管できない場合があります。成約前に証憑と権利関係を確認し、必要に応じて弁護士・税理士等へ相談してください。</p></section>
+  </main><aside><div class="transfer-inquiry-card"><span class="section-kicker">MAKE AN OFFER</span><h2>独占譲渡を相談する</h2>
+    {% if existing_inquiry %}<div class="success-box"><b>相談を受付済みです</b><p>現在の状態：{{ transfer_status_labels[existing_inquiry.status] }}</p><a class="button full" href="/transfer-inquiries/{{ existing_inquiry.id }}">案件画面を開く →</a></div>
+    {% elif user and user.id==tool.author_id %}<div class="notice-box"><b>あなたの出品です</b><p>販売管理から譲渡条件を編集できます。</p><a class="outline-button full" href="/seller/tools/{{ tool.slug }}/edit">設定を編集</a></div>
+    {% elif not user %}<div class="notice-box"><b>無料登録後に相談できます</b><p>入力内容を失わないよう、先にログインまたは会員登録してください。</p><a class="button full" href="/login?next=/tools/{{ tool.slug }}/transfer">ログインして相談する →</a><a class="outline-button full" href="/signup?next=/tools/{{ tool.slug }}/transfer">会員登録</a></div>
+    {% else %}<div class="nda-mini-status"><span class="{% if buyer_identity_verified %}done{% endif %}">あなたの本人確認 {{ '完了' if buyer_identity_verified else '未完了' }}</span><span class="{% if seller_identity_verified %}done{% endif %}">販売者の本人確認 {{ '完了' if seller_identity_verified else '確認中' }}</span></div><form method="post"><label>希望金額<input type="number" name="offer_amount" min="10000" max="100000000" step="10000" value="{{ tool.exclusive_price_min }}" required><small>希望価格を下回る提案も送れますが、成約を保証するものではありません。</small></label><label>購入後の利用目的<textarea name="intended_use" minlength="10" maxlength="500" rows="4" placeholder="自社サービスとして運営、既存事業へ統合など" required></textarea></label><label>販売者への相談内容<textarea name="message" minlength="20" maxlength="1000" rows="6" placeholder="希望条件、確認したいこと、想定スケジュール。機密情報はまだ書かないでください。" required></textarea><small>NDA前のため、個人情報・営業秘密・認証情報は入力しないでください。</small></label><button class="button large full">独占譲渡の相談を送る →</button></form>{% endif %}
+    <ul><li>問い合わせ時点では契約は成立しません</li><li>NDAは案件ごとに双方が確認</li><li>本番決済・電子契約は外部サービス接続後</li></ul>
+  </div></aside></div>
+</section>
+{% endblock %}

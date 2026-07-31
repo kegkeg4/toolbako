@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}領収書 — {{ order.tool_name }}{% endblock %}
+{% block content %}
+<section class="receipt-page">
+  <div class="receipt-actions"><a href="/orders/{{ order.id }}">← 取引へ戻る</a><button data-print>印刷 / PDF保存</button></div>
+  <article class="receipt-sheet">
+    <header><div><span>TOOLBAKO</span><h1>領収書</h1></div><dl><dt>発行日</dt><dd>{{ order.updated_at.strftime('%Y年%m月%d日') }}</dd><dt>領収書番号</dt><dd>{{ order.receipt_no|default(order.id[:12],true) }}</dd></dl></header>
+    <h2>{{ order.buyer_name }} 様</h2>
+    <div class="receipt-total"><span>領収金額（税込）</span><b>¥{{ '{:,}'.format(order.amount) }}</b></div>
+    <p>但し「{{ order.tool_name }}」利用料として、上記正に領収いたしました。</p>
+    <table><thead><tr><th>内容</th><th>金額</th></tr></thead><tbody>
+      <tr><td>{{ order.tool_name }}</td><td>¥{{ '{:,}'.format(order.base_amount|default(order.primary_payment_amount|default(order.amount))) }}</td></tr>
+      {% for option in order.selected_options|default([]) %}<tr><td>{{ option.name }}</td><td>¥{{ '{:,}'.format(option.price) }}</td></tr>{% endfor %}
+      {% if order.discount|default(0) %}<tr><td>割引{% if order.coupon %}（{{ order.coupon }}）{% endif %}</td><td>−¥{{ '{:,}'.format(order.discount) }}</td></tr>{% endif %}
+      {% for extra in order.extras|default([]) %}<tr><td>{{ extra.note }}</td><td>¥{{ '{:,}'.format(extra.amount) }}</td></tr>{% endfor %}
+    </tbody><tfoot><tr><th>合計</th><th>¥{{ '{:,}'.format(order.amount) }}</th></tr></tfoot></table>
+    <footer><b>{{ legal_operator.name or 'ツールバコ（デモ）' }}</b><p>{{ legal_operator.address or '事業者情報は本番公開前に設定' }}{% if legal_operator.invoice_number %}<br>登録番号：{{ legal_operator.invoice_number }}{% endif %}</p>{% if demo_mode %}<small>これは試作画面のため、税務上有効な領収書ではありません。</small>{% else %}<small>取引内容と決済記録に基づき電子発行しています。</small>{% endif %}</footer>
+  </article>
+</section>
+{% endblock %}

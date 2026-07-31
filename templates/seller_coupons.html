@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+{% block title %}クーポン管理 — ツールバコ{% endblock %}
+{% block content %}
+<section class="simple-suite"><header class="suite-head-row"><div><span class="section-kicker">COUPONS</span><h1>クーポン管理</h1><p>リピーターや見込み購入者へ、あなたの全商品で使える割引コードを発行できます。</p></div><a class="outline-button" href="/seller">販売管理へ戻る</a></header>
+{% if request.query_params.get('created') %}<p class="success" role="status">クーポンを発行しました。</p>{% endif %}
+<div class="manage-layout"><form class="manage-form" method="post"><label>クーポンコード<input name="code" pattern="[A-Za-z0-9_-]{4,20}" minlength="4" maxlength="20" placeholder="THANKS20" required></label><div class="field-grid"><label>割引率（%）<input type="number" name="percent" min="1" max="80" value="10" required></label><label>割引上限（円）<input type="number" name="max_discount" min="100" max="100000" value="1000" required></label></div><div class="field-grid"><label>利用回数上限<input type="number" name="max_uses" min="1" max="10000" value="100" required></label><label>有効期限<input type="date" name="expires_on" required></label></div><button class="button large">クーポンを発行</button></form>
+<aside><article><b>発行済みクーポン</b>{% for coupon in coupons %}<div class="coupon-box"><strong>{{ coupon.code }}</strong><span>{{ coupon.percent }}%OFF（最大 ¥{{ '{:,}'.format(coupon.max_discount) }}）</span><small>{{ coupon.used_count }}/{{ coupon.max_uses }}回 · {{ coupon.expires_at.strftime('%Y/%m/%d') }}まで</small><form action="/seller/coupons/{{ coupon.id }}/toggle" method="post"><button>{{ '停止する' if coupon.active else '再開する' }}</button></form></div>{% else %}<p>発行済みクーポンはありません。</p>{% endfor %}</article></aside></div></section>
+{% endblock %}

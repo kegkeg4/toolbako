@@ -1,0 +1,31 @@
+/* Operator-issued creator credentials. Loaded after page styles on purpose. */
+.creator-status-badges{display:inline-flex!important;align-items:center;gap:4px;flex-wrap:wrap;background:transparent!important;color:inherit!important;border:0!important;border-radius:0!important;padding:0!important;line-height:1}
+.creator-status-badge{display:inline-flex!important;align-items:center;gap:4px;min-height:22px;padding:3px 7px!important;border:1px solid transparent!important;border-radius:999px!important;font-size:10px!important;font-weight:900!important;line-height:1.25;white-space:nowrap;letter-spacing:.01em;box-shadow:0 2px 8px rgba(35,39,71,.05)}
+.creator-status-badge>span{display:inline!important;background:transparent!important;color:inherit!important;border:0!important;border-radius:0!important;padding:0!important;font-size:10px!important;font-weight:900!important}
+.creator-status-badge svg{width:13px;height:13px;flex:none;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+.creator-status-badge--certified{color:#245fb6!important;background:linear-gradient(135deg,#edf5ff,#f7fbff)!important;border-color:#c8dcf7!important}
+.creator-status-badge--founding{color:#7044af!important;background:linear-gradient(135deg,#f4edff,#fff5fd)!important;border-color:#dcc8f4!important}
+.creator-status-badges--compact .creator-status-badge{min-height:19px;padding:2px 5px!important}
+.creator-status-badges--compact .creator-status-badge svg{width:11px;height:11px}
+.card-author .creator-status-badges{margin-left:2px;flex-wrap:nowrap}
+.card-author .creator-status-badges~.ai-chip,.market-card-author .creator-status-badges~span:last-child{display:none}
+.market-card-author .creator-status-badges{margin-left:auto;flex-wrap:nowrap}
+.detail-title .card-author{flex-wrap:wrap}
+.author-card .creator-status-badges{margin:4px 0 6px}
+.admin-credential-state:not(:has(.creator-status-badges)):before{content:'称号なし';color:#8a8d99;font-size:11px}
+.user-admin-table .admin-user-actions{display:flex;gap:6px;flex-wrap:wrap}
+.user-admin-table .admin-user-actions form{margin:0}
+.user-admin-table .admin-user-actions button{min-height:34px;padding:6px 9px}
+.ops-section-head>div>p{margin:3px 0 0;color:#858792;font-size:11px}
+.creator-recognition{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin:18px 0 -7px}
+.creator-recognition article{display:grid;grid-template-columns:36px 1fr;gap:11px;align-items:center;padding:15px 17px;border:1px solid #dce4f2;border-radius:14px;background:linear-gradient(135deg,#f7fbff,#fff)}
+.creator-recognition article>span{width:34px;height:34px;display:grid;place-items:center;border-radius:10px;background:#eaf3ff!important;color:#2862b6!important;font-size:16px!important;font-weight:900;padding:0!important}
+.creator-recognition article.founding{border-color:#e5d9f3;background:linear-gradient(135deg,#faf7ff,#fff9fd)}
+.creator-recognition article.founding>span{background:#f1e9fb!important;color:#7449ad!important}
+.creator-recognition h2{margin:0;font-size:13px}
+.creator-recognition p{margin:3px 0 0;color:#747785;font-size:11px!important;line-height:1.6}
+.creator-card-badges>.profile-trust-badge{background:#e6f6ed;color:#237d52}
+.creator-badges{align-items:center;flex-wrap:wrap}
+.creator-badges>.profile-trust-badge{background:#e6f6ed!important;color:#237d52!important;border-radius:20px!important;padding:3px 8px!important}
+.creator-badges>.profile-availability-badge{background:#eeeeff!important;color:#5657db!important;border-radius:20px!important;padding:3px 8px!important}
+@media(max-width:760px){.creator-recognition{grid-template-columns:1fr}.creator-status-badge{min-height:24px}.user-admin-table .admin-user-actions{display:grid!important;grid-template-columns:1fr}.user-admin-table .admin-user-actions button{width:100%;min-height:44px}.creator-filters>div{min-width:0}}

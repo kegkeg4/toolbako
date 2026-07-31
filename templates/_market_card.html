@@ -1,0 +1,20 @@
+{% from "_creator_badges.html" import creator_badges %}
+<article class="market-card">
+  <a class="market-card-visual thumb-{{ tool.accent|default('coral') }}" href="/tools/{{ tool.slug }}">
+    <span class="market-visual-orbit" aria-hidden="true"></span>
+    <span class="market-visual-mark" aria-hidden="true">{% if tool.category == '開発者ツール' %}&lt;/&gt;{% elif tool.category == '画像・デザイン' %}◈{% elif tool.category == 'マーケティング' %}↗{% elif tool.category == '学習・教育' %}学{% elif tool.category == 'エンタメ・ネタ' %}✦{% else %}{{ tool.name[:1] }}{% endif %}</span>
+    <span class="market-visual-name"><b>{{ tool.name }}</b><small>{{ tool.ai_used[0] }} POWERED</small></span>
+    {% if market_rank == 1 %}<span class="market-rank">おすすめ</span>{% elif market_rank == 2 %}<span class="market-rank rising">注目</span>{% endif %}
+    {% if tool.exclusive_available|default(false) and tool.transfer_review_status|default('not_requested') == 'approved' %}<span class="market-transfer">独占譲渡あり</span>{% endif %}
+    <span class="market-safe">✓ 確認済み</span>
+  </a>
+  <div class="market-card-body">
+    <span class="market-card-category">{{ tool.category }}</span>
+    <h3><a href="/tools/{{ tool.slug }}">{{ tool.name }}</a></h3>
+    <p>{{ tool.tagline }}</p>
+    {% if tool.customization_available|default(false) or (tool.exclusive_available|default(false) and tool.transfer_review_status|default('not_requested') == 'approved') %}<div class="sale-mode-chips">{% if tool.customization_available|default(false) %}<span>カスタマイズ可</span>{% endif %}{% if tool.exclusive_available|default(false) and tool.transfer_review_status|default('not_requested') == 'approved' %}<span>独占譲渡可</span>{% endif %}</div>{% endif %}
+    <div class="market-card-author"><span class="avatar">{{ tool.author_name[:1] }}</span><a href="/u/{{ tool.author_username }}">{{ tool.author_name }}</a>{{ creator_badges(tool.author_username, true) }}<span>{{ tool.ai_used[0] }}</span></div>
+    <div class="market-card-rating"><b>★ {{ tool.rating|default('新着', true) }}</b><span>（{{ tool.sales_count|default(0) }}件販売）</span></div>
+    <footer><strong>{% if tool.price_type == 'paid' %}¥{{ '{:,}'.format(tool.price) }}<small> / 買い切り</small>{% else %}{{ price_labels[tool.price_type] }}{% endif %}</strong><span aria-label="お気に入り数">♡ {{ tool.like_count }}</span></footer>
+  </div>
+</article>

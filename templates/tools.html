@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}ツールを探す — ツールバコ{% endblock %}
+{% block content %}
+<section class="page-hero compact"><span class="section-kicker">DISCOVER</span><h1>ツールを見つける</h1><p>誰かが作った、ちょっと便利で面白いAIツールたち。</p></section>
+<form class="filters" method="get" role="search">
+  <div class="wide-field"><label for="filter-query">キーワード</label><input id="filter-query" name="q" value="{{ q }}" maxlength="100" placeholder="ツール名、タグで検索"></div>
+  <div><label for="filter-category">カテゴリ</label><select id="filter-category" name="category"><option value="">すべて</option>{% for c in categories %}<option {% if c==selected_category %}selected{% endif %}>{{ c }}</option>{% endfor %}</select></div>
+  <div><label for="filter-price">価格</label><select id="filter-price" name="price_type"><option value="">すべて</option>{% for key,label in price_labels.items() %}<option value="{{ key }}" {% if key==selected_price %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></div>
+  <div><label for="filter-ai">使用AI</label><select id="filter-ai" name="ai"><option value="">すべて</option>{% for x in ai_options %}<option {% if x==selected_ai %}selected{% endif %}>{{ x }}</option>{% endfor %}</select></div>
+  <button class="button">絞り込む</button>
+</form>
+<section class="content-section listing">
+  <div class="result-head"><p aria-live="polite"><b>{{ tools|length }}</b> 件のツール</p><div class="sort-tabs" aria-label="並び順"><a class="{% if sort=='new' %}active{% endif %}" {% if sort=='new' %}aria-current="page"{% endif %} href="?q={{q|urlencode}}&category={{selected_category|urlencode}}&price_type={{selected_price|urlencode}}&ai={{selected_ai|urlencode}}&sort=new">新着</a><a class="{% if sort=='popular' %}active{% endif %}" {% if sort=='popular' %}aria-current="page"{% endif %} href="?q={{q|urlencode}}&category={{selected_category|urlencode}}&price_type={{selected_price|urlencode}}&ai={{selected_ai|urlencode}}&sort=popular">人気</a><a class="{% if sort=='trending' %}active{% endif %}" {% if sort=='trending' %}aria-current="page"{% endif %} href="?q={{q|urlencode}}&category={{selected_category|urlencode}}&price_type={{selected_price|urlencode}}&ai={{selected_ai|urlencode}}&sort=trending">急上昇</a></div></div>
+  {% if tools %}<div class="card-grid three">{% for tool in tools %}{% include "_card.html" %}{% endfor %}</div>{% else %}<div class="empty"><b>ぴったりのツールはまだありません</b><p>条件をリセットするか、欲しいツールを制作者に募集できます。</p><div class="empty-actions"><a class="outline-button" href="/tools">条件をリセット</a><a class="button" href="/requests/new">希望ツールを募集</a></div></div>{% endif %}
+</section>
+{% endblock %}

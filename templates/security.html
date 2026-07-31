@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}セキュリティ — ツールバコ{% endblock %}
+{% block content %}
+<section class="simple-suite">
+  <header><span class="section-kicker">ACCOUNT SECURITY</span><h1>アカウントとデータを守る</h1><p>購入情報、売上金、取引メッセージを安全に管理します。</p></header>
+  <div class="settings-list">
+    <article>
+      <div><b>2段階認証</b>{% if demo_mode %}<p>現在は画面体験用の設定です。本番では認証基盤のMFAを有効化します。</p>{% else %}<p>認証基盤のMFA登録画面を有効化後に利用できます。</p>{% endif %}</div>
+      <span class="state-{{ 'verified' if security.two_factor else 'not_started' }}">{{ ('体験設定ON' if security.two_factor else '体験設定OFF') if demo_mode else '本番接続待ち' }}</span>
+      {% if demo_mode %}<form action="/security/two-factor" method="post"><button class="outline-button">{{ '無効にする' if security.two_factor else '体験設定をON' }}</button></form>{% else %}<button disabled>運営者の設定待ち</button>{% endif %}
+    </article>
+    <article><div><b>パスワード</b><p>{{ 'デモでは送信を省略します。' if demo_mode else '登録メールアドレスへ、期限つきの再設定リンクを送信します。' }}</p></div><span>最終変更：未設定</span><form action="/security/password-reset" method="post"><button class="outline-button">再設定{{ 'を体験' if demo_mode else 'メールを送る' }}</button></form></article>
+    <article><div><b>ログイン中の端末</b><p>このブラウザ以外のログインをまとめて無効化できます。</p></div><span>{{ security.sessions }}台</span><form action="/security/sessions/revoke-others" method="post"><button class="outline-button" {% if security.sessions <= 1 %}disabled{% endif %}>他の端末をログアウト</button></form></article>
+    <article><div><b>ログイン通知</b><p>{{ 'ログイン時に登録アドレスへ通知します。' if email_ready else '運営者がメール送信ドメインを接続後に有効化されます。' }}</p></div><span class="state-{{ 'verified' if email_ready else 'not_started' }}">{{ '有効' if email_ready else 'メール接続待ち' }}</span></article>
+    <article><div><b>自分のデータを取得</b><p>プロフィール、購入・販売履歴、評価、問い合わせ履歴をJSONで出力します。</p></div><span>即時</span><a class="outline-button" href="/account/export">データを出力</a></article>
+  </div>
+  <div class="danger-zone"><b>退会手続き</b>{% if deletion %}<p role="status">退会申請を受け付けています。{{ deletion.delete_after.strftime('%Y/%m/%d %H:%M') }} までは取り消せます。</p><form action="/account/delete-cancel" method="post"><button>退会申請を取り消す</button></form>{% else %}<p>申請後7日間は取り消し可能です。未完了の取引または未振込売上がある場合は申請できません。</p><details><summary>退会申請を開く</summary><form action="/account/delete-request" method="post"><label>確認のため「退会する」と入力<input name="confirmation" required autocomplete="off"></label><button>7日後の退会を申請</button></form></details>{% endif %}</div>
+</section>
+{% endblock %}

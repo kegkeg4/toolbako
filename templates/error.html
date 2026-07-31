@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block title %}{{ status_code }} — 操作を完了できませんでした{% endblock %}
+{% block content %}
+<section class="error-page" role="alert">
+  <span class="section-kicker">REQUEST {{ status_code }}</span>
+  <h1>操作を完了できませんでした</h1>
+  <p>{{ error_message }}</p>
+  <div><a class="button ghost" href="/tools">ツールを探す</a><a class="button" href="/">トップへ戻る</a></div>
+</section>
+{% endblock %}

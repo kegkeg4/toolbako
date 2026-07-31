@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block title %}通知 — ツールバコ{% endblock %}
+{% block content %}
+<section class="account-page narrow-account notification-page">
+  <div class="account-head notification-head"><div><span class="section-kicker">NOTIFICATIONS</span><h1>通知</h1><p>相談、取引、募集の大切な変化をまとめて確認できます。</p></div><div>{% if unread_notification_count %}<form action="/notifications/read-all" method="post"><button class="outline-button">すべて既読</button></form>{% endif %}<a class="outline-button" href="/notifications/settings">通知設定</a></div></div>
+  <nav class="notification-tabs" aria-label="通知の絞り込み">{% for value,label in [('all','すべて'),('unread','未読'),('messages','メッセージ'),('transactions','取引'),('requests','募集'),('updates','更新')] %}<a href="/notifications?filter={{ value }}" class="{{ 'active' if notification_filter==value else '' }}">{{ label }}</a>{% endfor %}</nav>
+  <div class="notification-list rich-notifications">
+    {% for n in notifications %}<form action="/notifications/{{ n.id }}/open" method="post"><button class="{{ 'is-unread' if not n.read else '' }}"><span class="notification-icon notification-{{ n.category|default('general') }}" aria-hidden="true">{% if n.category=='messages' %}✉{% elif n.category=='transactions' %}✓{% elif n.category=='requests' %}↗{% elif n.category=='updates' %}◌{% else %}•{% endif %}</span><div><b>{{ n.title }}</b><p>{{ n.body }}</p><small>{{ n.created_at.strftime('%Y/%m/%d %H:%M') }}{% if not n.read %} · 未読{% endif %}</small></div><em aria-hidden="true">→</em></button></form>{% else %}<div class="empty"><b>該当する通知はありません</b><p>見積り、取引、募集への応募などをここでお知らせします。</p></div>{% endfor %}
+  </div>
+</section>
+{% endblock %}

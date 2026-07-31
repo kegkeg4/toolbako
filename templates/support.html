@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}ヘルプ・お問い合わせ — ツールバコ{% endblock %}
+{% block content %}
+<section class="simple-suite support-center">
+  <header>
+    <span class="section-kicker">HELP &amp; SAFETY</span>
+    <h1>困ったときは、ここから。</h1>
+    <p>購入前の質問は販売者へ、取引・決済・安全性の問題は運営へご連絡ください。</p>
+  </header>
+  <div class="support-grid">
+    <div class="support-main">
+      <div class="support-quick">
+        <article><span>01</span><b>取引相手と相談</b><p>納期や修正内容は取引ルームに記録してください。</p><a href="/mypage?tab=buying">取引を確認 →</a></article>
+        <article><span>02</span><b>運営へ紛争申請</b><p>取引ルームから申請すると、その取引を紐づけて調査します。</p><a href="/mypage?tab=buying">対象の取引を選ぶ →</a></article>
+        <article><span>03</span><b>緊急の安全問題</b><p>不正アクセスや情報漏えいの疑いは「セキュリティ」を選択してください。</p></article>
+      </div>
+      {% if user %}
+      <form class="support-form" method="post">
+        <h2>運営へ問い合わせる</h2>
+        <label>お問い合わせ種別
+          <select name="category"><option value="account">アカウント</option><option value="payment">決済・売上</option><option value="identity">本人確認</option><option value="tool">商品・納品</option><option value="security">セキュリティ</option><option value="other">その他</option></select>
+        </label>
+        <label>件名<input name="subject" minlength="3" maxlength="100" required></label>
+        <label>詳しい状況<textarea name="detail" minlength="20" maxlength="2000" rows="7" required placeholder="発生日時、画面、操作、困っていることを入力してください"></textarea></label>
+        <button class="button large">運営へ送信</button>
+      </form>
+      {% else %}
+      <div class="support-login"><b>お問い合わせにはログインが必要です</b><a class="button" href="/login?next=/support">ログインする</a></div>
+      {% endif %}
+    </div>
+    <aside>
+      <h2>受付状況</h2>
+      {% for case in cases %}
+      <article><span class="state-{{ 'verified' if case.status=='resolved' else 'pending' }}">{{ {'open':'受付済み','investigating':'調査中','resolved':'解決済み','rejected':'対応終了'}[case.status] }}</span><b>{{ case.subject }}</b><small>{{ case.created_at.strftime('%Y/%m/%d') }} · #{{ case.id[:8] }}</small></article>
+      {% else %}<p>お問い合わせ履歴はありません。</p>{% endfor %}
+      <div class="support-sla"><b>対応目安</b><p>セキュリティ・決済：24時間以内<br>一般問い合わせ：2営業日以内</p>{% if support_email %}<small>{{ support_email }}</small>{% endif %}</div>
+    </aside>
+  </div>
+</section>
+{% endblock %}

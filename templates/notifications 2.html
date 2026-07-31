@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}通知 — ツールバコ{% endblock %}
+{% block content %}
+<section class="account-page narrow-account">
+  <div class="account-head">
+    <span class="section-kicker">NOTIFICATIONS</span><h1>通知</h1>
+    {% if notifications|selectattr('read','equalto',false)|list %}<form action="/notifications/read-all" method="post"><button class="outline-button">すべて既読にする</button></form>{% endif %}
+  </div>
+  <div class="notification-list">
+    {% for n in notifications %}<a href="{{ n.url }}" class="{{ 'is-unread' if not n.read else '' }}">{% if not n.read %}<span aria-label="未読">●</span>{% else %}<span aria-hidden="true">○</span>{% endif %}<div><b>{{ n.title }}</b><p>{{ n.body }}</p><small>{{ n.created_at.strftime('%m/%d %H:%M') }}</small></div></a>{% else %}<div class="empty"><b>通知はありません</b><p>見積もり、取引、募集への応募などをここでお知らせします。</p></div>{% endfor %}
+  </div>
+</section>
+{% endblock %}

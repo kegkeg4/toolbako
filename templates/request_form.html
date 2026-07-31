@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}仕事を募集する — ツールバコ{% endblock %}
+{% block content %}
+<section class="form-page">
+  <div class="form-intro">
+    <span class="section-kicker">POST A REQUEST</span>
+    <h1>AIツール制作を募集</h1>
+    <p>希望内容・予算・期限を公開して、対応できる制作者から提案を受け取ります。</p>
+  </div>
+  <form class="editor-form" method="post">
+    <div class="field"><label for="request-title">募集タイトル</label><input id="request-title" name="title" minlength="3" maxlength="80" required></div>
+    <div class="field"><label for="request-category">カテゴリ</label><select id="request-category" name="category">{% for c in categories %}<option>{{ c }}</option>{% endfor %}</select></div>
+    <div class="field"><label for="request-detail">依頼内容</label><textarea id="request-detail" name="detail" rows="10" minlength="10" maxlength="3000" required></textarea></div>
+    <div class="field-row">
+      <div class="field"><label for="budget-min">予算下限</label><input id="budget-min" type="number" name="budget_min" min="1000" max="10000000" step="100" value="10000" required></div>
+      <div class="field"><label for="budget-max">予算上限</label><input id="budget-max" type="number" name="budget_max" min="1000" max="10000000" step="100" value="50000" required></div>
+    </div>
+    <div class="field"><label for="request-deadline">募集期限</label><input id="request-deadline" type="date" name="deadline" required></div>
+    <label class="agreement"><input type="checkbox" name="terms_agreement" value="yes" required><span>購入前に完成品を求めず、サイト外取引を行わないことに同意します。</span></label>
+    <button class="button large full">この内容で募集する</button>
+  </form>
+</section>
+{% endblock %}

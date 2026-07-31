@@ -1,0 +1,35 @@
+.finance-console{overflow:hidden}
+.finance-console .ops-section-head p{margin:4px 0 0;color:var(--muted);font-size:12px}
+.finance-flow-note{display:flex;justify-content:space-between;gap:24px;align-items:center;background:linear-gradient(135deg,#eef0ff,#edf9f2);border:1px solid #dfe3f4;border-radius:14px;padding:16px 18px;margin:14px 0 18px}
+.finance-flow-note b{font-size:13px}
+.finance-flow-note small{max-width:520px;color:var(--muted);line-height:1.6}
+.finance-kpis{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-bottom:24px}
+.finance-kpis article{background:#fff;border:1px solid var(--line);border-radius:13px;padding:15px}
+.finance-kpis small,.finance-kpis b,.finance-kpis span{display:block}
+.finance-kpis small,.finance-kpis span{font-size:11px;color:var(--muted)}
+.finance-kpis b{font-size:22px;margin:5px 0}
+.finance-console h3{font-size:15px;margin:22px 0 10px}
+.finance-table{border:1px solid var(--line);border-radius:13px;overflow:auto;background:#fff}
+.finance-row{display:grid;align-items:center;gap:10px;min-width:860px;padding:12px 14px;border-top:1px solid var(--line);font-size:12px}
+.finance-row:first-child{border-top:0}
+.finance-row>span{min-width:0}
+.finance-row b,.finance-row small{display:block}
+.finance-row small{color:var(--muted);margin-top:2px}
+.seller-finance-table .finance-row{grid-template-columns:1.5fr repeat(4,.85fr) .75fr 1fr}
+.transaction-finance-table .finance-row{grid-template-columns:1.6fr 1fr repeat(4,.8fr)}
+.payout-finance-table .finance-row{grid-template-columns:1fr 1.6fr 1fr 1fr 1.2fr}
+.finance-head{background:#f6f7fa;color:var(--muted);font-weight:700;border-top:0}
+.finance-row form{margin:0}
+.finance-row button{border:1px solid #d9dae3;background:#fff;border-radius:7px;padding:6px 8px;font-size:11px;font-weight:700}
+.finance-state,.fund-state{display:inline-flex;width:max-content;border-radius:999px;padding:4px 8px;font-weight:700}
+.state-ready,.fund-available{background:#e3f6eb;color:#25784a}
+.state-reviewing,.fund-held,.fund-payment_pending,.fund-payout_blocked{background:#fff1cf;color:#896500}
+.state-not_connected,.fund-cancelled{background:#eff0f3;color:#6f727c}
+.fund-refunded,.fund-disputed{background:#ffe7e1;color:#a44734}
+.hold-label{color:#a44734!important}
+.control-unavailable{display:inline-block!important;max-width:92px;color:var(--muted);line-height:1.4}
+.finance-details{margin-top:14px;border:1px solid var(--line);border-radius:12px;padding:12px}
+.finance-details summary{cursor:pointer;font-size:13px;font-weight:700}
+.finance-details .finance-table{margin-top:12px}
+@media(max-width:800px){.finance-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}.finance-flow-note{align-items:flex-start;flex-direction:column;gap:7px}}
+@media(max-width:520px){.finance-kpis{grid-template-columns:1fr}}

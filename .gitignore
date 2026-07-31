@@ -1,0 +1,16 @@
+.env
+private_uploads/
+*.db
+*.sqlite
+*.sqlite3
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+static/generated/*.jpg
+!static/generated/.gitkeep
+
+# Generated reports, previews and local work artifacts
+output/
+outputs/
+tmp/

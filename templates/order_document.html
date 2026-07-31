@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}{{ document.title }} — {{ order.tool_name }}{% endblock %}
+{% block content %}
+<section class="receipt-page document-page">
+  <div class="receipt-actions"><a href="/orders/{{ order.id }}">← 取引へ戻る</a><button data-print>印刷 / PDF保存</button></div>
+  <article class="receipt-sheet">
+    <header><div><span>TOOLBAKO TRANSACTION</span><h1>{{ document.title }}</h1></div><dl><dt>発行日</dt><dd>{{ document.issued_at.strftime('%Y年%m月%d日') }}</dd><dt>書類番号</dt><dd>{{ document.number }}</dd></dl></header>
+    <section class="document-parties"><div><small>宛先</small><h2>{{ document.recipient_party.name }} 様</h2><p>{{ document.recipient_party.role }}</p></div><div><small>発行者</small><h3>{{ document.issuer_party.name }}</h3><p>{{ document.issuer_party.role }}</p></div></section>
+    <p>下記の内容で{{ 'お見積りいたします' if document.prefix=='Q' else ('発注いたします' if document.prefix=='PO' else '納品いたします') }}。</p>
+    <table><thead><tr><th>内容</th><th>数量</th><th>金額</th></tr></thead><tbody>
+      <tr><td>{{ order.tool_name }}{% if order.delivery_days %}<small>予定納期：{{ order.delivery_days }}日以内</small>{% endif %}</td><td>1</td><td>¥{{ '{:,}'.format(order.base_amount|default(order.primary_payment_amount|default(order.amount))) }}</td></tr>
+      {% for option in order.selected_options|default([]) %}<tr><td>{{ option.name }}</td><td>1</td><td>¥{{ '{:,}'.format(option.price) }}</td></tr>{% endfor %}
+      {% if order.discount|default(0) %}<tr><td>割引{% if order.coupon %}（{{ order.coupon }}）{% endif %}</td><td>1</td><td>−¥{{ '{:,}'.format(order.discount) }}</td></tr>{% endif %}
+      {% for extra in order.extras|default([]) %}<tr><td>{{ extra.note }}</td><td>1</td><td>¥{{ '{:,}'.format(extra.amount) }}</td></tr>{% endfor %}
+    </tbody><tfoot><tr><th colspan="2">合計（税込）</th><th>¥{{ '{:,}'.format(order.amount) }}</th></tr></tfoot></table>
+    {% if document.prefix=='DN' and order.delivery %}<section class="document-delivery"><h3>納品内容</h3><p>{{ order.delivery.note }}</p>{% for file in order.delivery.files|default([]) %}<span>✓ {{ file.name }}</span>{% endfor %}</section>{% endif %}
+    <footer><b>取引プラットフォーム：ツールバコ</b><p>運営 {{ legal_operator.name }}<br>注文番号：{{ order.id }}</p>{% if demo_mode %}<small>これは試作デモの帳票です。実取引の証憑としては利用できません。</small>{% else %}<small>取引ルームに記録された合意・納品内容から電子発行しています。</small>{% endif %}</footer>
+  </article>
+</section>
+{% endblock %}

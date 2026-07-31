@@ -1,0 +1,24 @@
+{% extends "base.html" %}{% block title %}{{ inquiry.tool_name }}の譲渡相談 — ツールバコ{% endblock %}{% block content %}
+<section class="transfer-case-page"><header class="suite-head-row"><div><span class="section-kicker">TRANSFER CASE</span><h1>{{ inquiry.tool_name }}</h1><p>独占譲渡の相談案件。公開ページとは別に、当事者だけが確認できます。</p></div><span class="case-status status-{{ inquiry.status }}">{{ transfer_status_labels[inquiry.status] }}</span></header>
+  <div class="transfer-case-layout"><main>
+    <section class="case-summary"><div><small>購入希望者</small><b>{{ inquiry.buyer_name }}</b></div><div><small>販売者</small><b>{{ inquiry.seller_name }}</b></div><div><small>希望金額</small><b>¥{{ '{:,}'.format(inquiry.offer_amount) }}</b></div><div><small>受付日</small><b>{{ inquiry.created_at.strftime('%Y/%m/%d') }}</b></div></section>
+    <section class="case-copy"><h2>利用目的</h2><p>{{ inquiry.intended_use }}</p><h2>相談内容</h2><p>{{ inquiry.message }}</p></section>
+    <section class="case-next"><span class="section-kicker">NEXT STEP</span><h2>安全に交渉を進める</h2><div class="case-steps"><article class="done"><b>1. 相談受付</b><small>完了</small></article><article class="{% if both_signed %}done{% endif %}"><b>2. 双方の案件NDA</b><small>{{ '完了' if both_signed else '確認待ち' }}</small></article><article class="{% if inquiry.status=='negotiating' %}done{% endif %}"><b>3. 詳細開示・条件交渉</b><small>{{ '進行中' if inquiry.status=='negotiating' else '未開始' }}</small></article><article><b>4. 契約・エスクロー</b><small>本番接続前</small></article></div>
+      {% if not both_signed %}
+        {% if current_signed %}<div class="success-box"><b>あなたの案件NDA確認は完了しています</b><p>相手方の確認後、自動的に詳細確認の段階へ進みます。</p></div>
+        {% elif not can_sign_case_nda %}<div class="nda-callout"><b>案件NDAの確認には本人確認が必要です</b><p>高額取引の当事者を保護するため、本人確認完了後にこの案件へ戻ってください。</p><a class="outline-button" href="/verification">本人確認を開始する →</a></div>
+        {% else %}<details class="case-nda" open><summary>案件NDAの内容を確認する</summary><p>{{ transfer_nda_text }}</p><small>文書バージョン: 2026-07-16-transfer-v1</small><form action="/transfer-inquiries/{{ inquiry.id }}/nda" method="post"><label class="agreement"><input type="checkbox" name="agreement" value="yes" required><span>この案件の秘密保持条件を確認し、同意します。</span></label><button class="button full">この案件のNDAを確認する</button></form></details>{% endif %}
+      {% else %}<div class="success-box"><b>双方の案件NDAを確認済み</b><p>詳細情報をメッセージで確認できます。ただし認証情報や不要な個人情報は送信しないでください。</p></div>{% endif %}
+      <a class="button" href="/messages/{{ inquiry.conversation_id }}">専用メッセージを開く →</a>
+    </section>
+  </main><aside><div class="case-control"><h2>案件の進行</h2>
+    {% if is_seller and inquiry.status not in ['declined','closed'] %}
+      {% if inquiry.status=='nda_pending' %}<form action="/transfer-inquiries/{{ inquiry.id }}/status/reviewing" method="post"><button class="outline-button full">内容確認中にする</button></form>{% endif %}
+      {% if inquiry.status in ['nda_pending','reviewing'] %}<form action="/transfer-inquiries/{{ inquiry.id }}/status/negotiating" method="post"><button class="button full" {% if not both_signed %}disabled title="双方の案件NDA確認が必要です"{% endif %}>条件交渉へ進む</button></form>{% endif %}
+      {% if inquiry.status=='negotiating' %}<form action="/transfer-inquiries/{{ inquiry.id }}/status/reviewing" method="post"><button class="outline-button full">内容確認へ戻す</button></form>{% endif %}
+      <form action="/transfer-inquiries/{{ inquiry.id }}/status/declined" method="post"><button class="text-danger full" data-confirm="この相談を見送りますか？">今回は見送る</button></form><form action="/transfer-inquiries/{{ inquiry.id }}/status/closed" method="post"><button class="text-contact full">案件を終了する</button></form>
+    {% elif inquiry.status in ['declined','closed'] %}<p>この案件は終了しています。記録は当事者と運営だけが確認できます。</p>
+    {% else %}<p>販売者が内容を確認し、次の段階へ更新します。質問は専用メッセージから送れます。</p><form action="/transfer-inquiries/{{ inquiry.id }}/withdraw" method="post"><button class="text-danger full" data-confirm="この譲渡相談を取り下げますか？取り下げ後は元に戻せません。">相談を取り下げる</button></form>{% endif %}
+    <hr><b>本番接続状況</b><ul><li>✓ 案件管理・案件別NDA</li><li>△ 電子契約：未接続</li><li>△ エスクロー決済：未接続</li></ul><small>未接続機能を利用可能であるかのようには表示しません。</small>
+  </div></aside></div>
+</section>{% endblock %}

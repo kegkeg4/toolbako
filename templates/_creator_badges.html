@@ -1,0 +1,19 @@
+{% macro creator_badges(username, compact=false) -%}
+  {% set credential = creator_badges_for(username) %}
+  {% if credential.is_certified_creator or credential.is_founding_member %}
+  <span class="creator-status-badges{% if compact %} creator-status-badges--compact{% endif %}" aria-label="クリエイター称号">
+    {% if credential.is_certified_creator %}
+    <span class="creator-status-badge creator-status-badge--certified" title="ツールバコ運営が本人確認・取引実績・対応品質・ツール品質を総合確認したクリエイター">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.4 13 3.2v4.1c0 3.2-2 5.9-5 7.3-3-1.4-5-4.1-5-7.3V3.2L8 1.4Z"/><path d="m5.4 8 1.5 1.5 3.7-3.7"/></svg>
+      <span>{{ '認定' if compact else '認定クリエイター' }}</span>
+    </span>
+    {% endif %}
+    {% if credential.is_founding_member %}
+    <span class="creator-status-badge creator-status-badge--founding" title="ツールバコの立ち上げ期から参加した創設メンバー">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m8 1.5 1.4 4.1 4.1 1.4-4.1 1.4L8 12.5 6.6 8.4 2.5 7l4.1-1.4L8 1.5Z"/><path d="m12.4 10.6.6 1.7 1.7.6-1.7.6-.6 1.7-.6-1.7-1.7-.6 1.7-.6.6-1.7Z"/></svg>
+      <span>{{ '創設' if compact else '創設メンバー' }}</span>
+    </span>
+    {% endif %}
+  </span>
+  {% endif %}
+{%- endmacro %}

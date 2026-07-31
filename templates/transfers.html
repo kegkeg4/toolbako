@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}AIツール・ソースコードの独占譲渡 — ツールバコ{% endblock %}
+{% block description %}個人開発のAIツール、ソースコード、ブランド資産をまとめて譲り受けるための独占譲渡マーケット。{% endblock %}
+{% block content %}
+<section class="transfer-market-page">
+  <header class="transfer-market-hero"><div><span class="section-kicker">EXCLUSIVE TRANSFER</span><h1>完成したAI事業を、<br>次のオーナーへ。</h1><p>通常の利用権ではなく、ソースコードや運用資産をまとめて譲り受ける高額取引専用の入口です。</p></div><div class="transfer-safety-note"><b>段階的に情報を開示</b><span>公開概要 → NDA確認 → 条件交渉 → 契約・決済</span><small>電子契約・エスクローは本番サービス接続後に利用可能になります。</small></div></header>
+  <div class="transfer-principles"><article><b>01　公開情報を確認</b><p>技術構成、売上・利益、維持費、譲渡対象を比較。</p></article><article><b>02　NDA後に交渉</b><p>双方の本人確認と秘密保持確認後に詳細情報へ。</p></article><article><b>03　専門家確認を前提</b><p>知財・顧客データ・外部APIの移管可否を個別確認。</p></article></div>
+  <div class="transfer-list-head"><div><span class="section-kicker">AVAILABLE ASSETS</span><h2>独占譲渡を受付中</h2></div><a href="/tools/new">譲渡案件を出品する →</a></div>
+  <div class="transfer-card-grid">{% for tool in tools %}<article class="transfer-card"><div class="transfer-card-top thumb-{{ tool.accent }}"><span>{{ tool.name[:1] }}</span><em>独占譲渡</em></div><div><small>{{ tool.category }} · {{ tool.tech_stack }}</small><h2><a href="/tools/{{ tool.slug }}/transfer">{{ tool.name }}</a></h2><p>{{ tool.exclusive_summary }}</p><div class="transfer-card-numbers"><span><small>希望価格</small><b>¥{{ '{:,}'.format(tool.exclusive_price_min) }}〜</b></span><span><small>月間利益</small><b>¥{{ '{:,}'.format(tool.monthly_profit) }}</b></span><span><small>運営</small><b>週 {{ tool.weekly_ops_hours }}時間</b></span></div><a class="button full" href="/tools/{{ tool.slug }}/transfer">譲渡条件を見る →</a></div></article>{% else %}<div class="empty"><b>現在公開中の独占譲渡案件はありません</b><p>新しい案件が公開されるまでお待ちください。</p></div>{% endfor %}</div>
+  {% if user and inquiries %}<section class="my-transfer-summary"><div><span class="section-kicker">YOUR CASES</span><h2>進行中の譲渡相談</h2></div>{% for item in inquiries[:5] %}<a href="/transfer-inquiries/{{ item.id }}"><span><b>{{ item.tool_name }}</b><small>{{ '購入相談' if user.id==item.buyer_id else '売却相談' }}</small></span><em>{{ transfer_status_labels[item.status] }}</em><strong>¥{{ '{:,}'.format(item.offer_amount) }}</strong></a>{% endfor %}</section>{% endif %}
+</section>
+{% endblock %}

@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+{% block title %}お支払い状況 — ツールバコ{% endblock %}
+{% block content %}
+<section class="simple-suite">
+  <header><span class="section-kicker">PAYMENT STATUS</span>{% if payment_status=='past_due' %}<h1>お支払い方法の確認が必要です</h1><p>定期契約の更新を確認できないため、ツールへのアクセスを一時停止しています。</p>{% elif payment_status in ['cancelled','expired','subscription_inactive'] %}<h1>この契約は終了しています</h1><p>契約期間の終了により、ツールへのアクセスは停止されました。</p>{% else %}<h1>お支払いを確認しています</h1><p>決済事業者からの安全な通知を待っています。通常は数秒で完了します。</p>{% endif %}</header>
+  <div class="payment-wait"><div class="wait-orb">{% if payment_status=='pending' %}•••{% else %}!{% endif %}</div><h2>{{ order.tool_name }}</h2>{% if payment_status=='pending' %}<p>画面を再読み込みすると、確認後に取引ルームへ進みます。</p><a class="button" href="/orders/{{ order.id }}">支払い状況を再確認</a><small>注文番号 {{ order.id[:8] }}。二重に購入し直す必要はありません。</small>{% else %}<p>状況に心当たりがない場合は、注文番号を添えてお問い合わせください。</p><a class="button" href="/support">支払いについて相談する</a><small>注文番号 {{ order.id[:8] }}</small>{% endif %}</div>
+</section>
+{% endblock %}

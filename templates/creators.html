@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% from "_creator_badges.html" import creator_badges %}
+{% block title %}AIツールのクリエイターを探す — ツールバコ{% endblock %}
+{% block description %}スキル、実績、評価から、AIツール制作を相談できるクリエイターを探せます。{% endblock %}
+{% block page_styles %}<link rel="stylesheet" href="/static/mypage.css?v={{ asset_version }}">{% endblock %}
+{% block content %}
+<section class="page-hero creator-search-hero">
+  <span class="section-kicker">CREATORS</span>
+  <h1>つくれる人から探す</h1>
+  <p>得意分野や実績、購入者の評価を見比べて、相談したいクリエイターを見つけられます。</p>
+</section>
+<form class="filters creator-filters" action="/creators" method="get" role="search">
+  <div class="wide-field"><label for="creator-q">キーワード</label><input id="creator-q" name="q" value="{{ q }}" placeholder="例：業務自動化、Python、Notion"></div>
+  <div><label for="creator-category">得意カテゴリ</label><select id="creator-category" name="category"><option value="">すべて</option>{% for item in categories %}<option value="{{ item }}" {% if selected_category==item %}selected{% endif %}>{{ item }}</option>{% endfor %}</select></div>
+  <div><label for="creator-badge">クリエイター称号</label><select id="creator-badge" name="badge"><option value="">指定なし</option><option value="certified" {% if selected_badge=='certified' %}selected{% endif %}>認定クリエイター</option><option value="founding" {% if selected_badge=='founding' %}selected{% endif %}>創設メンバー</option></select></div>
+  <div><label for="creator-sort">並び順</label><select id="creator-sort" name="sort"><option value="recommended" {% if sort=='recommended' %}selected{% endif %}>おすすめ順</option><option value="rating" {% if sort=='rating' %}selected{% endif %}>評価順</option><option value="sales" {% if sort=='sales' %}selected{% endif %}>販売実績順</option><option value="new" {% if sort=='new' %}selected{% endif %}>新着順</option></select></div>
+  <label class="verified-filter"><input type="checkbox" name="verified" value="1" {% if verified_only %}checked{% endif %}><span>本人確認済みのみ</span></label>
+  <button class="button small">検索</button>
+</form>
+<section class="content-section creator-listing">
+  <div class="result-head"><h2>{{ creators|length }}人のクリエイター</h2>{% if q or selected_category or verified_only or selected_badge %}<a href="/creators">条件をクリア</a>{% endif %}</div>
+  <div class="creator-card-grid">
+    {% for creator in creators %}
+    <article class="creator-search-card">
+      <header><div class="creator-mini-avatar">{{ creator.display_name[:1] }}</div><div><div class="creator-card-badges">{{ creator_badges(creator.username) }}{% if creator.verified %}<span class="profile-trust-badge">✓ 本人確認済み</span>{% endif %}<span class="rank-badge rank-{{ creator.rank.class }}">{{ creator.rank.name }}ランク</span></div><h2><a href="/u/{{ creator.username }}">{{ creator.display_name }}</a></h2><small>@{{ creator.username }}</small></div><em class="availability availability-{{ 'open' if creator.availability=='受付中' else 'normal' }}">{{ creator.availability }}</em></header>
+      <p class="creator-headline">{{ creator.headline or creator.bio or 'プロフィール準備中' }}</p>
+      <div class="creator-skill-row">{% for skill in creator.skills[:4] %}<span>{{ skill }}</span>{% else %}{% for item in creator.categories[:3] %}<span>{{ item }}</span>{% endfor %}{% endfor %}</div>
+      <dl><div><dt>評価</dt><dd>{% if creator.rating %}<b>★ {{ creator.rating }}</b>（{{ creator.review_count }}件）{% else %}—{% endif %}</dd></div><div><dt>販売実績</dt><dd><b>{{ creator.completed_sales }}</b>件</dd></div><div><dt>返信目安</dt><dd>{{ creator.response_time }}</dd></div><div><dt>出品</dt><dd>{{ creator.tool_count }}件</dd></div></dl>
+      <footer><a class="button ghost" href="/u/{{ creator.username }}">プロフィールを見る</a><form action="/u/{{ creator.username }}/consult" method="post"><button class="button">相談する</button></form></footer>
+    </article>
+    {% else %}
+    <div class="empty creator-empty"><h2>条件に合うクリエイターが見つかりませんでした</h2><p>キーワードやカテゴリを減らして、もう一度お試しください。</p><a class="button ghost" href="/creators">条件をクリア</a></div>
+    {% endfor %}
+  </div>
+</section>
+{% endblock %}

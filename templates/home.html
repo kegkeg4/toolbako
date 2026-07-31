@@ -1,0 +1,100 @@
+{% extends "base.html" %}
+{% block title %}ツールバコ — 個人がつくるAIツールのマーケット{% endblock %}
+{% block description %}個人がつくったAIツールを、必要な人や小さな事業へ。検索・相談・購入・仕事の依頼まで、安心してつながれるAIツール専門マーケット。{% endblock %}
+{% block body_class %}market-home{% endblock %}
+{% block page_styles %}<link rel="stylesheet" href="/static/home-premium.css?v={{ asset_version }}">{% endblock %}
+
+{% block header_search %}
+<form class="market-header-search" action="/tools" method="get" role="search">
+  <label class="sr-only" for="global-market-search">AIツールを検索</label>
+  <select name="category" aria-label="カテゴリを選択"><option value="">すべてのカテゴリ</option>{% for c in categories %}<option value="{{ c }}">{{ c }}</option>{% endfor %}</select>
+  <input id="global-market-search" name="q" type="search" placeholder="AIツールを検索　例：議事録、画像、SNS" autocomplete="off">
+  <button type="submit" aria-label="検索">⌕</button>
+</form>
+{% endblock %}
+
+{% block header_nav %}
+  <a href="/tools/new">出品する</a><a href="/transfers">独占譲渡</a><a href="/creators">クリエイター</a><a href="/favorites">お気に入り</a>
+  {% if user %}<a href="/messages">メッセージ</a><a class="market-notice notification-link" href="/notifications" aria-label="通知{% if unread_notification_count %}、未読{{ unread_notification_count }}件{% endif %}">♢{% if unread_notification_count %}<b>{{ unread_notification_count if unread_notification_count < 100 else '99+' }}</b>{% endif %}</a><details class="user-menu market-user"><summary aria-label="アカウントメニュー">{{ user.display_name[:1] }}</summary><div><a href="/mypage"><b>マイページ</b></a><a href="/library">購入ライブラリ</a><a href="/seller">販売管理</a><a href="/seller/transfers">独占譲渡の相談</a><a href="/verification">本人確認</a><a href="/settings">設定</a><form action="/logout" method="post" class="menu-form"><button type="submit">ログアウト</button></form></div></details>
+  {% else %}<a href="/login">ログイン</a><a href="/signup" class="button small market-signup">会員登録</a>{% endif %}
+{% endblock %}
+
+{% block category_nav %}
+<nav class="market-category-nav" aria-label="カテゴリから探す"><div><a href="/tools">☷ カテゴリから探す</a>{% for c in categories[:8] %}<a href="/tools?category={{ c }}">{{ c }}</a>{% endfor %}<a href="/tools">その他</a></div></nav>
+{% endblock %}
+
+{% block content %}
+<div class="market-page">
+  <section class="market-hero">
+    <div class="market-hero-copy">
+      <span class="market-eyebrow"><i></i>個人がつくる、AIツール専門マーケット</span>
+      <h1>高すぎる開発より、<br><em>ちょうどいいAIを。</em></h1>
+      <p>つくれる人と必要な人が直接つながる、AIツール専門の市場です。<br>作者と相談して、納得して、すぐ仕事に使えます。</p>
+      <form class="hero-market-search" action="/tools" method="get" role="search">
+        <label class="sr-only" for="hero-market-search">困りごとからAIツールを検索</label>
+        <span aria-hidden="true">⌕</span><input id="hero-market-search" name="q" type="search" placeholder="どんなことで困っていますか？"><button type="submit">検索</button>
+      </form>
+      <div class="market-popular"><span>人気の検索ワード</span><a href="/tools?q=議事録">議事録</a><a href="/tools?q=SNS">SNS投稿</a><a href="/tools?q=デザイン">デザイン</a><a href="/tools?q=レビュー">コードレビュー</a></div>
+      <div class="hero-assurance"><span>✓ 購入前に相談</span><span>✓ 安全チェック表示</span><span>✓ 取引を運営がサポート</span></div>
+    </div>
+
+    <div class="market-showcase" aria-label="おすすめAIツールのプレビュー">
+      <span class="float-tool float-one">議</span><span class="float-tool float-two">画</span><span class="float-tool float-three">&lt;/&gt;</span><span class="float-tool float-four">文</span>
+      <div class="showcase-window">
+        <header><div><span></span><span></span><span></span></div><small>あなたへのおすすめ</small><em>AI MATCH</em></header>
+        <div class="showcase-list">
+          {% for tool in trending[:3] %}
+          <a href="/tools/{{ tool.slug }}">
+            <span class="showcase-thumb thumb-{{ tool.accent }}">{{ tool.name[:1] }}</span>
+            <span><b>{{ tool.name }}</b><small>{{ tool.tagline }}</small><em>★ {{ tool.rating }}　{{ tool.sales_count }}件販売</em></span>
+            <strong>{% if tool.price_type == 'paid' %}¥{{ '{:,}'.format(tool.price) }}{% else %}{{ price_labels[tool.price_type] }}{% endif %}</strong>
+          </a>
+          {% endfor %}
+        </div>
+        <footer><span><b>AI TOOL CONCIERGE</b> — 用途と予算から3分で絞り込み</span><a href="/match">診断する →</a></footer>
+      </div>
+      <div class="showcase-signal"><span>✓</span><div><b>TOOL PASSPORT</b><small>利用条件・データ取扱いを見える化</small></div></div>
+      <div class="showcase-live"><i></i><span><b>38</b><small>今週の新しい取引</small></span></div>
+    </div>
+  </section>
+
+  <section class="market-proofbar" aria-label="ツールバコの特徴">
+    <div><strong>0円</strong><span>登録・出品の初期費用</span></div><div><strong>10%</strong><span>売れたときだけの手数料</span></div><div><strong>直接相談</strong><span>購入前に作者と話せる</span></div><div><strong>安心表示</strong><span>安全性と利用条件を確認</span></div>
+  </section>
+
+  <section class="market-sale-models"><div class="sale-model-copy"><span>ONE TOOL, THREE WAYS</span><h2>買う。自分向けに変える。<br>事業ごと受け継ぐ。</h2><p>同じAIツールでも、必要な深さは人それぞれ。少額の完成品から独占譲渡まで、取引の重さを分けました。</p></div><div class="sale-model-grid"><a href="/tools"><em>01</em><b>完成品を通常購入</b><small>すぐ使えるツールやプロンプトを、表示価格で購入。</small><span>ツールを探す →</span></a><a href="/requests"><em>02</em><b>自社向けにカスタマイズ</b><small>作者と要件を整理し、見積もり・納期・修正範囲を合意。</small><span>依頼・相談を見る →</span></a><a href="/transfers"><em>03</em><b>ソース・独占権を譲り受ける</b><small>NDA後に詳細を確認し、事業資産として条件交渉。</small><span>独占譲渡を見る →</span></a></div></section>
+
+  <section class="market-section category-market-section">
+    <div class="market-section-head"><div><span>EXPLORE</span><h2>カテゴリから探す</h2><p>やりたいことに近い入口から、ぴったりの道具を。</p></div><a href="/tools">すべてのカテゴリ <b>→</b></a></div>
+    <div class="market-category-grid">
+      {% for c in categories[:6] %}<a href="/tools?category={{ c }}" class="market-category category-{{ loop.index }}"><span>{% if loop.index == 1 %}▣{% elif loop.index == 2 %}文{% elif loop.index == 3 %}◈{% elif loop.index == 4 %}&lt;/&gt;{% elif loop.index == 5 %}↗{% else %}学{% endif %}</span><b>{{ c }}</b><small>{% if category_picks[c] %}{{ category_picks[c].name }} など{% else %}新しいツールを募集中{% endif %}</small><em>→</em></a>{% endfor %}
+    </div>
+  </section>
+
+  <section class="market-section product-market-section">
+    <div class="market-section-head"><div><span>RECOMMENDED</span><h2>いま選ばれているAIツール</h2><p>評価・販売実績・注目度から、いま使われているものを厳選。</p></div><a href="/tools?sort=trending">もっと見る <b>→</b></a></div>
+    <div class="market-card-grid">{% for tool in trending %}{% set market_rank = loop.index %}{% include "_market_card.html" %}{% endfor %}</div>
+  </section>
+
+  <section class="market-route-section">
+    <div class="route-copy"><span>NOT SURE WHERE TO START?</span><h2>欲しいものが決まっていなくても、<br>ちゃんと見つけられます。</h2><p>完成品を探すだけでなく、AI診断や募集から始めることもできます。</p></div>
+    <div class="route-actions"><a href="/match"><span>01</span><div><b>AI診断で探す</b><small>用途と予算に答えておすすめを比較</small></div><em>→</em></a><a href="/requests/new"><span>02</span><div><b>欲しいツールを募集</b><small>まだ世の中にないなら、作れる人と出会う</small></div><em>→</em></a></div>
+  </section>
+
+  <section class="market-section product-market-section newest-market-section">
+    <div class="market-section-head"><div><span>JUST ARRIVED</span><h2>新着のAIツール</h2><p>個人の新しい工夫が、今日も市場に届いています。</p></div><a href="/tools?sort=new">もっと見る <b>→</b></a></div>
+    <div class="market-card-grid">{% for tool in newest[:5] %}{% set market_rank = loop.index %}{% include "_market_card.html" %}{% endfor %}</div>
+  </section>
+
+  <section class="market-trust">
+    <article><span>♢</span><div><b>安心して選べる</b><p>データの扱い・利用環境・ライセンスを購入前に確認できます。</p></div></article>
+    <article><span>☆</span><div><b>実取引にもとづく評価</b><p>購入した人だけがレビューできる、判断しやすい仕組みです。</p></div></article>
+    <article><span>▢</span><div><b>作者と直接メッセージ</b><p>導入前の疑問も、カスタマイズの相談もその場で話せます。</p></div></article>
+    <article><span>◌</span><div><b>困ったときは運営へ</b><p>取引トラブルや使い方の不安を、サポート窓口で受け付けます。</p></div></article>
+  </section>
+
+  <section class="market-seller-cta">
+    <div><span>FOR CREATORS</span><h2>そのツール、誰かの仕事を変えるかもしれない。</h2><p>趣味や自分用につくったAIツールを、自分で決めた価格で販売できます。</p></div><div><a href="/tools/new">無料で出品を始める <b>→</b></a><a href="/requests">募集中の仕事を見る</a></div><span class="seller-visual" aria-hidden="true"><i>ツ</i><i>¥</i><i>↗</i></span>
+  </section>
+</div>
+{% endblock %}

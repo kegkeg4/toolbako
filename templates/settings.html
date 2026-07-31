@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}プロフィール設定 — ツールバコ{% endblock %}
+{% block content %}
+{% set experience = profile_settings.experience[0] if profile_settings.experience else {} %}
+{% set portfolio = profile_settings.portfolio[0] if profile_settings.portfolio else {} %}
+<section class="form-page profile-settings-page">
+  <div class="form-intro"><span class="section-kicker">CREATOR PROFILE</span><h1>プロフィール設定</h1><p>購入前の不安を減らせるように、得意分野・実績・返信目安を伝えましょう。</p>{% if request.query_params.get('saved') %}<p class="success" role="status">プロフィールを保存しました。</p>{% endif %}<a href="/u/{{ user.username }}">公開ページを確認 →</a><br><a href="/settings/blocks">ブロックしたユーザーを管理 →</a></div>
+  <form class="editor-form" method="post">
+    <fieldset class="form-section"><legend>基本情報</legend>
+      <div class="field"><label for="profile-name">表示名</label><input id="profile-name" name="display_name" value="{{ profile_settings.display_name }}" minlength="1" maxlength="60" required autocomplete="name"></div>
+      <div class="field"><label for="profile-headline">肩書き・ひとこと</label><input id="profile-headline" name="headline" value="{{ profile_settings.headline|default('') }}" maxlength="80" placeholder="例：小さな事業のAI導入を、わかりやすく伴走します"></div>
+      <div class="field"><label for="profile-bio">自己紹介</label><textarea id="profile-bio" name="bio" maxlength="600" rows="7">{{ profile_settings.bio|default('') }}</textarea><small>経験、得意な仕事、サポート方針を600文字以内で入力できます。</small></div>
+      <div class="field"><label for="profile-skills">スキル</label><input id="profile-skills" name="skills" value="{{ profile_settings.skills|default([])|join('、') }}" maxlength="310" placeholder="業務自動化、Python、Notion"><small>読点またはカンマ区切り、10件まで。</small></div>
+    </fieldset>
+    <fieldset class="form-section"><legend>受付・料金</legend>
+      <div class="field-row"><div class="field"><label for="profile-availability">受付状況</label><select id="profile-availability" name="availability">{% for item in ['受付中','内容次第','満枠対応中','受付休止中','受付状況未設定'] %}<option {% if profile_settings.availability|default('受付状況未設定')==item %}selected{% endif %}>{{ item }}</option>{% endfor %}</select></div><div class="field"><label for="profile-response">返信目安</label><select id="profile-response" name="response_time">{% for item in ['1時間以内','6時間以内','12時間以内','24時間以内','2日以内','3日以内','未設定'] %}<option {% if profile_settings.response_time|default('未設定')==item %}selected{% endif %}>{{ item }}</option>{% endfor %}</select></div></div>
+      <div class="field"><label for="profile-pricing">料金の目安</label><textarea id="profile-pricing" name="pricing_note" maxlength="240" rows="3" placeholder="例：小さな調整は5,000円から。まずはご相談ください。">{{ profile_settings.pricing_note|default('') }}</textarea></div>
+    </fieldset>
+    <fieldset class="form-section"><legend>経歴・経験</legend>
+      <div class="field"><label for="experience-title">名称</label><input id="experience-title" name="experience_title" value="{{ experience.title|default('') }}" maxlength="80" placeholder="例：AI業務改善支援"></div>
+      <div class="field"><label for="experience-period">期間</label><input id="experience-period" name="experience_period" value="{{ experience.period|default('') }}" maxlength="40" placeholder="例：2024年〜現在"></div>
+      <div class="field"><label for="experience-detail">内容</label><textarea id="experience-detail" name="experience_detail" maxlength="240" rows="3">{{ experience.detail|default('') }}</textarea></div>
+    </fieldset>
+    <fieldset class="form-section"><legend>制作実績・ポートフォリオ</legend>
+      <div class="field"><label for="portfolio-title">実績名</label><input id="portfolio-title" name="portfolio_title" value="{{ portfolio.title|default('') }}" maxlength="80"></div>
+      <div class="field"><label for="portfolio-url">実績URL</label><input id="portfolio-url" name="portfolio_url" type="url" value="{{ portfolio.url|default('') }}" placeholder="https://example.com"></div>
+      <div class="field"><label for="portfolio-summary">説明</label><textarea id="portfolio-summary" name="portfolio_summary" maxlength="240" rows="3">{{ portfolio.summary|default('') }}</textarea></div>
+    </fieldset>
+    <fieldset class="form-section"><legend>外部リンク</legend>
+      <div class="field"><label for="profile-x">X URL</label><input id="profile-x" name="x_url" type="url" value="{{ profile_settings.x_url|default('') }}" placeholder="https://x.com/username"></div>
+      <div class="field"><label for="profile-website">Webサイト</label><input id="profile-website" name="website_url" type="url" value="{{ profile_settings.website_url|default('') }}" placeholder="https://example.com"></div>
+    </fieldset>
+    <button class="button full">保存する</button>
+  </form>
+</section>
+{% endblock %}

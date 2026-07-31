@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}定期契約 — ツールバコ{% endblock %}
+{% block content %}
+<section class="simple-suite">
+  <header><span class="section-kicker">SUBSCRIPTIONS</span><h1>定期契約</h1><p>月額AIツールの次回請求と解約を管理できます。</p></header>
+  {% if request.query_params.get('cancelled') %}<div class="purchase-complete" role="status"><span>✓</span><b>次回更新を停止しました。現在の期間末までは利用できます。</b></div>{% endif %}
+  <div class="settings-list">
+    {% for item in subscriptions %}
+    <article>
+      <div><b>{{ item.tool_name }}</b><p>{% if item.status=='active' and item.cancel_at_period_end|default(false) %}{{ item.next_billing_at.strftime('%Y/%m/%d') }} に終了予定{% elif item.status=='active' %}次回請求：{{ item.next_billing_at.strftime('%Y/%m/%d') }}{% elif item.status=='pending' %}初回決済の確認中{% elif item.status=='past_due' %}お支払い方法の確認が必要です{% else %}解約済み{% endif %}{% if item.last_paid_at %}<br><small>最終支払：{{ item.last_paid_at.strftime('%Y/%m/%d') }}</small>{% endif %}</p></div>
+      <strong>月 ¥{{ '{:,}'.format(item.amount) }}</strong>
+      <span class="state-{{ 'verified' if item.status=='active' and not item.cancel_at_period_end|default(false) else ('pending' if item.status in ['pending','past_due'] or item.cancel_at_period_end|default(false) else 'not_started') }}">{% if item.status=='active' and item.cancel_at_period_end|default(false) %}解約予約済み{% else %}{{ {'active':'契約中','pending':'確認中','past_due':'支払い要確認','cancelled':'解約済み','expired':'期限切れ'}.get(item.status,item.status) }}{% endif %}</span>
+      {% if item.status=='active' and not item.cancel_at_period_end|default(false) %}<form action="/subscriptions/{{ item.id }}/cancel" method="post"><button class="outline-button">次回更新を停止</button></form>{% elif item.status=='past_due' %}<a class="outline-button" href="/support">決済について相談</a>{% endif %}
+    </article>
+    {% else %}<div class="mp-empty large"><b>定期契約はありません</b><p>月額プラン対応商品は購入画面で選べます。</p><a href="/tools">ツールを探す →</a></div>{% endfor %}
+  </div>
+</section>
+{% endblock %}

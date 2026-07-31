@@ -1,0 +1,71 @@
+<section id="finance" class="ops-section finance-console">
+  <div class="ops-section-head">
+    <div>
+      <h2>売上・手数料・振込管理</h2>
+      <p>合同会社ONEが決済を仲介し、取引完了後に販売手数料を差し引いた金額を販売者の振込対象にします。</p>
+    </div>
+    <span>{{ finance.sellers|length }}販売者</span>
+  </div>
+  <div class="finance-flow-note">
+    <b>購入代金 → 取引中は保留 → 納品承諾 → 手数料確定 → 販売者へ振込</b>
+    <small>返金・カード異議申立て・本人確認未完了・運営保留中の売上は振込対象外です。本番値はStripeと台帳を照合します。</small>
+  </div>
+  <div class="finance-kpis">
+    <article><small>決済済み総額</small><b>¥{{ '{:,}'.format(finance.gross_paid) }}</b><span>決済確認済み</span></article>
+    <article><small>確定GMV</small><b>¥{{ '{:,}'.format(finance.completed_gmv) }}</b><span>取引完了分</span></article>
+    <article><small>ONE販売手数料（総額）</small><b>¥{{ '{:,}'.format(finance.platform_fee_earned) }}</b><span>決済手数料 ¥{{ '{:,}'.format(finance.processor_fee_total) }} を別途照合</span></article>
+    <article><small>振込可能額</small><b>¥{{ '{:,}'.format(finance.available_to_payout) }}</b><span>販売者合計</span></article>
+    <article><small>取引中保留</small><b>¥{{ '{:,}'.format(finance.held) }}</b><span>納品・承諾待ち</span></article>
+    <article><small>返金・口座保留</small><b>¥{{ '{:,}'.format(finance.refund_total + finance.disputed_total + finance.blocked_for_payout) }}</b><span>振込除外・確認待ち</span></article>
+  </div>
+
+  <h3>販売者別の売上残高</h3>
+  <div class="finance-table seller-finance-table">
+    <div class="finance-row finance-head"><span>販売者</span><span>確定売上</span><span>手数料</span><span>振込可能</span><span>取引中</span><span>口座</span><span>操作</span></div>
+    {% for seller in finance.sellers %}
+    <div class="finance-row">
+      <span><b>{{ seller.seller_name }}</b><small>{{ seller.orders }}件</small></span>
+      <span>¥{{ '{:,}'.format(seller.gross) }}</span>
+      <span>¥{{ '{:,}'.format(seller.platform_fee) }}</span>
+      <span><b>¥{{ '{:,}'.format(seller.payout_eligible) }}</b><small>確定残高 ¥{{ '{:,}'.format(seller.available) }}／振込済 ¥{{ '{:,}'.format(seller.paid_out) }}</small></span>
+      <span>¥{{ '{:,}'.format(seller.held) }}</span>
+      <span class="finance-state state-{{ seller.connect_status }}">{{ {'ready':'有効','reviewing':'審査中','not_connected':'未接続'}[seller.connect_status] }}</span>
+      <span>
+        {% if finance_controls_ready %}
+          <form action="/admin/sellers/{{ seller.seller_id }}/payouts/{{ 'release' if seller.payouts_paused else 'hold' }}" method="post">
+            <button data-confirm="販売者への振込を{{ '再開' if seller.payouts_paused else '保留' }}します。よろしいですか？">{{ '振込を再開' if seller.payouts_paused else '振込を保留' }}</button>
+          </form>
+          {% if seller.payouts_paused %}<small class="hold-label">運営保留中</small>{% endif %}
+        {% else %}
+          <small class="control-unavailable">本番接続後に操作可能</small>
+        {% endif %}
+      </span>
+    </div>
+    {% else %}<p>決済済みの取引はありません。</p>{% endfor %}
+  </div>
+
+  <details class="finance-details">
+    <summary>取引別の決済台帳を表示</summary>
+    <div class="finance-table transaction-finance-table">
+      <div class="finance-row finance-head"><span>注文</span><span>販売者</span><span>購入額</span><span>手数料</span><span>販売者分</span><span>資金状態</span></div>
+      {% for order in finance.transactions %}
+      <div class="finance-row">
+        <span><b>{{ order.tool_name }}</b><small>{{ order.id[:8] }}</small></span>
+        <span>{{ order.seller_name }}</span>
+        <span>¥{{ '{:,}'.format(order.amount) }}</span>
+        <span>¥{{ '{:,}'.format(order.platform_fee) }}</span>
+        <span>¥{{ '{:,}'.format(order.seller_net) }}</span>
+        <span class="fund-state fund-{{ order.fund_state }}">{{ {'available':'振込可能','payout_blocked':'口座・運営保留','held':'取引中保留','refunded':'返金済み','disputed':'異議申立て','payment_pending':'決済待ち','cancelled':'取消'}[order.fund_state] }}</span>
+      </div>
+      {% endfor %}
+    </div>
+  </details>
+
+  <details class="finance-details">
+    <summary>振込履歴を表示</summary>
+    <div class="finance-table payout-finance-table">
+      <div class="finance-row finance-head"><span>振込ID</span><span>販売者</span><span>金額</span><span>状態</span><span>受付日時</span></div>
+      {% for payout in finance.payouts %}<div class="finance-row"><span>{{ payout.id[:8] }}</span><span>{{ payout.seller_id }}</span><span>¥{{ '{:,}'.format(payout.amount) }}</span><span>{{ payout.status }}</span><span>{{ payout.created_at.strftime('%Y/%m/%d %H:%M') }}</span></div>{% else %}<p>振込履歴はありません。</p>{% endfor %}
+    </div>
+  </details>
+</section>

@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block title %}取引ルーム — {{ order.tool_name }}{% endblock %}
+{% block content %}
+<section class="transaction-page">
+  <header class="transaction-head">
+    <div><a href="{{ '/purchases' if user.id==order.buyer_id else '/seller' }}">← 取引一覧</a><span class="status-pill status-{{ order.status }}">{{ status_labels[order.status] }}</span><h1>{{ order.tool_name }}</h1><p>販売者：{{ order.seller_name }}　注文番号：{{ order.id[:8] }}</p></div>
+    <div class="transaction-price"><small>お支払い金額</small><b>¥{{ '{:,}'.format(order.amount) }}</b></div>
+  </header>
+  <div class="transaction-layout">
+    <section class="room">
+      <div class="flow-stepper"><span class="done">1<small>購入</small></span><i></i><span class="{% if order.status != 'in_progress' %}done{% endif %}">2<small>制作・準備</small></span><i></i><span class="{% if order.status in ['awaiting_acceptance','completed'] %}done{% endif %}">3<small>正式な納品</small></span><i></i><span class="{% if order.status == 'completed' %}done{% endif %}">4<small>承諾・評価</small></span></div>
+      {% if order.status=='awaiting_acceptance' %}
+      <div class="delivery-alert"><span>📦</span><div><b>正式な納品が届きました</b><p>{% if user.id==order.buyer_id %}内容を確認し、問題なければ承諾してください。修正は1回まで依頼できます。{% else %}購入者の確認を待っています。{% endif %}{% if order.auto_close_at %}<br>{{ order.auto_close_at.strftime('%Y/%m/%d %H:%M') }}までに操作がない場合は自動完了します。{% endif %}</p></div></div>
+      {% elif order.status=='cancel_pending' %}
+      <div class="cancel-alert"><b>キャンセルリクエスト</b><p>{{ order.cancel_reason }}</p>{% if order.cancel_requested_by != user.id %}<div><form action="/orders/{{ order.id }}/actions/cancel_accept" method="post"><button>キャンセルに合意</button></form><form action="/orders/{{ order.id }}/actions/cancel_reject" method="post"><button>差し戻す</button></form></div>{% else %}<small>取引相手の回答を待っています。</small>{% endif %}</div>
+      {% elif order.status=='completed' %}
+      <div class="complete-alert"><b>✓ 取引が完了しました</b><p>{% if room_open %}納品承諾済みです。{{ order.room_closes_at.strftime('%Y/%m/%d %H:%M') }}まではルームで連絡できます。{% elif order.auto_completed|default(false) %}正式納品から3日が経過したため、自動的にクローズしました。{% else %}取引ルームはクローズしました。ご利用ありがとうございました。{% endif %}</p></div>
+      {% endif %}
+
+      <div class="room-timeline">
+        <div class="system-event"><span>取引開始</span><p>支払いが完了し、取引ルームがオープンしました。</p><time>{{ order.created_at.strftime('%Y/%m/%d %H:%M') }}</time></div>
+        {% for m in order.messages %}<div class="room-message {% if m.sender_id==user.id %}mine{% endif %}"><span class="avatar">{{ m.sender_name[:1] }}</span><div><b>{{ m.sender_name }}</b><p>{{ m.body }}</p><time>{{ m.created_at.strftime('%m/%d %H:%M') }}</time></div></div>{% endfor %}
+        {% if order.delivery %}<article class="delivery-card"><div><span>正式な納品 v{{ order.delivery.version }}</span><time>{{ order.delivery.created_at.strftime('%Y/%m/%d %H:%M') }}</time></div><p>{{ order.delivery.note }}</p>{% for file in order.delivery.files|default([]) %}<a class="delivery-file" href="/orders/{{ order.id }}/files/{{ file.id }}">✓ {{ file.name }}（安全検査済み・{{ (file.size/1024)|round }}KB）</a>{% else %}<span class="delivery-file">✓ 納品内容を記録しました</span>{% endfor %}</article>{% endif %}
+      </div>
+      {% if room_open %}<form class="room-form" action="/orders/{{ order.id }}/message" method="post"><label class="sr-only" for="order-message">取引相手へのメッセージ</label><textarea id="order-message" name="body" maxlength="1000" required placeholder="取引相手にメッセージを送る"></textarea><div><button class="button">送信</button></div></form>{% endif %}
+    </section>
+
+    <aside class="transaction-side">
+      <div class="side-panel"><h3>取引メニュー</h3>
+        {% if order.status=='awaiting_acceptance' and user.id==order.buyer_id %}<form action="/orders/{{ order.id }}/actions/accept" method="post"><button class="button full">納品を承諾する</button></form>{% if order.revision_count < 1 %}<form action="/orders/{{ order.id }}/actions/revise" method="post"><button class="outline-button full">修正を依頼する</button></form>{% endif %}
+        {% elif order.status=='in_progress' and user.id==order.seller_id %}<form class="delivery-form" action="/orders/{{ order.id }}/deliver" method="post" enctype="multipart/form-data"><label for="delivery-note">正式な納品</label><textarea id="delivery-note" name="note" required placeholder="納品物・導入手順・ライセンス情報を記載"></textarea><label for="delivery-file">納品ファイル（任意・50MBまで）</label><input id="delivery-file" class="delivery-upload" type="file" name="delivery_file" accept=".zip,.pdf,.txt,.md,.json,.csv,.py,.js,.ts,.html,.css,.png,.jpg,.jpeg,.webp"><small>ZIPは展開容量と危険なパスも検査します。</small><button class="button full">安全検査して正式納品</button></form>
+        {% else %}<div class="waiting-box"><b>{{ '出品者が対応中です' if user.id==order.buyer_id and order.status!='completed' else ('購入者の確認待ちです' if order.status!='completed' else '取引記録を確認できます') }}</b><p>{{ 'ルームで連絡できます。' if room_open else 'クローズ後も帳票と納品物を確認できます。' }}</p></div>{% if demo_mode and order.status=='in_progress' and user.id==order.buyer_id %}<form action="/orders/{{ order.id }}/demo-deliver" method="post"><input type="hidden" name="note" value="ツール本体、導入手順書、ライセンス情報を納品します。内容をご確認ください。"><button class="demo-action full">デモ：出品者から納品を受け取る</button></form>{% endif %}{% endif %}
+        {% if order.status in ['in_progress','awaiting_acceptance'] %}<details class="cancel-box"><summary>取引をキャンセルしたい</summary><form action="/orders/{{ order.id }}/actions/cancel_request" method="post"><label class="sr-only" for="cancel-reason">キャンセル理由</label><textarea id="cancel-reason" name="reason" required placeholder="キャンセル理由"></textarea><button>リクエストを送る</button></form></details>{% endif %}
+        <details class="dispute-box"><summary>{{ '運営が調査中です' if order.dispute_status|default('') in ['open','investigating'] else '解決できない問題を運営へ相談' }}</summary>{% if order.dispute_status|default('') in ['open','investigating'] %}<p>取引記録を保全し、運営が確認しています。</p>{% else %}<form action="/orders/{{ order.id }}/dispute" method="post"><label class="sr-only" for="dispute-detail">紛争申請の詳細</label><textarea id="dispute-detail" name="detail" minlength="20" maxlength="2000" required placeholder="相手と話し合った内容、問題点、希望する対応を入力"></textarea><button>紛争申請を送る</button></form>{% endif %}</details>
+      </div>
+
+      <div class="side-panel"><h3>取引情報</h3><dl><dt>購入日</dt><dd>{{ order.created_at.strftime('%Y/%m/%d') }}</dd><dt>販売者</dt><dd>{{ order.seller_name }}</dd><dt>お支払い</dt><dd>{{ '月額契約' if order.billing_type|default('one_time')=='subscription' else 'クレジットカード' }}</dd>{% if order.delivery_days %}<dt>予定納期</dt><dd>{{ order.delivery_days }}日以内</dd>{% endif %}{% if order.extras|default([]) %}<dt>追加支払い</dt><dd>¥{{ '{:,}'.format(order.extras|sum(attribute='amount')) }}</dd>{% endif %}</dl></div>
+
+      <div class="side-panel document-links"><h3>取引書類</h3><a href="/orders/{{ order.id }}/documents/estimate">見積書</a><a href="/orders/{{ order.id }}/documents/purchase-order">発注書</a>{% if order.delivery %}<a href="/orders/{{ order.id }}/documents/delivery-note">納品書</a>{% endif %}{% if user.id==order.buyer_id and order.status=='completed' %}<a href="/orders/{{ order.id }}/receipt">領収書</a>{% endif %}</div>
+
+      {% if user.id==order.buyer_id and order.status=='completed' %}<details class="side-panel extra-pay"><summary>追加支払い・チップ</summary><p>追加対応や丁寧なサポートへのお支払いに使えます。</p><form action="/orders/{{ order.id }}/extra-payment" method="post"><label for="extra-amount">追加支払い金額</label><input id="extra-amount" type="number" name="amount" min="100" max="100000" value="500" required><label for="extra-note">支払い理由</label><input id="extra-note" name="note" minlength="1" maxlength="200" value="追加対応へのお礼" required><button class="button full">追加で支払う</button></form></details>{% endif %}
+
+      {% if user.id==order.buyer_id and order.status=='completed' and review_open and not order.reviewed %}
+      <form class="review-panel" action="/orders/{{ order.id }}/submit-review" method="post"><h3>販売者とツールを評価</h3><p class="blind-review-note">相手の評価入力完了または評価期限後に公開されます。</p><div class="rating-input">{% for n in range(5,0,-1) %}<input id="star{{n}}" type="radio" name="rating" value="{{n}}" required><label for="star{{n}}" aria-label="{{ n }}つ星">★</label>{% endfor %}</div><div class="private-ratings"><small>以下は販売者への改善用（非公開）</small><label>やり取り<select name="communication">{% for n in range(5,0,-1) %}<option value="{{n}}">{{n}}</option>{% endfor %}</select></label><label>説明の正確さ<select name="accuracy">{% for n in range(5,0,-1) %}<option value="{{n}}">{{n}}</option>{% endfor %}</select></label><label>納期<select name="on_time">{% for n in range(5,0,-1) %}<option value="{{n}}">{{n}}</option>{% endfor %}</select></label></div><label class="sr-only" for="review-comment">公開する感想（任意）</label><textarea id="review-comment" name="comment" maxlength="500" placeholder="公開される感想"></textarea><button class="button full">評価を送信</button></form>
+      {% elif user.id==order.seller_id and order.status=='completed' and review_open and not order.buyer_reviewed|default(false) %}
+      <form class="review-panel" action="/orders/{{ order.id }}/submit-buyer-review" method="post"><h3>購入者を評価</h3><p class="blind-review-note">取引の安心・改善に使う相互評価です。</p><div class="rating-input">{% for n in range(5,0,-1) %}<input id="buyer-star{{n}}" type="radio" name="rating" value="{{n}}" required><label for="buyer-star{{n}}" aria-label="{{ n }}つ星">★</label>{% endfor %}</div><div class="private-ratings"><small>詳細項目は運営改善用（非公開）</small><label>要望の明確さ<select name="clarity">{% for n in range(5,0,-1) %}<option value="{{n}}">{{n}}</option>{% endfor %}</select></label><label>やり取り<select name="communication">{% for n in range(5,0,-1) %}<option value="{{n}}">{{n}}</option>{% endfor %}</select></label><label>スケジュール<select name="schedule">{% for n in range(5,0,-1) %}<option value="{{n}}">{{n}}</option>{% endfor %}</select></label></div><label class="sr-only" for="buyer-review-comment">購入者へのコメント（任意）</label><textarea id="buyer-review-comment" name="comment" maxlength="500" placeholder="購入者へのコメント"></textarea><button class="button full">評価を送信</button></form>
+      {% elif order.status=='completed' and (order.reviewed if user.id==order.buyer_id else order.buyer_reviewed|default(false)) %}<div class="side-panel reviewed"><b>✓ 評価を送信済みです</b><p>相手の入力完了または評価期限後に結果が確定します。</p></div>{% endif %}
+    </aside>
+  </div>
+</section>
+{% endblock %}

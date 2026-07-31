@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}{{ job.title }} — 募集{% endblock %}
+{% block content %}
+<section class="job-detail">
+  <div class="job-detail-main">
+    <div class="breadcrumbs"><a href="/requests">募集一覧</a><span>/</span>{{ job.category }}</div>
+    {% if request.query_params.get('applied') %}<div class="purchase-complete" role="status"><span>✓</span><b>応募を送信しました</b></div>{% endif %}
+    <span class="status-pill status-completed">{{ '募集中' if job.status=='open' else '契約済み' }}</span>
+    <h1>{{ job.title }}</h1>
+    <div class="job-owner"><span class="avatar">{{ job.owner_name[:1] }}</span>{{ job.owner_name }}<small>{{ job.created_at.strftime('%Y/%m/%d') }} 投稿</small></div>
+    <article><h2>依頼内容</h2><p>{{ job.detail }}</p></article>
+    {% if user and user.id==job.owner_id and job.application_list %}
+    <section class="application-compare"><h2>届いた応募を比較</h2>
+      {% for a in job.application_list %}<article><div><span class="avatar">{{ a.applicant_name[:1] }}</span><b>{{ a.applicant_name }}</b></div><p>{{ a.message }}</p><dl><dt>提案価格</dt><dd>¥{{ '{:,}'.format(a.amount) }}</dd><dt>納期</dt><dd>{{ a.delivery_days }}日</dd></dl>{% if a.status=='submitted' %}<form action="/requests/{{ job.id }}/applications/{{ a.id }}/select" method="post"><button class="button full">採用して購入</button></form>{% else %}<span class="status-pill status-completed">採用済み</span>{% endif %}</article>{% endfor %}
+    </section>{% endif %}
+  </div>
+  <aside><div class="side-panel"><h3>募集条件</h3><dl><dt>予算</dt><dd>¥{{ '{:,}'.format(job.budget_min) }}〜<br>¥{{ '{:,}'.format(job.budget_max) }}</dd><dt>応募数</dt><dd>{{ job.applications }}件</dd><dt>期限</dt><dd>{{ job.deadline }}</dd></dl></div>
+    {% if job.status=='open' and user and user.id!=job.owner_id %}<form class="apply-panel" action="/requests/{{ job.id }}/apply" method="post"><h3>この仕事に応募</h3><label for="apply-message">対応方法や実績</label><textarea id="apply-message" name="message" minlength="3" maxlength="1000" required></textarea><label for="apply-amount">提案価格</label><input id="apply-amount" type="number" name="amount" min="100" max="10000000" required><label for="apply-days">納期（日）</label><input id="apply-days" type="number" name="delivery_days" min="1" max="120" value="7" required><button class="button full">応募を送信</button></form>
+    {% elif job.status=='open' and not user %}<div class="apply-panel"><h3>応募するにはログイン</h3><p>ログイン後、この募集へ提案価格と納期を送れます。</p><a class="button full" href="/login?next=/requests/{{ job.id }}">ログインして応募</a></div>{% endif %}
+  </aside>
+</section>
+{% endblock %}

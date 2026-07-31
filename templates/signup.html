@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}会員登録 — ツールバコ{% endblock %}
+{% block content %}
+<section class="auth-page"><div class="auth-card signup-card"><img class="auth-brand-icon" src="/static/brand/toolbako-icon.png?v={{ asset_version }}" width="192" height="192" alt="ツールバコ"><h1>無料で会員登録</h1><p>ツールの購入・販売・募集ができるようになります。</p>
+  <a class="oauth x" href="/auth/oauth/twitter?next={{ next|urlencode }}"><b>𝕏</b> X で登録</a><a class="oauth" href="/auth/oauth/google?next={{ next|urlencode }}"><b>G</b> Google で登録</a><div class="auth-divider"><span>またはメールで登録</span></div>
+  <form method="post"><input type="hidden" name="next" value="{{ next }}"><div class="field-row">
+    <div class="field"><label for="signup-name">表示名</label><input id="signup-name" name="display_name" maxlength="60" required autocomplete="name"></div>
+    <div class="field"><label for="signup-username">ユーザー名</label><input id="signup-username" name="username" pattern="[A-Za-z0-9_]{3,30}" maxlength="30" required autocomplete="username"></div></div>
+    <div class="field"><label for="signup-email">メールアドレス</label><input id="signup-email" type="email" name="email" maxlength="254" required autocomplete="email"></div>
+    <div class="field"><label for="signup-password">パスワード</label><input id="signup-password" type="password" name="password" minlength="10" maxlength="128" required autocomplete="new-password" data-password-input><small>10文字以上。ほかのサービスと異なるものを使用してください。</small></div>
+    <div class="field"><label for="signup-password-confirm">パスワード（確認）</label><input id="signup-password-confirm" type="password" name="password_confirmation" minlength="10" maxlength="128" required autocomplete="new-password" data-password-input></div>
+    <label class="password-toggle"><input type="checkbox" data-password-toggle> パスワードを表示する</label>
+    <label class="agreement"><input type="checkbox" name="terms_agreement" value="yes" required><span><a href="/terms" target="_blank" rel="noopener">利用規約</a>と<a href="/privacy" target="_blank" rel="noopener">プライバシーポリシー</a>（2026-07-22版）に同意します。</span></label>
+    <button class="button large full">アカウントを作成</button>
+  </form><small>登録済みですか？ <a href="/login?next={{ next|urlencode }}">ログイン</a></small>
+</div></section>
+{% endblock %}

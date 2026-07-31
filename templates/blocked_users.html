@@ -1,0 +1,6 @@
+{% extends "base.html" %}
+{% block title %}ブロックしたユーザー — ツールバコ{% endblock %}
+{% block content %}
+<section class="simple-suite"><header class="suite-head-row"><div><span class="section-kicker">PRIVACY</span><h1>ブロックしたユーザー</h1><p>ブロック中は、お互いに購入・応募・フォロー・メッセージを行えません。進行中の取引ルームは安全な完了のため利用できます。</p></div><a class="outline-button" href="/settings">設定へ戻る</a></header>
+<div class="settings-list">{% for item in blocked_users %}<article><div><b>{{ item.display_name }}</b><p>@{{ item.username }}</p></div><form action="/u/{{ item.username }}/block" method="post"><input type="hidden" name="return_to" value="blocks"><button class="outline-button">ブロックを解除</button></form></article>{% else %}<div class="empty"><b>ブロック中のユーザーはいません</b><p>安心して利用できない相手は、プロフィールからブロックできます。</p></div>{% endfor %}</div></section>
+{% endblock %}
