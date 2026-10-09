@@ -20,6 +20,7 @@
 
 - [x] 間接依存を含むハッシュ付きrequirementsを固定し、空のPython 3.12環境からの再インストールと互換性・脆弱性監査を確認する
 - [x] 外部監視の送信前allowlist、添付除外、自動telemetry停止、問い合わせ番号のサーバー生成、URL access log停止をコードとテストで確認する
+- [x] Supabaseの現行opaqueキー・旧JWTキーの互換性、ユーザーJWT分離、設定優先順をコード・Mockで検証する（実キーでの疎通は未完了）
 - [ ] 隔離したSupabase環境でSQLの依存関係・適用・RLS試験を行い、確認済みの手順だけを本番へ適用する
 - [x] 全ルートで利用するPostgres互換repositoryを実装（本番接続・高負荷対策は未完了。単発売上の金融テーブルは別に正規化）
 - [x] 注文作成・Webhook claim・状態更新・監査ログ・通知メールoutboxを同一DBトランザクションにする（ローカル実Postgresで検証）

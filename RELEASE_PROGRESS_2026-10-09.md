@@ -29,6 +29,8 @@ RailwayはStart Commandが管理画面側で上書きされていたため、コ
 
 今回起動したローカル試験用PostgreSQLは試験後に停止した。ユーザーの8000番開発サーバーは操作していない。
 
+Supabaseキー互換修正のコードcommitは`a92c9a74e4acc53cfbed7791f0eabfb79299d0d0`、全tree `a0d387f21cdcd7ebb61e49711a920fd1cb720c57`はローカルと一致。[最新のLinux外部CI](https://github.com/kegkeg4/toolbako/actions/runs/37956850480)は **282 passed / 2 warnings / 11.79秒、success**。上記パッチのcommitShaをこの版へ更新。APIのsource再設定により表示件数は5フィールドとなったが、有効な値変更はcommitShaとStart Commandの2件で、他3件は同一branch／repoと空imageの再設定。既存webだけ、destructive=false、変数変更なし。キー未入力でaccept-deployは実行していない。サーバー用キーは、既存sealed `SUPABASE_SERVICE_ROLE_KEY`へ旧service_roleまたは新しいsecret keyを直接再入力できる。新変数名を使う場合は`SUPABASE_SECRET_KEY`も対応するが、サーバーの秘密変数として保護すること。チャット・公開コードへ貼らない。
+
 - Python 3.12.13と実ローカルPostgreSQL 17で **249 passed / 2 warnings / 15.37秒**。Stripe・Supabase Auth・メール等のHTTP APIはMock。ログ抑制修正前の版も248件合格。
 - 直接依存をバージョン固定した検証環境の39パッケージの互換性確認、`pip-audit`の公開DB照会（既知脆弱性なし）、全差分の`git diff --check`に合格。推移的依存の完全なlockfileはまだない。警告2件はテストクライアントの非推奨API。未知の脆弱性がないことは保証しない。
 - Sandboxの結果不明Transfer／銀行Payoutについて、元のリクエスト・金額・口座・source・metadataをGETで照合する復旧処理を追加。別管理者、MFA、30分の有効期限、二重送金拒否、監査記録・DB原子性を検証。残高は確認中も予約し、再送しない。Checkout・返金・reversalの結果不明は未対応。

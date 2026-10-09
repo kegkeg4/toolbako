@@ -4,13 +4,15 @@
 
 同日の追加：Supabase新旧APIキー互換対応後の最新ローカル証拠は **282 passed / 2 warnings / 15.51秒**。空の環境から構成した同じPython 3.12.13・実PostgreSQL 17を使用。opaque APIキーを誤ってBearer JWTとして送らないこと、ユーザーJWTの分離、新変数名の優先順、キー種類の取り違えを通信前に拒否する14件を追加。キー自体の発行・失効・実プロジェクトでの新キー疎通は行っていない。下記268件はこの追加前の確認済み証拠。
 
+最新コードの[Linux外部CI](https://github.com/kegkeg4/toolbako/actions/runs/37956850480)も **282 passed / 2 warnings / 11.79秒、success**。ハッシュ付きインストール・`pip check`・実PostgreSQL 17を使用し、外部Auth／Stripe／メール等はMock。
+
 - 空のPython 3.12.13環境へ、間接依存も含むハッシュ付き固定requirementsから39パッケージを新規インストール。実ローカルPostgreSQL 17で **268 passed / 2 warnings / 14.48秒**。Auth・Stripe・メールはMockで、実サービスE2Eではない。
 - `uv pip check`で39パッケージの互換性確認に合格。ハッシュ付きrequirementsへの`pip-audit --disable-pip --no-deps --strict`は公開DB上の既知脆弱性なし。未知の脆弱性・未試験プラットフォームの動作を保証しない。
 - 外部Sentryへ送るイベントをallowlistから再構築。例外本文、URL、Query、Cookie、Header、ユーザー情報、scope extras、breadcrumb、変数、ソース行、添付を除外し、自動integration／trace／profiling／log／metrics／sessionを停止。実SDKのシリアライズ済みenvelopeを含む15件を追加。実Sentryへの通信・通知は未試験。
 - 呼出者指定の問い合わせ番号を廃止し、サーバーのUUIDを使用。監視障害が安全な500応答を壊さないことと、設定エラーがDSNをログへ出さないことを検証。
 - OAuth codeなどのURL情報が標準access logに残らないようRailway／Procfileへ`--no-access-log`を追加。配備先の上書きStart Commandとproxyログは実環境での反映・確認が必要。
 - 直接依存とlockの一致、全パッケージのバージョン／ハッシュ、本番とテストlockの一致、CIハッシュ必須設定の3件を追加。[Linuxの外部CI](https://github.com/kegkeg4/toolbako/actions/runs/37955305762)もハッシュ付きインストール・`pip check`・実PostgreSQL 17で **268 passed / 2 warnings / 14.46秒、success**。
-- **公開NO-GOを継続**。Railwayへ検証済みcommit `9b8e786b72594164e75b6c088e7971ffb0b866e4`と安全なStart Commandの2件をSTAGEDで準備。未反映で、再配備はしていない。前回配備の実行時service_roleキーは空で、ユーザーの再入力・実DB／Auth試験を待つ。キー以外の金融復旧・実決済等の残課題も変更なし。
+- **公開NO-GOを継続**。Railwayへ検証済みcommit `a92c9a74e4acc53cfbed7791f0eabfb79299d0d0`と安全なStart CommandをSTAGEDで準備。パッチは5フィールドだが、有効な値変更はcommitSha／Start Commandの2件、他は同じrepo／branchと空imageの再設定。未反映で、再配備はしていない。前回配備の実行時service_roleキーは空で、ユーザーの再入力・実DB／Auth試験を待つ。キー以外の金融復旧・実決済等の残課題も変更なし。
 
 ## 2026-10-09 リリース準備の再検証（履歴）
 
