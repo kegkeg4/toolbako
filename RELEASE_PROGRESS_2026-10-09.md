@@ -6,7 +6,16 @@
 
 運営主体は合同会社ONE。既存のRailway `rare-manifestation` / `web`を使用し、新しい有料サービスは作成しない。会員・取引用のSupabaseはユーザー確認済みのプロジェクトを使用。秘密値はソース・記録・チャットに載せず、封印済み変数は取得しない。
 
-## 10/10：サーバー用キー入力後の実接続（最新）
+## 10/10：DBパスワード入力後の実接続（最新）
+
+- ユーザー入力後の反映待ちは既存webの封印済み`PGPASSWORD`更新1件だけ。削除・別サービス・共有変数変更なしを確認し、反映した。値は取得していない。
+- deployment `81b64aa5-3be5-4ce3-a24c-f9f9e588611e`は実行時`environment_password_present=true`となり、パスワード未注入は解消。ただし`database_schema=false`でPre-deploy停止。Auth／profiles／badge API・匿名profiles拒否は合格のまま。実buildは`94eb4078600484943a8af6d38fd2b8a9375282d1`（検証済み287190c8と同じコード、記録だけ追加）。
+- Supabaseの実Connect画面でSession poolerのホスト・ポート5432・ユーザーを確認。従来の接続先と一致し、地域からホストを推測して変更していない。パスワードreset・キー再発行・スキーマ／権限変更なし。
+- DB接続・スキーマ失敗へ固定allowlistの原因コードだけをログに追加。SQLSTATEと既知の接続失敗シグネチャをメモリ内で分類し、例外本文・DSN・ホスト・ユーザー・パスワード・tracebackは出さない。認証失敗と判明する前にパスワード不正とは断定しない。
+- 41件の原因分類・秘密情報非出力試験を追加。Python 3.12.13・専用実ローカルPostgreSQL 17で **335 passed / 2 warnings / 22.41秒**、DB試験skipなし。外部Auth・Stripe・メールはMock。試験用PostgreSQLは停止済み。
+- この追加診断はまだ配備前。新版未稼働、**本番決済NO-GO継続**。以下のパスワード入力待ちは前段階の履歴。
+
+## 10/10：サーバー用キー入力後の実接続（履歴）
 
 - ユーザーの入力完了後、反映待ちは既存webのコードcommit、`--no-access-log`、封印済み`SUPABASE_SERVICE_ROLE_KEY`の3件だけで、削除・別サービス変更なしと確認して配備した。キー値は取得していない。
 - deployment `67ecbb98-12d7-4164-bc01-9493eb31c9a0`はビルド後、Pre-deployで停止。実際のbuildはbranch最新`90c8528e2d4785b4c1712502635712261949462c`（コードは検証済みa92c9a74と同一、ドキュメントだけ追加）だった。[同commitの外部CI](https://github.com/kegkeg4/toolbako/actions/runs/37957421402)もsuccessを確認。

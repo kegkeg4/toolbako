@@ -26,9 +26,61 @@ SCHEMA_VERSION = 2
 LOCK_ID = 7365419001298
 logger = logging.getLogger("toolbako.database")
 
+DATABASE_FAILURE_CODES = frozenset({
+    "unavailable", "configuration_invalid", "authentication_failed",
+    "password_not_supplied", "pooler_target_not_found", "pooler_unavailable",
+    "unsupported_startup_parameter", "database_not_found", "connections_exhausted",
+    "database_not_ready", "connection_timeout", "dns_resolution_failed",
+    "tls_connection_failed", "network_connection_failed", "connection_failed",
+    "schema_missing", "schema_access_denied", "schema_version_mismatch",
+    "query_timeout", "schema_probe_failed",
+})
+
+
+def database_failure_code(exc: Exception, *, phase: str) -> str:
+    """Classify in memory; export only a fixed code, never a provider message.
+
+    libpq connection errors can lack SQLSTATE. Known message signatures are a
+    fallback diagnostic, not proof that a particular credential is incorrect.
+    """
+    try:
+        state = getattr(exc, "sqlstate", None)
+        codes = {
+            "28000": "authentication_failed", "28P01": "authentication_failed",
+            "3D000": "database_not_found", "53300": "connections_exhausted",
+            "57P03": "database_not_ready", "42P01": "schema_missing",
+            "3F000": "schema_missing", "42501": "schema_access_denied",
+            "57014": "query_timeout",
+        }
+        if state in codes:
+            return codes[state]
+        if phase == "connect":
+            message = str(exc).lower()
+            signatures = (
+                ("pooler_target_not_found", ("tenant or user not found",)),
+                ("pooler_unavailable", ("circuit breaker open",)),
+                ("unsupported_startup_parameter", ("unsupported startup parameter",)),
+                ("password_not_supplied", ("no password supplied",)),
+                ("authentication_failed", ("password authentication failed", "sasl authentication failed")),
+                ("dns_resolution_failed", ("could not translate host name", "failed to resolve host", "name or service not known", "nodename nor servname provided")),
+                ("connection_timeout", ("connection timed out", "timeout expired", "connection timeout")),
+                ("tls_connection_failed", ("certificate verify failed", "ssl error", "server does not support ssl")),
+                ("network_connection_failed", ("connection refused", "network is unreachable", "no route to host")),
+            )
+            for code, matches in signatures:
+                if any(signature in message for signature in matches):
+                    return code
+    except Exception:
+        pass
+    return "connection_failed" if phase == "connect" else "schema_probe_failed"
+
 
 class StorageUnavailable(Exception):
     """Deliberately contains no connection URL, provider payload or credential."""
+
+    def __init__(self, message="Storage unavailable", *, diagnostic_code="unavailable"):
+        super().__init__(message)
+        self.diagnostic_code = diagnostic_code if isinstance(diagnostic_code, str) and diagnostic_code in DATABASE_FAILURE_CODES else "unavailable"
 
 
 class OperationConflict(Exception):
@@ -78,25 +130,32 @@ class PostgresStateStore:
                 raise ValueError("unsupported database connection")
             if self.production and config.get("sslmode") not in {"require", "verify-ca", "verify-full"}:
                 raise ValueError("TLS is required")
+        except Exception:
+            raise StorageUnavailable("Database connection unavailable or unsafe", diagnostic_code="configuration_invalid") from None
+        try:
             return await AsyncConnection.connect(
                 self.dsn, autocommit=True, connect_timeout=5,
                 prepare_threshold=None, options="-c statement_timeout=10000",
             )
-        except Exception:
-            raise StorageUnavailable("Database connection unavailable or unsafe") from None
+        except Exception as exc:
+            raise StorageUnavailable("Database connection unavailable or unsafe", diagnostic_code=database_failure_code(exc, phase="connect")) from None
 
     async def _check_schema(self, conn):
         cursor = await conn.execute("select version from toolbako_runtime.schema_version where singleton")
         row = await cursor.fetchone()
         if not row or row[0] != SCHEMA_VERSION:
-            raise StorageUnavailable("Database migration required")
+            raise StorageUnavailable("Database migration required", diagnostic_code="schema_version_mismatch")
 
     async def probe(self) -> bool:
         try:
             async with await self.connect() as conn:
                 await self._check_schema(conn)
             return True
-        except Exception:
+        except Exception as exc:
+            code = exc.diagnostic_code if isinstance(exc, StorageUnavailable) else database_failure_code(exc, phase="schema")
+            # Never log the exception, traceback, SQLSTATE detail, URL or secret.
+            code = code if isinstance(code, str) and code in DATABASE_FAILURE_CODES else "unavailable"
+            logger.warning("database_probe_failed reason=%s", code)
             return False
 
     @asynccontextmanager

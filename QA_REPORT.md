@@ -1,6 +1,14 @@
 # ツールバコ 厳格QAレポート
 
-## 2026-10-10 サーバー用キー入力後の実接続（最新）
+## 2026-10-10 DBパスワード入力後の検証（最新）
+
+- Railway実行時の`PGPASSWORD`値の存在はtrueに改善。ただし実DBプローブはfalseでPre-deploy停止、新版は未稼働。API接続と匿名profiles拒否は引き続き合格。パスワードの値は取得していない。
+- Supabaseの実Connect画面でSession poolerの正式な接続先を照合。接続先変更・パスワードreset・キー再発行・スキーマ／権限変更なし。
+- 接続／スキーマ失敗へ固定原因コードだけを追加する41件を検証。プロバイダー例外本文・接続先・資格情報はログへ出さず、公開判定を緩めない。
+- Python 3.12.13・専用実ローカルPostgreSQL 17で **335 passed / 2 warnings / 22.41秒**、DB試験skipなし。外部Auth・Stripe・メールはMock。追加診断の外部CI／実配備はこれから。
+- **本番決済NO-GO継続**。以下の入力待ちは前段階の履歴。最新の実配備結果は`RELEASE_PROGRESS_2026-10-09.md`へ追記する。
+
+## 2026-10-10 サーバー用キー入力後の実接続（履歴）
 
 - Railway Pre-deployでサーバー用キー注入、Auth API、profiles／creator_badges API、匿名profilesアクセス拒否が実接続で合格。DB接続／スキーマ確認のみfalseで、新版はまだ稼働していない。MCPの読取専用SQLでは必要なruntime version 2とmarketplace_stateの存在を確認。
 - DB構成の非秘密boolean-only診断を追加し、DSN・パスワード・例外本文を一切出さずに受け渡しと接続方式を切り分ける12件を追加。既存の公開判定を緩めない。
