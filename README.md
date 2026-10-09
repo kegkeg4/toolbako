@@ -7,12 +7,21 @@
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install --require-hashes -r requirements.txt
 cp .env.example .env
 uvicorn app.main:app --reload
 ```
 
 `http://127.0.0.1:8000` を開いてください。Supabase未設定時はデモモードで動作し、ログイン画面からデモユーザーを利用できます。
+
+Python 3.12を使用します。`requirements.in`／`requirements-dev.in`は直接依存の編集元、`requirements.txt`／`requirements-dev.txt`は間接依存も含むハッシュ付き固定ファイルです。生成済みファイルを手で更新せず、[uvの依存固定手順](https://docs.astral.sh/uv/pip/compile/)に沿って再生成・全テスト・脆弱性監査を行います。
+
+```bash
+uv pip compile requirements.in --python-version 3.12 --universal --generate-hashes --no-annotate -o requirements.txt
+uv pip compile requirements-dev.in -c requirements.txt --python-version 3.12 --universal --generate-hashes --no-annotate -o requirements-dev.txt
+```
+
+CIもハッシュ照合を必須にして同じ固定ファイルを使用します。OS用markerは含みますが、動作保証範囲は検証済みのPython 3.12／macOSとLinuxです。
 
 ## Supabase設定
 
@@ -32,6 +41,12 @@ Twitter OAuthのSupabase provider名は `twitter` です。X Developer Portal側
 配備前の接続確認は、対象サーバーの秘密変数が使える環境で `python -m app.deployment_check` を実行します。DBのスキーマversion、Auth API、サーバー専用プロフィールAPI、匿名アクセス拒否を読み取りだけで確認し、不備があれば終了コード1になります。パスワードやAPIレスポンスは表示しません。**この合格は公開・課金開始の承認ではなく、`/readyz` の判定も緩めません。**
 
 `railway.json` にPre-deploy Commandと `/deploymentz` ヘルスチェックを設定済みです。`/deploymentz` は安全な接続試験環境の起動確認であり、本番決済の開始判定ではありません。`/readyz` は引き続き全公開条件を確認し、決済未検証なら503を返します。既存の旧版へ接続設定だけを先に反映しないでください。最新の作業状況は [リリース作業記録](RELEASE_PROGRESS_2026-10-09.md) を参照してください。
+
+## 秘密情報を送らないエラー監視
+
+`SENTRY_DSN`設定時は`app.monitoring`で明示的に初期化します。通常ログ／Sentryには例外本文を送らず、サーバー生成の問い合わせ番号・例外種別・app内のファイル名と行番号だけを使います。[Sentryの送信前フック](https://getsentry.github.io/sentry-python/api.html)を使い、未知の将来フィールドを含め、URL、Query、Cookie、Header、ユーザー情報、DM、納品ファイル、ローカル変数、ソース行、添付、breadcrumb、scope extrasを送信イベントから除外します。自動integration・trace・profiling・ログ・metrics・session報告も停止しています。実SDKの送信envelopeを偽transportで検査し、外部サービスへはテストデータを送りません。
+
+Railway／Procfileの起動には`--no-access-log`が必要です。標準access logはOAuth code等を含むURL全体を記録するためです。RailwayでStart Commandを上書きしている場合も同じ引数を設定してください。ホスティング側のproxyログ・実監視先の通知と保持期間は、別途実環境で確認が必要です。
 
 ## 実装済み範囲
 

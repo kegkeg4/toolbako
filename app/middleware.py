@@ -52,8 +52,9 @@ class ProductionGuardMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next):
         security_path = str(request.scope.get("path", ""))
-        supplied_request_id = request.headers.get("x-request-id", "")[:128]
-        request_id = re.sub(r"[^A-Za-z0-9._:-]", "", supplied_request_id)[:64] or uuid4().hex
+        # Client headers may contain secrets/PII even after character filtering.
+        # Generate our own ID so logs and monitoring never copy caller content.
+        request_id = uuid4().hex
         request_id_context.set(request_id)
         request.state.request_id = request_id
         request.state.csp_nonce = secrets.token_urlsafe(18)
@@ -132,8 +133,10 @@ class ProductionGuardMiddleware(BaseHTTPMiddleware):
             try:
                 import sentry_sdk
                 sentry_sdk.capture_exception(exc)
-            except ImportError:
-                pass
+            except Exception:
+                # Monitoring must not replace our safe 500 response with its own
+                # exception (or cause a provider secret to reach Uvicorn logs).
+                logger.warning("error monitoring unavailable")
             if "text/html" in request.headers.get("accept", ""):
                 response = HTMLResponse(f'<!doctype html><html lang="ja"><meta charset="utf-8"><title>問題が発生しました</title><body><main><h1>一時的な問題が発生しました</h1><p>操作は繰り返さず、しばらくしてから再読み込みしてください。</p><p>お問い合わせ番号: <code>{request_id}</code></p><a href="/support">ヘルプを開く</a></main></body></html>',status_code=500)
             else:

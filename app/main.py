@@ -37,6 +37,7 @@ from .config import settings
 from .data import AI_OPTIONS, CATEGORIES, DIST_LABELS, PRICE_LABELS, TRANSFER_ASSET_LABELS, TRANSFER_STATUS_LABELS, store
 from .ogp import generate_og, generate_site_og
 from .middleware import ProductionGuardMiddleware
+from .monitoring import initialize_monitoring
 from .production import readiness_summary
 from .persistence import SQLiteStateStore
 from .database import DatabaseBoundaryMiddleware, PostgresStateStore
@@ -140,12 +141,7 @@ async def sweep_due_orders() -> int:
         await persist_state()
     return changed
 
-if settings.sentry_dsn:
-    try:
-        import sentry_sdk
-        sentry_sdk.init(dsn=settings.sentry_dsn, environment=settings.environment, send_default_pii=False, traces_sample_rate=0.1)
-    except ImportError:
-        pass
+initialize_monitoring(settings)
 
 
 establish_session = session_service.establish

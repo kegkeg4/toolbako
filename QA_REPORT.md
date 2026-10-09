@@ -1,6 +1,16 @@
 # ツールバコ 厳格QAレポート
 
-## 2026-10-09 リリース準備の再検証（こちらが最新）
+## 2026-10-10 依存固定・監視情報保護の再検証（こちらが最新）
+
+- 空のPython 3.12.13環境へ、間接依存も含むハッシュ付き固定requirementsから39パッケージを新規インストール。実ローカルPostgreSQL 17で **268 passed / 2 warnings / 14.48秒**。Auth・Stripe・メールはMockで、実サービスE2Eではない。
+- `uv pip check`で39パッケージの互換性確認に合格。ハッシュ付きrequirementsへの`pip-audit --disable-pip --no-deps --strict`は公開DB上の既知脆弱性なし。未知の脆弱性・未試験プラットフォームの動作を保証しない。
+- 外部Sentryへ送るイベントをallowlistから再構築。例外本文、URL、Query、Cookie、Header、ユーザー情報、scope extras、breadcrumb、変数、ソース行、添付を除外し、自動integration／trace／profiling／log／metrics／sessionを停止。実SDKのシリアライズ済みenvelopeを含む15件を追加。実Sentryへの通信・通知は未試験。
+- 呼出者指定の問い合わせ番号を廃止し、サーバーのUUIDを使用。監視障害が安全な500応答を壊さないことと、設定エラーがDSNをログへ出さないことを検証。
+- OAuth codeなどのURL情報が標準access logに残らないようRailway／Procfileへ`--no-access-log`を追加。配備先の上書きStart Commandとproxyログは実環境での反映・確認が必要。
+- 直接依存とlockの一致、全パッケージのバージョン／ハッシュ、本番とテストlockの一致、CIハッシュ必須設定の3件を追加。CIの最新版反映・外部実行は別途確認する。
+- **公開NO-GOを継続**。Railwayの実行時service_roleキーは未入力で、新しい配備・実DB／Auth試験は停止中。キー以外の金融復旧・実決済等の残課題も変更なし。
+
+## 2026-10-09 リリース準備の再検証（履歴）
 
 - Python 3.12系、実ローカルPostgreSQL 17で全回帰テスト **249 passed / 2 warnings / 15.37秒**。ローカルは3.12.13、Railway buildは3.12.15。Stripe・Auth・メールAPIはMockであり、実決済の合格ではない。ログ抑制修正前の248件も合格。
 - 直接依存を固定した検証環境の39パッケージの互換性確認に合格。推移的依存の完全なlockfileは未整備。`pip-audit`の公開脆弱性DB照会は既知脆弱性なし。全作業差分の`git diff --check`に合格。

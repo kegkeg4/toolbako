@@ -8,6 +8,18 @@
 
 ## ローカルで完了
 
+### 10/10の追加仕上げ
+
+- 最新版を空のPython 3.12.13環境へハッシュ照合付きでインストールし、実ローカルPostgreSQL 17で **268 passed / 2 warnings / 14.48秒**。39パッケージの互換性確認も合格。外部Auth・Stripe・メールはMock。
+- `requirements.in`／`requirements-dev.in`を編集元とし、間接依存を含むrequirementsをバージョン・SHA256で固定。[uvの公式手順](https://docs.astral.sh/uv/pip/compile/)を使用し、CIも`--require-hashes`と`pip check`を追加。macOS以外のOS markerも含むが、Python 3.12のmacOS／Linux以外は未検証。
+- `pip-audit`で生成済みlockを公開脆弱性DBへ照会し、既知脆弱性なし。未知の問題がない保証ではない。
+- [Sentryの公式送信前フック](https://getsentry.github.io/sentry-python/api.html)を利用し、例外種別・app内の発生箇所・サーバー生成UUIDだけを送る。URL、Query、Cookie、Header、ユーザー情報、例外本文、変数、ソース行、scope、breadcrumb、添付等は保持しない。自動integration／trace／profiling／log／metrics／sessionも停止。偽transportで実SDKの送信envelopeを検査する15件を追加し、秘密情報が含まれないことを確認。実監視先との通信・通知は未確認。
+- 任意の文字を含められるクライアント指定の問い合わせ番号を使わず、UUIDをサーバーで生成。監視先障害でも安全な500を維持する。
+- Uvicorn標準access logはOAuth code等を含むURL全体を記録するため、Railway／Procfileへ`--no-access-log`を追加。Railwayの上書きStart Commandとホスティング側proxyログの実確認は未完了。
+- 依存編集元／lock／CIの一致を維持する3件のテストを追加。公開判定は緩めず、本番Stripe POST禁止は維持。
+
+10/10の開始時にGitHubの前回最新commit `56a535c4e4603b189a689c104d7339b7a227ddac`のCI successを確認。Railwayには新しい配備・反映待ち変更がなく、service_roleキー不足による停止は継続していた。以下の249件等は10/9時点の履歴であり、上記268件が現在のローカル証拠。
+
 - Python 3.12.13と実ローカルPostgreSQL 17で **249 passed / 2 warnings / 15.37秒**。Stripe・Supabase Auth・メール等のHTTP APIはMock。ログ抑制修正前の版も248件合格。
 - 直接依存をバージョン固定した検証環境の39パッケージの互換性確認、`pip-audit`の公開DB照会（既知脆弱性なし）、全差分の`git diff --check`に合格。推移的依存の完全なlockfileはまだない。警告2件はテストクライアントの非推奨API。未知の脆弱性がないことは保証しない。
 - Sandboxの結果不明Transfer／銀行Payoutについて、元のリクエスト・金額・口座・source・metadataをGETで照合する復旧処理を追加。別管理者、MFA、30分の有効期限、二重送金拒否、監査記録・DB原子性を検証。残高は確認中も予約し、再送しない。Checkout・返金・reversalの結果不明は未対応。
