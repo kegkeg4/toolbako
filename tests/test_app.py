@@ -942,9 +942,10 @@ def test_account_deletion_grace_period_can_be_cancelled():
 def test_oauth_uses_server_side_pkce_and_retires_implicit_tokens():
     from app.config import settings
     from urllib.parse import parse_qs, urlparse
-    previous_url, previous_key = settings.supabase_url, settings.supabase_anon_key
+    previous_url, previous_key, previous_providers = settings.supabase_url, settings.supabase_anon_key, settings.oauth_providers
     object.__setattr__(settings, 'supabase_url', 'https://project.supabase.co')
     object.__setattr__(settings, 'supabase_anon_key', 'anon-test-key')
+    object.__setattr__(settings, 'oauth_providers', ('google',))
     member = TestClient(app)
     try:
         response = member.get('/auth/oauth/google?next=/settings', follow_redirects=False)
@@ -959,6 +960,7 @@ def test_oauth_uses_server_side_pkce_and_retires_implicit_tokens():
     finally:
         object.__setattr__(settings, 'supabase_url', previous_url)
         object.__setattr__(settings, 'supabase_anon_key', previous_key)
+        object.__setattr__(settings, 'oauth_providers', previous_providers)
 
 
 def test_direct_production_settings_always_disable_demo_mode():

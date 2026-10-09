@@ -231,7 +231,7 @@ def context(request: Request, **values):
     user = current_user(request)
     unread_notification_count = sum(1 for item in store.notifications if user and item.get("user_id") == user["id"] and not item.get("read"))
     legal_operator = {"name":settings.legal_business_name,"representative":settings.legal_representative,"address":settings.legal_address,"phone":settings.legal_phone,"email":settings.support_email,"website":settings.legal_website,"invoice_number":settings.legal_invoice_number}
-    return {"request": request, "user": user, "admin_access":is_admin(user), "unread_notification_count":unread_notification_count, "categories": CATEGORIES, "ai_options": AI_OPTIONS, "price_labels": PRICE_LABELS, "dist_labels": DIST_LABELS, "status_labels": status_labels, "transfer_asset_labels":TRANSFER_ASSET_LABELS, "transfer_status_labels":TRANSFER_STATUS_LABELS, "site_url": settings.site_base_url, "asset_version":settings.asset_version, "csp_nonce":getattr(request.state, "csp_nonce", ""), "demo_mode":settings.demo_mode, "email_ready":settings.email_ready, "stripe_ready":settings.stripe_ready, "platform_fee_percent":round(settings.platform_fee_rate * 100, 2), "custom_fee_percent":round(settings.custom_fee_rate * 100, 2), "payout_schedule_label":settings.payout_schedule_label, "payout_minimum":settings.payout_minimum, "payout_fee":settings.payout_fee, "payout_fee_free_threshold":settings.payout_fee_free_threshold, "payout_auto_days":settings.payout_auto_days, "payout_weekday_label":settings.payout_weekday_label, "legal_operator":legal_operator, **seo_metadata(request), **values}
+    return {"request": request, "user": user, "admin_access":is_admin(user), "unread_notification_count":unread_notification_count, "categories": CATEGORIES, "ai_options": AI_OPTIONS, "price_labels": PRICE_LABELS, "dist_labels": DIST_LABELS, "status_labels": status_labels, "transfer_asset_labels":TRANSFER_ASSET_LABELS, "transfer_status_labels":TRANSFER_STATUS_LABELS, "site_url": settings.site_base_url, "asset_version":settings.asset_version, "csp_nonce":getattr(request.state, "csp_nonce", ""), "demo_mode":settings.demo_mode, "oauth_providers":settings.enabled_oauth_providers, "email_ready":settings.email_ready, "stripe_ready":settings.stripe_ready, "platform_fee_percent":round(settings.platform_fee_rate * 100, 2), "custom_fee_percent":round(settings.custom_fee_rate * 100, 2), "payout_schedule_label":settings.payout_schedule_label, "payout_minimum":settings.payout_minimum, "payout_fee":settings.payout_fee, "payout_fee_free_threshold":settings.payout_fee_free_threshold, "payout_auto_days":settings.payout_auto_days, "payout_weekday_label":settings.payout_weekday_label, "legal_operator":legal_operator, **seo_metadata(request), **values}
 
 
 def render_md(value: str) -> str:
@@ -1795,7 +1795,7 @@ async def report(request: Request, target_type: str = Form(...), target_id: str 
 
 @app.get("/login", response_class=HTMLResponse)
 async def login(request: Request, next: str = "/"):
-    return templates.TemplateResponse(request, "login.html", context(request, next=safe_next(next), oauth_ready=settings.supabase_ready))
+    return templates.TemplateResponse(request, "login.html", context(request, next=safe_next(next)))
 
 
 @app.post("/login")
@@ -1808,7 +1808,7 @@ async def login_submit(request: Request, email: str = Form(...), password: str =
         try:
             async with httpx.AsyncClient(timeout=10) as client:
                 result = await client.post(f"{settings.supabase_url}/auth/v1/token?grant_type=password",headers={"apikey":settings.supabase_anon_key,"Content-Type":"application/json"},json={"email":email,"password":password})
-                if result.status_code != 200: return templates.TemplateResponse(request, "login.html", context(request, next=redirect_path, oauth_ready=settings.supabase_ready, error="メールアドレスまたはパスワードが違います", email=email), status_code=401)
+                if result.status_code != 200: return templates.TemplateResponse(request, "login.html", context(request, next=redirect_path, error="メールアドレスまたはパスワードが違います", email=email), status_code=401)
                 auth_user = result.json()["user"]
                 profile_response = await client.get(f"{settings.supabase_url}/rest/v1/profiles?id=eq.{auth_user['id']}&select=*,creator_badges(*)",headers={"apikey":settings.supabase_anon_key,"Authorization":f"Bearer {result.json()['access_token']}"})
         except (httpx.HTTPError, KeyError, ValueError) as exc:
@@ -1824,7 +1824,7 @@ async def login_submit(request: Request, email: str = Form(...), password: str =
     else:
         entry = next(({"username":username,**data} for username,data in store.registered_users.items() if data.get("email")==email),None)
         if not verify_password(password, entry and entry.get("password_salt"), entry and entry.get("password_hash")):
-            return templates.TemplateResponse(request, "login.html", context(request, next=redirect_path, oauth_ready=settings.supabase_ready, error="メールアドレスまたはパスワードが違います", email=email), status_code=401)
+            return templates.TemplateResponse(request, "login.html", context(request, next=redirect_path, error="メールアドレスまたはパスワードが違います", email=email), status_code=401)
         if entry.get("is_banned"): raise HTTPException(403, "このアカウントではログインできません")
         identity = store.identity_applications.get(entry["id"], {})
         session_user = {"id":entry["id"],"username":entry["username"],"display_name":entry["display_name"],"email":entry["email"],"avatar_url":entry.get("avatar_url"),"headline":entry.get("headline", ""),"bio":entry.get("bio", ""),"skills":entry.get("skills", []),"experience":entry.get("experience", []),"portfolio":entry.get("portfolio", []),"availability":entry.get("availability", "受付状況未設定"),"response_time":entry.get("response_time", "未設定"),"pricing_note":entry.get("pricing_note", ""),"x_url":entry.get("x_url", ""),"website_url":entry.get("website_url", ""),"is_verified":identity.get("status") == "verified","identity_status":identity.get("status", "not_started"),**creator_badges_for(entry["username"])}
@@ -1839,7 +1839,7 @@ async def login_submit(request: Request, email: str = Form(...), password: str =
 
 @app.get("/signup", response_class=HTMLResponse)
 async def signup(request: Request, next: str = "/settings"):
-    return templates.TemplateResponse(request, "signup.html", context(request, oauth_ready=settings.supabase_ready, next=safe_next(next)))
+    return templates.TemplateResponse(request, "signup.html", context(request, next=safe_next(next)))
 
 
 @app.get("/forgot-password", response_class=HTMLResponse)
@@ -1923,9 +1923,8 @@ async def signup_submit(request: Request, display_name: str = Form(...), usernam
 async def oauth(request: Request, provider: str, next: str = "/"):
     if provider not in {"twitter", "google"}: raise HTTPException(404)
     next = safe_next(next)
-    if not settings.supabase_ready:
-        if settings.is_production: raise HTTPException(503, "認証基盤が未設定です")
-        return RedirectResponse(f"/auth/demo?next={quote(next)}", 303)
+    if provider not in settings.enabled_oauth_providers:
+        raise HTTPException(503, "このログイン方法は現在利用できません。メールアドレスで登録・ログインしてください。")
     oauth_state = secrets.token_urlsafe(24)
     code_verifier = secrets.token_urlsafe(64)
     code_challenge = base64.urlsafe_b64encode(hashlib.sha256(code_verifier.encode()).digest()).rstrip(b"=").decode()

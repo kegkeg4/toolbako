@@ -7,7 +7,7 @@
 ## あなた側で用意・決定が必要なもの
 
 - [ ] 公開ドメイン、DNS、TLS、ホスティング先を決定する
-- [x] 専用SupabaseプロジェクトのURL・公開キー・サーバー用キーをRailwayへ登録し、Auth／profiles／badge APIの読取専用接続を確認する（Postgres接続・実会員登録は未完了）
+- [x] 専用SupabaseのURL・公開／サーバーキー・DB接続情報をRailwayへ登録し、Auth／profiles／badge API・Postgres runtime schemaの実接続と新版配備を確認する（実会員登録は未完了）
 - [ ] Stripe本番アカウント、Connect、Identity、Webhook endpointを有効化し、各Secretを登録する
 - [ ] Resend等の送信ドメインを認証し、SPF・DKIM・DMARCを設定する
 - [ ] 合同会社ONEの代表者、住所、電話番号、問い合わせ先、会社URLを確認し、特定商取引法表示と一致させる
@@ -22,7 +22,7 @@
 - [x] 外部監視の送信前allowlist、添付除外、自動telemetry停止、問い合わせ番号のサーバー生成、URL access log停止をコードとテストで確認する
 - [x] Supabaseの現行opaqueキー・旧JWTキーの互換性、ユーザーJWT分離、設定優先順をコード・Mockで検証する（実キーでの疎通は未完了）
 - [ ] 隔離したSupabase環境でSQLの依存関係・適用・RLS試験を行い、確認済みの手順だけを本番へ適用する
-- [x] 全ルートで利用するPostgres互換repositoryを実装（本番接続・高負荷対策は未完了。単発売上の金融テーブルは別に正規化）
+- [x] 全ルートで利用するPostgres互換repositoryを実装（staging実接続済み、高負荷対策は未完了。単発売上の金融テーブルは別に正規化）
 - [x] 注文作成・Webhook claim・状態更新・監査ログ・通知メールoutboxを同一DBトランザクションにする（ローカル実Postgresで検証）
 - [ ] ステージング／本番の専用DB・TLS・session接続・権限・バックアップを設定し、復元訓練する
 - [x] 通知メールworker、排他claim、再送キー、期限超過reviewを実装
@@ -32,6 +32,7 @@
 - [ ] Redisに実接続し、複数ワーカーで共通の制限・障害復旧を検証する
 - [x] Supabase MFA登録・チャレンジ・AAL2確認・セッションID更新・重要操作時の10分間制限を実装する
 - [ ] 実際のSupabaseで登録、誤コード、期限切れ、OAuth、トークン更新、端末紛失時の回復を検証する
+- [x] SNS認証を明示allowlistで制御し、未設定のGoogle／Xを表示・redirectしない（任意機能。有効化はSupabase側の設定と実際のcallback検証後に`OAUTH_PROVIDERS`へ追加する）
 - [x] 追記専用の永続監査ログと更新・削除拒否／内容変更検出を実装する
 - [ ] 監査ログの長期検索・保持期間・バックアップ運用を設定する
 - [ ] 退会期限を処理する定期ジョブをPostgres repository上で実装し、法定保持データだけ匿名化して残す

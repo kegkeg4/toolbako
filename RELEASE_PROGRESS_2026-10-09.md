@@ -6,7 +6,21 @@
 
 運営主体は合同会社ONE。既存のRailway `rare-manifestation` / `web`を使用し、新しい有料サービスは作成しない。会員・取引用のSupabaseはユーザー確認済みのプロジェクトを使用。秘密値はソース・記録・チャットに載せず、封印済み変数は取得しない。
 
-## 10/10：DBパスワード入力後の実接続（最新）
+## 10/10：DB接続・新版配備成功と実画面の検証（最新）
+
+- ユーザーの完了報告時には反映待ち変更なし、新deployment `41f2040d-b317-4b3a-94aa-4c9df99922a5`がbuild中だった。重複配備せず、その配備を追跡。実commit `77365a4a77ee6303043b9f99088f2b67dd16a398`の外部CIはsuccess。コードは検証済みd6bdd74aと同一で、記録だけ追加した版。
+- 配備は **SUCCESS**。Pre-deployの`connection_preflight_passed=true`、Postgres runtime schema・Auth／profiles／badge API・匿名profilesアクセス拒否は全項目true。パスワードの値は取得していない。本人がresetしたか既存値を再入力したかは、結果だけから断定しない。
+- 公開URLの`/healthz`と`/deploymentz`はHTTP 200。`/readyz`は **503、ready=false、14/24**。項目数は設定・実装チェックであり、サービス完成度58%や実会員登録・決済の合格率ではない。APP_ENVはstaging、DEMO_MODE=false、本番Stripe書込停止を維持。
+- 27ルートのHTTP確認で予期しない5xxなし（公開判定の503は意図した停止）。トップ・商品一覧・譲渡・診断・比較・募集・クリエイター・ログイン・登録・回復・サポート・法務ページ・robots・sitemapは200。未ログインの管理画面403、マイページ／販売者／メッセージ／出品はログインへ303、デモログインと別アプリの`/schedules`は404。
+- 不正な会員登録入力422、異なるOriginの登録403、長すぎるログイン入力401を実配備で確認。実会員作成・メール送信・外部ログインなし。CSP／HSTS／nosniff／frame／referrerヘッダーは存在。
+- PC1440pxとスマートフォン390pxでトップの横はみ出しなし、ロゴ画像2件読込成功、h1／main各1件。スマートフォンのメニューから登録画面へ移動し、390pxで横はみ出しなし、ブラウザーerrorなし。実登録の合格ではない。
+- HTTPを3並列で確認した際、多くのページで約3〜4秒の応答を観測。ネットワーク・DB排他／直列処理・配備地域等を含む計測であり、CWVやp95ではない。高負荷・速度の公開合格にはしない。
+- Google／Xボタンが表示される一方、実Supabaseは両方`provider is not enabled`で400を返す不具合を確認。実ユーザーのログインやアカウント作成はしていない。
+- `OAUTH_PROVIDERS`を明示allowlistにして、APIキー登録だけではSNSログインを有効と扱わない修正を追加。未設定のボタンと区切りを非表示、直接アクセスも外部へ飛ばさず503の案内。設定済みproviderでは既存PKCE・安全な復帰先を維持。デモ案内も実際のDEMO_MODEのみで表示する。
+- 20件の追加試験。Python 3.12.13・専用実ローカルPostgreSQL 17で **355 passed / 2 warnings / 20.70秒**、DB skipなし。最初の実行はsandboxがローカルTCPを拒否して60件setup errorだったため、合格証拠には使わず、専用ローカルDBへの権限を付けて全件再実行した。試験用DBは停止済み。外部Auth／Stripe／メールはMock。SNS導線修正の外部CI／配備はこれから。
+- **本番決済NO-GO継続**。本番モード・実決済・取引メール・ファイル検査／非公開永続化・監視・管理者・窓口／法務・Redis等は未完了。次は本人管理のテスト用メールで実登録・確認・ログインを通す。パスワード入力と規約同意は本人に引き継ぎ、勝手に会員を作らない。
+
+## 10/10：DBパスワード入力後の実接続（履歴）
 
 - ユーザー入力後の反映待ちは既存webの封印済み`PGPASSWORD`更新1件だけ。削除・別サービス・共有変数変更なしを確認し、反映した。値は取得していない。
 - deployment `81b64aa5-3be5-4ce3-a24c-f9f9e588611e`は実行時`environment_password_present=true`となり、パスワード未注入は解消。ただし`database_schema=false`でPre-deploy停止。Auth／profiles／badge API・匿名profiles拒否は合格のまま。実buildは`94eb4078600484943a8af6d38fd2b8a9375282d1`（検証済み287190c8と同じコード、記録だけ追加）。
@@ -141,7 +155,7 @@ Railway APIではservice_roleの変数名とSeal状態は存在する。**名前
 
 ## 有料開始までの残作業
 
-1. service_roleと`PGPASSWORD`値の実行時注入・Auth／profiles／badgeの実API接続は完了。Postgres接続は`authentication_failed`で停止。既存sealed `PGPASSWORD`へユーザーが正しいDBパスワードを直接入力し、再配備・Pre-deployで確認する。不明な場合のresetは既存接続への影響を確認して本人が操作する。GitHub公開・CIは完了。実会員登録の合格とは別。
+1. service_roleと`PGPASSWORD`の実行時注入、Auth／profiles／badge API、Postgres runtime schema接続、新版のRailway配備と主要HTTP確認は完了。設定チェックは14/24で有料公開条件は未達。実会員登録・負荷・決済の合格とは別。
 2. 実Supabase会員登録、メール確認、ログイン、パスワード再設定、MFA。管理者2人の実アカウントID登録と復旧運用確認。
 3. Stripe SandboxのCheckout・Webhook・JPY Connect分配・銀行Payout・返金・異議申立てE2E。本番実行ガードを外す前に証拠を保存する。
 4. Checkout／返金／reversalの結果不明、銀行振込後の回収、銀行失敗後の再申請、部分返金・定期課金台帳・異議申立て終了後の復元。

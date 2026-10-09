@@ -14,6 +14,9 @@ class Settings:
     supabase_service_role_key: str = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
     supabase_publishable_key: str = os.getenv("SUPABASE_PUBLISHABLE_KEY", "").strip()
     supabase_secret_key: str = os.getenv("SUPABASE_SECRET_KEY", "").strip()
+    # Opt in only after enabling and verifying each provider in Supabase Auth.
+    # API keys alone do not mean Google/X login is configured.
+    oauth_providers: tuple[str, ...] = tuple(x.strip().lower() for x in os.getenv("OAUTH_PROVIDERS", "").split(",") if x.strip())
     site_base_url: str = os.getenv("SITE_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
     session_secret: str = os.getenv("SESSION_SECRET", "dev-only-secret")
     admin_user_ids: tuple[str, ...] = tuple(x.strip() for x in os.getenv("ADMIN_USER_IDS", "").split(",") if x.strip())
@@ -74,6 +77,10 @@ class Settings:
     clamav_port: int = int(os.getenv("CLAMAV_PORT", "3310"))
 
     def __post_init__(self) -> None:
+        configured_providers = self.oauth_providers if isinstance(self.oauth_providers, tuple) else ()
+        object.__setattr__(self, "oauth_providers", tuple(
+            provider for provider in ("google", "twitter") if provider in configured_providers
+        ))
         # Preserve the existing application API/legacy env names while accepting
         # current opaque keys. New env names win during a gradual migration.
         if self.supabase_publishable_key:
@@ -94,6 +101,10 @@ class Settings:
     @property
     def supabase_ready(self) -> bool:
         return bool(self.supabase_url and self.supabase_anon_key and not self.supabase_anon_key.startswith("sb_secret_"))
+
+    @property
+    def enabled_oauth_providers(self) -> tuple[str, ...]:
+        return self.oauth_providers if self.supabase_ready else ()
 
     @property
     def is_production(self) -> bool:

@@ -1,6 +1,15 @@
 # ツールバコ 厳格QAレポート
 
-## 2026-10-10 DBパスワード入力後の検証（最新）
+## 2026-10-10 DB実接続・新版配備成功（最新）
+
+- Railwayの新版はSUCCESS。Pre-deployでPostgres runtime schema・Auth／profiles／badge API・匿名profiles拒否はすべて合格。`/healthz`・`/deploymentz`は200、`/readyz`は意図した503／ready=false／ **24項目中14項目**。本番Stripe書込停止とstagingを維持。
+- 公開URLの27ルートで予期しない5xxなし。未ログイン管理画面403、会員／販売者／メッセージ／出品303、デモログインと`/schedules`404。不正登録422、異なるOrigin403、長すぎるログイン401を確認。実会員作成やメール送信はしていない。
+- PC1440px／スマートフォン390pxのトップ、390pxの登録画面で横はみ出しなし。ロゴ読込とモバイルメニューの登録導線、ブラウザーerrorなしを確認。全画面・負荷の合格ではない。3並列HTTP確認で約3〜4秒の応答を観測し、速度の追加改善が必要。
+- 未設定のGoogle／Xが登録・ログイン画面に表示され、実Supabaseが400を返す不具合を発見。`OAUTH_PROVIDERS`の明示allowlist、未設定ボタン非表示／外部redirect拒否、既存PKCE／safe next維持、実DEMO_MODEのみのデモ案内へ修正。外部SNSログインはまだ未設定・未検証。
+- 20件を追加し、専用実ローカルPostgreSQL 17・Python 3.12.13で **355 passed / 2 warnings / 20.70秒**。DB skipなし、外部Auth／Stripe／メールはMock。最初のsandboxによるローカルTCP拒否は環境setup errorで、合格に数えず全件再実行。修正の外部CI／配備はこれから。
+- **本番決済NO-GO継続**。会員登録・確認メール・ログイン・MFA、Stripe Sandbox、メール／ファイル／運営／法務等は残る。詳細は`RELEASE_PROGRESS_2026-10-09.md`。
+
+## 2026-10-10 DBパスワード入力後の検証（履歴）
 
 - Railway実行時の`PGPASSWORD`値の存在はtrueに改善。ただし実DBプローブはfalseでPre-deploy停止、新版は未稼働。API接続と匿名profiles拒否は引き続き合格。パスワードの値は取得していない。
 - Supabaseの実Connect画面でSession poolerの正式な接続先を照合。接続先変更・パスワードreset・キー再発行・スキーマ／権限変更なし。
