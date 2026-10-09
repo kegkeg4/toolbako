@@ -5,7 +5,8 @@
 - Railway Pre-deployでサーバー用キー注入、Auth API、profiles／creator_badges API、匿名profilesアクセス拒否が実接続で合格。DB接続／スキーマ確認のみfalseで、新版はまだ稼働していない。MCPの読取専用SQLでは必要なruntime version 2とmarketplace_stateの存在を確認。
 - DB構成の非秘密boolean-only診断を追加し、DSN・パスワード・例外本文を一切出さずに受け渡しと接続方式を切り分ける12件を追加。既存の公開判定を緩めない。
 - 全回帰試験はPython 3.12.13と専用実ローカルPostgreSQL 17で **294 passed / 2 warnings / 15.18秒**。DB試験skipなし。外部Auth・Stripe・メールはMock。実会員登録・実決済の合格ではない。
-- **本番決済NO-GOを継続**。接続構成の診断追加を再配備して切り分ける。キーの再発行・DBパスワード再設定・スキーマ変更は行っていない。詳細な履歴と残課題は`RELEASE_PROGRESS_2026-10-09.md`。
+- 診断コードの[Linux外部CI](https://github.com/kegkeg4/toolbako/actions/runs/37960210124)も **294 passed / 2 warnings / 14.19秒、success**。診断版の実Pre-deployでURI解析・TLS・対象プロジェクト一致がtrue、transaction pooler不使用、URI内パスワードと`PGPASSWORD`の実行時存在がfalseと判明。API接続は合格のまま。
+- **本番決済NO-GOを継続**。既存sealed `PGPASSWORD`のユーザー入力待ち。キーの再発行・DBパスワード再設定・スキーマ変更は行っていない。詳細な履歴と残課題は`RELEASE_PROGRESS_2026-10-09.md`。
 
 ## 2026-10-10 依存固定・監視情報保護の再検証（履歴）
 

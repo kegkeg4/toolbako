@@ -16,6 +16,21 @@
 - 診断・既存配備確認の単体試験 **48 passed / 2 warnings / 0.89秒**。全回帰試験はPython 3.12.13・専用ローカル実PostgreSQL 17で **294 passed / 2 warnings / 15.18秒**、DB試験のskipなし。外部Auth・Stripe・メールはMock。初回のDB用環境変数誤指定では60件skipとなったため、その結果はDB合格の証拠にせず、正しい`TEST_POSTGRES_ADMIN_DSN`で全件再実行した。
 - 新版はまだ稼働していない。旧deploymentが稼働中で、実会員登録・決済試験・その他の有料公開条件は未完了。本番Stripeの書込禁止は維持。
 
+### DB停止原因の実環境での切り分け結果
+
+診断コードcommit `287190c89989f0fbf0f6deed864d48a65a8f72b7`の全tree `fb93e017b90e1e764bc226611cf235bcbac96cc8`は検証済みローカルと一致。[Linux外部CI](https://github.com/kegkeg4/toolbako/actions/runs/37960210124)は **294 passed / 2 warnings / 14.19秒、success**、`pip check`も合格。既存webのcommit更新1件だけを再確認して配備した。
+
+deployment `f003d726-125b-4106-9da6-94b468823849`はビルド後Pre-deployで停止したが、実行時診断から次を特定できた。
+
+- URI解析、TLS設定、対象Supabase一致：true。transaction poolerの6543ポート：false（使用していない）。
+- URI内パスワード：false。**`PGPASSWORD`の実行時の値の存在：false**。
+- 公開／サーバーAPIキー注入、Auth／profiles／badge API接続、匿名profiles拒否：trueのまま。
+- Supabaseに必要なruntime version 2と状態テーブルがあることはMCPの読取専用確認済み。スキーマを再作成しない。
+
+Railway APIでは`PGPASSWORD`がsealed変数として定義されているが、名前の存在だけでは実行時注入成功ではない。封印済み値の読み取り・削除・再作成は行わない。ユーザーが既存`PGPASSWORD`の編集で、このSupabaseプロジェクトのDBパスワードを直接入力する必要がある。ログインパスワード・service_roleキーとは別物。チャットへ貼らない。忘れている場合のDBパスワードresetは既存接続への影響があるため、別途確認してから行う。勝手にresetしない。
+
+本番決済はNO-GO継続。診断追加時に起動したローカル試験用PostgreSQLは試験後に停止済み。
+
 以下の「service_role再入力待ち」「実API接続未確認」はこの更新前の履歴。
 
 ## ローカルで完了
@@ -114,7 +129,7 @@ Railway APIではservice_roleの変数名とSeal状態は存在する。**名前
 
 ## 有料開始までの残作業
 
-1. ユーザーによる既存sealed service_role値の再入力と、再配備・Pre-deployによる実DB／Auth API接続確認。GitHub公開・CIは完了。DBパスワードは未検証。
+1. service_role値の注入・Auth／profiles／badgeの実API接続は完了。次は実行時に空だった既存sealed `PGPASSWORD`へユーザーがDBパスワードを直接入力し、再配備・Pre-deployでPostgres接続を確認する。GitHub公開・CIは完了。実会員登録の合格とは別。
 2. 実Supabase会員登録、メール確認、ログイン、パスワード再設定、MFA。管理者2人の実アカウントID登録と復旧運用確認。
 3. Stripe SandboxのCheckout・Webhook・JPY Connect分配・銀行Payout・返金・異議申立てE2E。本番実行ガードを外す前に証拠を保存する。
 4. Checkout／返金／reversalの結果不明、銀行振込後の回収、銀行失敗後の再申請、部分返金・定期課金台帳・異議申立て終了後の復元。
