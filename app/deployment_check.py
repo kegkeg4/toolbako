@@ -31,6 +31,10 @@ def configuration_checks(settings: Settings) -> dict[str, bool]:
         and not endpoint.username and not endpoint.password and not endpoint.query
         and not endpoint.fragment and endpoint.path in {"", "/"},
         "supabase_keys_present": bool(settings.supabase_anon_key and settings.supabase_service_role_key),
+        # Report presence only, never a value/length/prefix. Separate flags let
+        # operators diagnose injection without reading or replacing sealed keys.
+        "supabase_anon_key_present": bool(settings.supabase_anon_key),
+        "supabase_service_role_key_present": bool(settings.supabase_service_role_key),
         "database_configured": bool(settings.database_url),
         # Live money movement remains a separately reviewed, code-blocked step.
         "no_live_stripe_key": not settings.stripe_secret_key.startswith(("sk_live_", "rk_live_")),

@@ -24,7 +24,7 @@ def configured(**changes):
     {"site_base_url": "http://toolbako.example"}, {"allowed_hosts": ("*",)},
     {"supabase_url": "https://user:password@project.supabase.co"},
     {"supabase_url": "https://project.supabase.co?key=private"},
-    {"supabase_service_role_key": ""}, {"database_url": ""},
+    {"supabase_service_role_key": ""}, {"supabase_anon_key": ""}, {"database_url": ""},
     {"stripe_secret_key": "sk_live_fixture"}, {"stripe_secret_key": "rk_live_fixture"},
 ])
 def test_preflight_invalid_config_never_makes_external_calls(changes, monkeypatch):
