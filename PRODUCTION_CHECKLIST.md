@@ -7,7 +7,7 @@
 ## あなた側で用意・決定が必要なもの
 
 - [ ] 公開ドメイン、DNS、TLS、ホスティング先を決定する
-- [ ] Supabase本番プロジェクトを作り、URL・anon key・service role keyを安全なSecretsへ登録する
+- [x] 専用SupabaseプロジェクトのURL・公開キー・サーバー用キーをRailwayへ登録し、Auth／profiles／badge APIの読取専用接続を確認する（Postgres接続・実会員登録は未完了）
 - [ ] Stripe本番アカウント、Connect、Identity、Webhook endpointを有効化し、各Secretを登録する
 - [ ] Resend等の送信ドメインを認証し、SPF・DKIM・DMARCを設定する
 - [ ] 合同会社ONEの代表者、住所、電話番号、問い合わせ先、会社URLを確認し、特定商取引法表示と一致させる

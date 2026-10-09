@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from urllib.parse import urlparse
 
 import httpx
@@ -14,6 +15,45 @@ import httpx
 from .config import Settings
 from .database import PostgresStateStore
 from .supabase_api import supabase_headers
+
+
+def database_configuration_diagnostics(settings: Settings) -> dict[str, bool]:
+    """Presence/configuration only; never return a DSN, user, host or password.
+
+    These observations do not replace the connection probe and are not launch
+    checks: a password can be supplied by another libpq mechanism. Keep them
+    separate from the all-boolean, fail-closed preflight verdict.
+    """
+    results = {
+        "uri_parsed": False,
+        "tls_configured": False,
+        "transaction_pooler_port": False,
+        "uri_password_present": False,
+        "environment_password_present": bool(os.getenv("PGPASSWORD", "")),
+        "target_matches_supabase": False,
+    }
+    try:
+        from psycopg.conninfo import conninfo_to_dict
+        config = conninfo_to_dict(settings.database_url)
+        results["uri_parsed"] = bool(settings.database_url)
+        results["tls_configured"] = config.get("sslmode") in {"require", "verify-ca", "verify-full"}
+        results["transaction_pooler_port"] = config.get("port") == "6543"
+        results["uri_password_present"] = bool(config.get("password"))
+        api_host = urlparse(settings.supabase_url).hostname or ""
+        # Only recognize the hosted project's exact direct/session-pool target.
+        suffix = ".supabase.co"
+        project = api_host[:-len(suffix)] if api_host.endswith(suffix) else ""
+        host = config.get("host", "")
+        results["target_matches_supabase"] = bool(project and "." not in project) and (
+            host == f"db.{project}.supabase.co" or (
+                host.endswith(".pooler.supabase.com")
+                and config.get("user") == f"postgres.{project}"
+            )
+        )
+    except Exception:
+        # Parsing errors may quote the URI/password. Do not print or attach them.
+        pass
+    return results
 
 
 def configuration_checks(settings: Settings) -> dict[str, bool]:
@@ -89,14 +129,19 @@ async def connection_checks(settings: Settings) -> dict[str, bool]:
 
 def main() -> int:
     # No provider response, exception text, URL or credential is printed.
+    diagnostics = None
     try:
-        results = asyncio.run(connection_checks(Settings()))
+        settings = Settings()
+        diagnostics = database_configuration_diagnostics(settings)
+        results = asyncio.run(connection_checks(settings))
     except Exception:
         print(json.dumps({"connection_preflight_passed": False,
-                          "error": "Connection check failed; inspect server configuration securely."}))
+                          "error": "Connection check failed; inspect server configuration securely.",
+                          "database_configuration": diagnostics}))
         return 1
     passed = all(results.values())
     print(json.dumps({"connection_preflight_passed": passed, "checks": results,
+                      "database_configuration": diagnostics,
                       "live_payments_enabled": False,
                       "notice": "Read-only DB/Auth checks only; not launch approval."}))
     return 0 if passed else 1

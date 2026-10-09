@@ -6,6 +6,18 @@
 
 運営主体は合同会社ONE。既存のRailway `rare-manifestation` / `web`を使用し、新しい有料サービスは作成しない。会員・取引用のSupabaseはユーザー確認済みのプロジェクトを使用。秘密値はソース・記録・チャットに載せず、封印済み変数は取得しない。
 
+## 10/10：サーバー用キー入力後の実接続（最新）
+
+- ユーザーの入力完了後、反映待ちは既存webのコードcommit、`--no-access-log`、封印済み`SUPABASE_SERVICE_ROLE_KEY`の3件だけで、削除・別サービス変更なしと確認して配備した。キー値は取得していない。
+- deployment `67ecbb98-12d7-4164-bc01-9493eb31c9a0`はビルド後、Pre-deployで停止。実際のbuildはbranch最新`90c8528e2d4785b4c1712502635712261949462c`（コードは検証済みa92c9a74と同一、ドキュメントだけ追加）だった。[同commitの外部CI](https://github.com/kegkeg4/toolbako/actions/runs/37957421402)もsuccessを確認。
+- 非秘密診断で`supabase_public_key_present`／`supabase_server_key_present`／`supabase_key_roles`はtrue。**Auth API、profiles API、creator_badges API、匿名profilesアクセス拒否はすべて実接続で合格**。サーバー用キーの受け渡し不備は解消。
+- `database_schema`だけfalse。Supabase MCPの読取専用SQLではruntime version 2、marketplace_stateテーブルの存在を再確認した。再マイグレーション・権限変更・DBパスワード変更はしていない。RailwayのDBパスワード・接続先・TLS・ネットワークを切り分ける必要がある。現時点でパスワード不正と断定しない。
+- Pre-deployへDB構成のboolean-only診断を追加。URIの解析、TLS、transaction poolerのポート、URI／PGPASSWORDの値の存在、対象Supabase一致だけを出す。DSN、ホスト、ユーザー、パスワード、値の長さ・prefix・例外本文は出さない。追加観察は公開許可や接続成功の代用にせず、既存fail-closed判定を維持。
+- 診断・既存配備確認の単体試験 **48 passed / 2 warnings / 0.89秒**。全回帰試験はPython 3.12.13・専用ローカル実PostgreSQL 17で **294 passed / 2 warnings / 15.18秒**、DB試験のskipなし。外部Auth・Stripe・メールはMock。初回のDB用環境変数誤指定では60件skipとなったため、その結果はDB合格の証拠にせず、正しい`TEST_POSTGRES_ADMIN_DSN`で全件再実行した。
+- 新版はまだ稼働していない。旧deploymentが稼働中で、実会員登録・決済試験・その他の有料公開条件は未完了。本番Stripeの書込禁止は維持。
+
+以下の「service_role再入力待ち」「実API接続未確認」はこの更新前の履歴。
+
 ## ローカルで完了
 
 ### 10/10の追加仕上げ
