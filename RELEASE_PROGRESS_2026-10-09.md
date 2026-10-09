@@ -1,4 +1,4 @@
-# 2026-10-09：リリース準備・配備の実績
+# 2026-10-09〜10-10：リリース準備・配備の実績
 
 ## 現在の判定
 
@@ -9,7 +9,7 @@
 ## ローカルで完了
 
 - Python 3.12.13と実ローカルPostgreSQL 17で **249 passed / 2 warnings / 15.37秒**。Stripe・Supabase Auth・メール等のHTTP APIはMock。ログ抑制修正前の版も248件合格。
-- 固定依存39パッケージの互換性確認、`pip-audit`の公開DB照会（既知脆弱性なし）、全差分の`git diff --check`に合格。警告2件はテストクライアントの非推奨API。未知の脆弱性がないことは保証しない。
+- 直接依存をバージョン固定した検証環境の39パッケージの互換性確認、`pip-audit`の公開DB照会（既知脆弱性なし）、全差分の`git diff --check`に合格。推移的依存の完全なlockfileはまだない。警告2件はテストクライアントの非推奨API。未知の脆弱性がないことは保証しない。
 - Sandboxの結果不明Transfer／銀行Payoutについて、元のリクエスト・金額・口座・source・metadataをGETで照合する復旧処理を追加。別管理者、MFA、30分の有効期限、二重送金拒否、監査記録・DB原子性を検証。残高は確認中も予約し、再送しない。Checkout・返金・reversalの結果不明は未対応。
 - stagingにも認証・Origin検証・エラー秘密情報抑制を適用。公開判定`/readyz`とは別の`/deploymentz`と、読取専用`python -m app.deployment_check`を配備に使用する。本番StripeキーによるPOSTはコードで禁止したまま。
 - 予期しない例外の本文・tracebackが通常サーバーログに出る問題を修正。staging／productionは問い合わせ番号と例外種別だけ記録する。外部監視SDKへの例外送信の詳細なscrub確認は別途必要。
@@ -52,7 +52,9 @@ GitHub `kegkeg4/toolbako`への反映権限を確認。既存mainは保持し、
 - GitHub commit：`842db278fd2d43276fae3038c0fd2e661f516ac1`。
 - GitHubとローカルのtree SHAはともに`42e1ce794dace91cc51ab60a40b70246ed6618f1`。59ファイルの変更を含む全treeが一致。
 - [GitHub Actionsの回帰試験](https://github.com/kegkeg4/toolbako/actions/runs/37945152540)は **success、248 passed / 2 warnings / 11.38秒**。Ubuntu・Python 3.12・実PostgreSQL 17。外部Auth・Stripe・メールはMock。
-- 初回CIのcheckout v4／setup-python v5にNode 20の非推奨警告が出たため、[公式checkout v7.0.1](https://github.com/actions/checkout/releases/tag/v7.0.1)と[公式setup-python v7.0.0](https://github.com/actions/setup-python/releases/tag/v7.0.0)のNode 24対応を確認して更新。更新後の外部CIは実行後に追記する。
+- 初回CIのcheckout v4／setup-python v5にNode 20の非推奨警告が出たため、[公式checkout v7.0.1](https://github.com/actions/checkout/releases/tag/v7.0.1)と[公式setup-python v7.0.0](https://github.com/actions/setup-python/releases/tag/v7.0.0)のNode 24対応を確認して更新。更新版の[外部CI](https://github.com/kegkeg4/toolbako/actions/runs/37946293580)は249件合格、14.22秒。Node 20警告は解消。
+- キー値を出さず、公開キー／service_roleの存在を個別に表示する診断を追加。配備チェック単体22件合格。追加後の[外部CI](https://github.com/kegkeg4/toolbako/actions/runs/37949695876)は **250 passed / 2 warnings / 10.65秒、success**。
+- 最新のコードcommitは`fc4ce45b319270042737d593ef383c61f01df2a7`、treeは`f231ff417885c67943438ca24e52b10a1b054c19`でローカルと一致。
 
 ### Railway反映結果の確認中
 
@@ -60,9 +62,24 @@ GitHub `kegkeg4/toolbako`への反映権限を確認。既存mainは保持し、
 
 初回CIの成功後に配備操作を実行したが、応答中に通信エラーが発生。復旧後の読み取りで、**18件はSTAGEDのまま・新しいdeploymentなし**を確認し、未反映であることが分かった。ログ抑制・CI更新版を追加検証し、その新しいcommitへ配備元を更新してから反映する。Pre-deploy／DB接続・新アプリのHTTP成功は、まだ確認できていない。
 
+10/10 00:04 JSTに18件の設定反映・配備が実行された。deployment `e59cc0cf-fbf5-4692-b3d6-0ca9af4129c1`は**ビルド成功後、PRE_DEPLOY_COMMANDで停止**。Railwayの配備ログ画面で`supabase_keys_present: false`を確認。設定名が存在することと、実行時に非空の値が渡ることは別だった。キー検査より後のDB／Auth試験は実行されていないため、DBパスワードの不正とは断定しない。
+
+Supabaseから既存の有効なlegacy anon公開キーだけを確認し、Railwayの同名変数へ再保存した。キーの新規発行・無効化、sealed service_role／PGPASSWORDの変更はしていない。[Railway公式のsealed variable仕様](https://docs.railway.com/variables#sealed-variables)では配備時に値が提供されるが、UI／APIからは取得できない。値を読み取るための回避は行わない。
+
+個別の存在診断を含む最新commitと公開キー再保存の2件を反映した。deployment `bebfdff5-7dd1-4c9b-971a-e75791d24c2d`もPre-deployで停止。構造化ログの非秘密チェックは以下だった。
+
+- `supabase_anon_key_present: true`：既存公開キーの受け渡しは解消。
+- `supabase_service_role_key_present: false`：サーバー用キーが実行時に空。
+- server environment、demo disabled、HTTPS、許可host、session secret、Supabase endpoint、DB設定、live keyなし：true。
+- 構成不備があるため、DB接続・Auth APIへの通信は実行していない。DBパスワードの正否は未確認。
+
+Railway APIではservice_roleの変数名とSeal状態は存在する。**名前があるだけで値の注入成功とは扱わない。** 封印済み値を読む／再作成する操作はしていない。ユーザーがRailwayの既存`SUPABASE_SERVICE_ROLE_KEY`の「編集」から、対象Supabaseの既存service_roleキーを直接再入力する必要がある。チャットへキーを貼らず、削除・新規発行・ローテーションは不要。保存後に再配備・読取専用チェックを再実行する。
+
+最新配備失敗後も旧版の成功deploymentが残るため、新版公開成功とは扱わない。Railway管理画面のブラウザー認証は作業途中で期限切れになり、再ログインが必要。Railwayのbuild runtimeはPython 3.12.15、ローカルは3.12.13で同じ3.12系だがpatch versionは異なる。
+
 ## 有料開始までの残作業
 
-1. Railway反映結果の確認と、Pre-deployによる実DB／Auth API接続確認。GitHub公開・CIは完了。
+1. ユーザーによる既存sealed service_role値の再入力と、再配備・Pre-deployによる実DB／Auth API接続確認。GitHub公開・CIは完了。DBパスワードは未検証。
 2. 実Supabase会員登録、メール確認、ログイン、パスワード再設定、MFA。管理者2人の実アカウントID登録と復旧運用確認。
 3. Stripe SandboxのCheckout・Webhook・JPY Connect分配・銀行Payout・返金・異議申立てE2E。本番実行ガードを外す前に証拠を保存する。
 4. Checkout／返金／reversalの結果不明、銀行振込後の回収、銀行失敗後の再申請、部分返金・定期課金台帳・異議申立て終了後の復元。
