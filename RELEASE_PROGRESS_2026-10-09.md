@@ -8,12 +8,13 @@
 
 ## ローカルで完了
 
-- Python 3.12.13と実ローカルPostgreSQL 17で **248 passed / 2 warnings / 30.55秒**。Stripe・Supabase Auth・メール等のHTTP APIはMock。
+- Python 3.12.13と実ローカルPostgreSQL 17で **249 passed / 2 warnings / 15.37秒**。Stripe・Supabase Auth・メール等のHTTP APIはMock。ログ抑制修正前の版も248件合格。
 - 固定依存39パッケージの互換性確認、`pip-audit`の公開DB照会（既知脆弱性なし）、全差分の`git diff --check`に合格。警告2件はテストクライアントの非推奨API。未知の脆弱性がないことは保証しない。
 - Sandboxの結果不明Transfer／銀行Payoutについて、元のリクエスト・金額・口座・source・metadataをGETで照合する復旧処理を追加。別管理者、MFA、30分の有効期限、二重送金拒否、監査記録・DB原子性を検証。残高は確認中も予約し、再送しない。Checkout・返金・reversalの結果不明は未対応。
 - stagingにも認証・Origin検証・エラー秘密情報抑制を適用。公開判定`/readyz`とは別の`/deploymentz`と、読取専用`python -m app.deployment_check`を配備に使用する。本番StripeキーによるPOSTはコードで禁止したまま。
+- 予期しない例外の本文・tracebackが通常サーバーログに出る問題を修正。staging／productionは問い合わせ番号と例外種別だけ記録する。外部監視SDKへの例外送信の詳細なscrub確認は別途必要。
 - デモSQLite保存が既存親ディレクトリをchmodする不具合を修正。新規専用ディレクトリ・DBは非公開権限にし、symlink／hardlinkを拒否する。
-- GitHub ActionsはPython 3.12・PostgreSQL 17の回帰試験を追加。checkout／setup-pythonは検証済みcommit SHAに固定。
+- GitHub ActionsはPython 3.12・PostgreSQL 17の回帰試験を追加。checkout v7.0.1／setup-python v7.0.0は公式のtag・action.ymlでNode 24を確認し、commit SHAに固定。
 - ローカルのトップ（1440px／390px）、管理画面（390px）で横はみ出し・ブラウザーerrorなし。トップはh1とmain各1件、ロゴ表示を確認。実認証・実決済・全画面の目視・負荷試験ではない。
 
 ## 実Supabaseで完了
@@ -44,11 +45,24 @@ GitHub `kegkeg4/toolbako`への反映権限を確認。既存mainは保持し、
 - Healthcheck：`/deploymentz`、timeout 120秒。
 - Stripeキーは未登録。本番決済有効化はこの配備の対象外。
 
-**GitHub公開・外部CI・Railway配備・実接続結果は、実行後にこの項目へ追記する。現時点で成功とは扱わない。**
+### GitHub公開と外部CIの結果
+
+- 公開用ブランチ：`codex/release-20261009`。既存mainは変更していない。
+- [変更PR #1](https://github.com/kegkeg4/toolbako/pull/1)を作成し、このCodexタスクに添付。
+- GitHub commit：`842db278fd2d43276fae3038c0fd2e661f516ac1`。
+- GitHubとローカルのtree SHAはともに`42e1ce794dace91cc51ab60a40b70246ed6618f1`。59ファイルの変更を含む全treeが一致。
+- [GitHub Actionsの回帰試験](https://github.com/kegkeg4/toolbako/actions/runs/37945152540)は **success、248 passed / 2 warnings / 11.38秒**。Ubuntu・Python 3.12・実PostgreSQL 17。外部Auth・Stripe・メールはMock。
+- 初回CIのcheckout v4／setup-python v5にNode 20の非推奨警告が出たため、[公式checkout v7.0.1](https://github.com/actions/checkout/releases/tag/v7.0.1)と[公式setup-python v7.0.0](https://github.com/actions/setup-python/releases/tag/v7.0.0)のNode 24対応を確認して更新。更新後の外部CIは実行後に追記する。
+
+### Railway反映結果の確認中
+
+配備元を上記commitへ固定する変更を追加し、合計18件の反映待ち変更を再確認した。対象は既存webサービスだけ、データ削除なし、APP_ENVはstaging、Stripe本番書込は停止のまま。
+
+初回CIの成功後に配備操作を実行したが、応答中に通信エラーが発生。復旧後の読み取りで、**18件はSTAGEDのまま・新しいdeploymentなし**を確認し、未反映であることが分かった。ログ抑制・CI更新版を追加検証し、その新しいcommitへ配備元を更新してから反映する。Pre-deploy／DB接続・新アプリのHTTP成功は、まだ確認できていない。
 
 ## 有料開始までの残作業
 
-1. 新コードの公開・CI・Railway Pre-deployによる実DB／Auth API接続確認。
+1. Railway反映結果の確認と、Pre-deployによる実DB／Auth API接続確認。GitHub公開・CIは完了。
 2. 実Supabase会員登録、メール確認、ログイン、パスワード再設定、MFA。管理者2人の実アカウントID登録と復旧運用確認。
 3. Stripe SandboxのCheckout・Webhook・JPY Connect分配・銀行Payout・返金・異議申立てE2E。本番実行ガードを外す前に証拠を保存する。
 4. Checkout／返金／reversalの結果不明、銀行振込後の回収、銀行失敗後の再申請、部分返金・定期課金台帳・異議申立て終了後の復元。

@@ -124,7 +124,11 @@ class ProductionGuardMiddleware(BaseHTTPMiddleware):
         except Exception as exc:
             if not self.settings.is_deployed:
                 raise
-            logger.exception("Unhandled request error request_id=%s path=%s",request_id,security_path)
+            # Provider exceptions may contain credential-bearing URLs or raw
+            # response bodies. Keep production/staging logs useful for correlation
+            # without emitting exception text, traceback locals or request paths.
+            error_type = re.sub(r"[^A-Za-z0-9_.]", "", type(exc).__name__)[:80]
+            logger.error("Unhandled request error request_id=%s error_type=%s", request_id, error_type)
             try:
                 import sentry_sdk
                 sentry_sdk.capture_exception(exc)

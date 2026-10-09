@@ -2,14 +2,16 @@
 
 ## 2026-10-09 リリース準備の再検証（こちらが最新）
 
-- 配備対象と同じPython 3.12.13、実ローカルPostgreSQL 17で全回帰テスト **248 passed / 2 warnings / 30.55秒**。Stripe・Auth・メールAPIはMockであり、実決済の合格ではない。
+- 配備対象と同じPython 3.12.13、実ローカルPostgreSQL 17で全回帰テスト **249 passed / 2 warnings / 15.37秒**。Stripe・Auth・メールAPIはMockであり、実決済の合格ではない。ログ抑制修正前の248件も合格。
 - 固定依存39パッケージの互換性確認に合格。`pip-audit`の公開脆弱性DB照会は既知脆弱性なし。全作業差分の`git diff --check`に合格。
 - Sandbox限定で結果不明のTransfer／銀行PayoutをGET照合し、別の管理者がMFA付きで30分以内に承認する復旧を追加。二重送金、金額・口座・metadata不一致、期限切れ、不完全な一覧、DB rollbackをテスト。Checkout・返金・reversalの結果不明は対象外。
 - stagingにもOrigin検証・認証制限・秘密情報抑制を適用。配備用`/deploymentz`を追加し、厳格な公開判定`/readyz`と本番決済禁止を維持。
+- staging／productionの通常サーバーログに例外本文・tracebackを出さず、問い合わせ番号と例外種別だけ記録する修正を追加。外部監視SDKのscrub設定は別途確認が必要。
 - SQLiteデモ保存が既存親ディレクトリの権限を変更する不具合を修正。保存先のsymlink／hardlinkを拒否する4件のテストを追加。
 - 実Supabaseを復帰し、AuthのSite URLと2つのコールバックURLをRailway URLに設定。runtime 9テーブルのRLSと一般ユーザーの書込拒否を再確認。金融FK用インデックス3件を実DBへ追加。
 - トップ（PC1440px／スマートフォン390px）と管理画面（390px）で横はみ出し・ブラウザーerrorなし、トップのh1／mainは各1件。全画面・実環境CWVの合格を意味しない。
-- **本番決済NO-GOを継続**。外部環境の新コード配備・実認証・Stripe Sandbox E2Eは未完了。既存の投稿用公開RPCと実DBの旧バージョンにも追加対処が必要。実績・最新の配備結果は`RELEASE_PROGRESS_2026-10-09.md`。
+- [GitHub Actions](https://github.com/kegkeg4/toolbako/actions/runs/37945152540)でも **248 passed / 2 warnings / 11.38秒、success**。公開ブランチのtreeはローカルの検証済みtreeと完全一致。GitHubのmainは維持。
+- **本番決済NO-GOを継続**。Railwayの初回配備操作は通信中断後、未反映と確認。再配備・実認証・Stripe Sandbox E2Eは未完了。既存の投稿用公開RPCと実DBの旧バージョンにも追加対処が必要。実績・最新の配備結果は`RELEASE_PROGRESS_2026-10-09.md`。
 
 ## 2026-09-23 接続準備の検証（履歴）
 

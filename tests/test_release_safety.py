@@ -267,14 +267,21 @@ def test_origin_scheme_must_match(environment):
     assert client.post("/test", headers={"origin": "https://toolbako.example"}).status_code == 200
 
 
-def test_persistence_failure_does_not_return_success_or_leak_secret():
-    app = guard_app(Settings(environment="production", site_base_url="https://toolbako.example", redis_url=""))
+@pytest.mark.parametrize("environment", ["staging", "production"])
+def test_persistence_failure_does_not_return_success_or_leak_secret(environment, caplog):
+    app = guard_app(Settings(environment=environment, site_base_url="https://toolbako.example", redis_url=""))
     async def failed():
-        raise RuntimeError("storage unavailable")
+        raise RuntimeError("storage unavailable provider-private-password")
     app.state.persist = failed
     response = TestClient(app).post("/test", headers={"origin": "https://toolbako.example"})
     assert response.status_code == 500
     assert response.json()["error"] == "internal_server_error"
+    assert "provider-private-password" not in response.text
+    assert "provider-private-password" not in caplog.text
+    logged = [r for r in caplog.records if r.name == "toolbako.requests"]
+    assert len(logged) == 1 and logged[0].exc_info is None
+    assert response.headers["x-request-id"] in logged[0].getMessage()
+    assert "error_type=RuntimeError" in logged[0].getMessage()
 
 
 def test_actual_admin_routes_require_recent_mfa():
