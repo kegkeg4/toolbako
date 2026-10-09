@@ -10,8 +10,10 @@ load_dotenv()
 class Settings:
     environment: str = os.getenv("APP_ENV", "development").lower()
     supabase_url: str = os.getenv("SUPABASE_URL", "").rstrip("/")
-    supabase_anon_key: str = os.getenv("SUPABASE_ANON_KEY", "")
-    supabase_service_role_key: str = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+    supabase_anon_key: str = os.getenv("SUPABASE_ANON_KEY", "").strip()
+    supabase_service_role_key: str = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+    supabase_publishable_key: str = os.getenv("SUPABASE_PUBLISHABLE_KEY", "").strip()
+    supabase_secret_key: str = os.getenv("SUPABASE_SECRET_KEY", "").strip()
     site_base_url: str = os.getenv("SITE_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
     session_secret: str = os.getenv("SESSION_SECRET", "dev-only-secret")
     admin_user_ids: tuple[str, ...] = tuple(x.strip() for x in os.getenv("ADMIN_USER_IDS", "").split(",") if x.strip())
@@ -72,6 +74,12 @@ class Settings:
     clamav_port: int = int(os.getenv("CLAMAV_PORT", "3310"))
 
     def __post_init__(self) -> None:
+        # Preserve the existing application API/legacy env names while accepting
+        # current opaque keys. New env names win during a gradual migration.
+        if self.supabase_publishable_key:
+            object.__setattr__(self, "supabase_anon_key", self.supabase_publishable_key)
+        if self.supabase_secret_key:
+            object.__setattr__(self, "supabase_service_role_key", self.supabase_secret_key)
         # Fail closed even when Settings is constructed directly in a test,
         # management command or future dependency-injection container.
         if (self.environment == "production" or self.database_url) and self.demo_mode:
@@ -85,7 +93,7 @@ class Settings:
 
     @property
     def supabase_ready(self) -> bool:
-        return bool(self.supabase_url and self.supabase_anon_key)
+        return bool(self.supabase_url and self.supabase_anon_key and not self.supabase_anon_key.startswith("sb_secret_"))
 
     @property
     def is_production(self) -> bool:

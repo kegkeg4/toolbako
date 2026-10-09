@@ -28,11 +28,13 @@ CIもハッシュ照合を必須にして同じ固定ファイルを使用しま
 1. 現行のruntime保存方式では、新規の会員0件プロジェクトに `supabase/bootstrap_runtime_auth.sql`、続いて `python -m app.database migrate` を適用します。既存会員・プロフィールがあるDBではbootstrapを実行せず、別の移行／バックフィルをレビューしてください。旧 `supabase/schema.sql` と公開commerceテーブル向けのmigrationsを混ぜて一括実行しないでください。
 2. 外部OAuthを使う場合だけ、Authentication > Providers で必要なプロバイダーを設定します。メール認証とは別の準備です。
 3. Authentication > URL Configuration のSite URLを公開先へ設定し、`SITE_BASE_URL/auth/callback` と `SITE_BASE_URL/auth/recovery` を個別に許可します。ワイルドカードは使いません。
-4. サーバーの非公開環境変数に Supabase URL / anon key / service role keyを設定します。DBはSession poolerとTLSを利用し、`DATABASE_URL` にパスワードを含めない場合は `PGPASSWORD` を別の秘密変数として設定できます。
+4. サーバーの非公開環境変数に Supabase URL / publishable key / secret keyを設定します。推奨変数名は`SUPABASE_PUBLISHABLE_KEY`／`SUPABASE_SECRET_KEY`、既存`SUPABASE_ANON_KEY`／`SUPABASE_SERVICE_ROLE_KEY`も互換用に使用できます。旧変数名へ新しいopaqueキーを保存した場合も対応します。新変数名に非空の値があれば優先し、勝手に旧キーを削除・無効化しません。DBはSession poolerとTLSを利用し、`DATABASE_URL` にパスワードを含めない場合は `PGPASSWORD` を別の秘密変数として設定できます。
 5. 本番では `DEMO_MODE=false` とし、`SESSION_SECRET` を十分長いランダム値に変更します。
 6. `/readyz` と管理画面 `/admin` は設定・実装条件の確認です。100%になっても実機決済・負荷・復元試験の代替にはなりません。
 
 Twitter OAuthのSupabase provider名は `twitter` です。X Developer Portal側のCallback URLには Supabase Dashboardに表示されるcallback URLを指定してください。アプリ側はOAuthのアクセストークンをURL fragmentへ残さず、サーバー側PKCEで交換します。
+
+[Supabaseの公式キー移行手順](https://supabase.com/docs/guides/getting-started/migrating-to-new-api-keys)に沿い、新しい`sb_publishable_...`／`sb_secret_...`は`apikey`ヘッダーだけに送信します。ユーザーのログインJWTは引き続き別の`Authorization`に指定し、サーバー用APIキーで置き換えません。旧キーは2026年末の非推奨化が案内されています。新旧キーの送信・設定優先順はMockで検証済みであり、実プロジェクトでの新キー発行・疎通は別途必要です。
 
 ## Railway
 

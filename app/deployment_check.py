@@ -13,6 +13,7 @@ import httpx
 
 from .config import Settings
 from .database import PostgresStateStore
+from .supabase_api import supabase_headers
 
 
 def configuration_checks(settings: Settings) -> dict[str, bool]:
@@ -33,8 +34,10 @@ def configuration_checks(settings: Settings) -> dict[str, bool]:
         "supabase_keys_present": bool(settings.supabase_anon_key and settings.supabase_service_role_key),
         # Report presence only, never a value/length/prefix. Separate flags let
         # operators diagnose injection without reading or replacing sealed keys.
-        "supabase_anon_key_present": bool(settings.supabase_anon_key),
-        "supabase_service_role_key_present": bool(settings.supabase_service_role_key),
+        "supabase_public_key_present": bool(settings.supabase_anon_key),
+        "supabase_server_key_present": bool(settings.supabase_service_role_key),
+        "supabase_key_roles": not settings.supabase_anon_key.startswith("sb_secret_")
+        and not settings.supabase_service_role_key.startswith("sb_publishable_"),
         "database_configured": bool(settings.database_url),
         # Live money movement remains a separately reviewed, code-blocked step.
         "no_live_stripe_key": not settings.stripe_secret_key.startswith(("sk_live_", "rk_live_")),
@@ -52,10 +55,8 @@ async def connection_checks(settings: Settings) -> dict[str, bool]:
     # checks the required runtime schema version; it never auto-migrates/seeds.
     backend = PostgresStateStore(settings.database_url, production=True)
     results["database_schema"] = await backend.probe()
-    anon_headers = {"apikey": settings.supabase_anon_key,
-                    "Authorization": f"Bearer {settings.supabase_anon_key}"}
-    server_headers = {"apikey": settings.supabase_service_role_key,
-                      "Authorization": f"Bearer {settings.supabase_service_role_key}"}
+    anon_headers = supabase_headers(settings.supabase_anon_key)
+    server_headers = supabase_headers(settings.supabase_service_role_key)
     profile_columns = (
         "id,username,display_name,avatar_url,bio,headline,skills,experience,portfolio,"
         "availability,response_time,pricing_note,x_url,website_url,is_banned,"

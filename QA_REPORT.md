@@ -2,6 +2,8 @@
 
 ## 2026-10-10 依存固定・監視情報保護の再検証（こちらが最新）
 
+同日の追加：Supabase新旧APIキー互換対応後の最新ローカル証拠は **282 passed / 2 warnings / 15.51秒**。空の環境から構成した同じPython 3.12.13・実PostgreSQL 17を使用。opaque APIキーを誤ってBearer JWTとして送らないこと、ユーザーJWTの分離、新変数名の優先順、キー種類の取り違えを通信前に拒否する14件を追加。キー自体の発行・失効・実プロジェクトでの新キー疎通は行っていない。下記268件はこの追加前の確認済み証拠。
+
 - 空のPython 3.12.13環境へ、間接依存も含むハッシュ付き固定requirementsから39パッケージを新規インストール。実ローカルPostgreSQL 17で **268 passed / 2 warnings / 14.48秒**。Auth・Stripe・メールはMockで、実サービスE2Eではない。
 - `uv pip check`で39パッケージの互換性確認に合格。ハッシュ付きrequirementsへの`pip-audit --disable-pip --no-deps --strict`は公開DB上の既知脆弱性なし。未知の脆弱性・未試験プラットフォームの動作を保証しない。
 - 外部Sentryへ送るイベントをallowlistから再構築。例外本文、URL、Query、Cookie、Header、ユーザー情報、scope extras、breadcrumb、変数、ソース行、添付を除外し、自動integration／trace／profiling／log／metrics／sessionを停止。実SDKのシリアライズ済みenvelopeを含む15件を追加。実Sentryへの通信・通知は未試験。

@@ -52,6 +52,7 @@ from .payout_worker import sandbox_payouts_ready
 from .refunds import request_order_refunds
 from .reconciliation import propose_recovery, approve_recovery
 from .deployment_check import configuration_checks
+from .supabase_api import supabase_headers
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -1958,7 +1959,7 @@ async def auth_callback(request: Request, code: str = "", state: str = "", next:
         async with httpx.AsyncClient(timeout=10) as client:
             token_response = await client.post(
                 f"{settings.supabase_url}/auth/v1/token?grant_type=pkce",
-                headers={"apikey":settings.supabase_anon_key,"Authorization":f"Bearer {settings.supabase_anon_key}","Content-Type":"application/json"},
+                headers={**supabase_headers(settings.supabase_anon_key),"Content-Type":"application/json"},
                 json={"auth_code":code,"code_verifier":code_verifier},
             )
             token_data = token_response.json() if token_response.status_code == 200 else {}
@@ -2205,7 +2206,7 @@ async def settings_save(
             async with httpx.AsyncClient(timeout=10) as client:
                 response = await client.patch(
                     f"{settings.supabase_url}/rest/v1/profiles?id=eq.{user['id']}",
-                    headers={"apikey":settings.supabase_service_role_key,"Authorization":f"Bearer {settings.supabase_service_role_key}","Content-Type":"application/json","Prefer":"return=representation"},
+                    headers={**supabase_headers(settings.supabase_service_role_key),"Content-Type":"application/json","Prefer":"return=representation"},
                     json=profile_values,
                 )
         except httpx.HTTPError as exc:
@@ -2321,8 +2322,7 @@ async def sync_creator_badges_to_supabase(account: dict, badge_state: dict[str, 
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
     headers = {
-        "apikey": settings.supabase_service_role_key,
-        "Authorization": f"Bearer {settings.supabase_service_role_key}",
+        **supabase_headers(settings.supabase_service_role_key),
         "Content-Type": "application/json",
         "Prefer": "resolution=merge-duplicates,return=minimal",
     }

@@ -10,6 +10,9 @@
 
 ### 10/10の追加仕上げ
 
+- 同日の最終追加としてSupabase新旧APIキーに互換対応し、最新ローカル回帰試験は **282 passed / 2 warnings / 15.51秒**。14件を追加し、設定の優先順、公開／サーバーキー取り違えの通信前拒否、opaqueキーのBearer誤送信防止、ユーザーJWT分離、読取専用preflight、認定バッジ保存ヘッダーをMockで検証。以下の268件はこの修正前の履歴。
+- Supabaseスキルに従って公式changelogと[APIキー移行案内](https://supabase.com/docs/guides/getting-started/migrating-to-new-api-keys)を再確認。旧キーは2026年末の非推奨化が案内されているため、`SUPABASE_PUBLISHABLE_KEY`／`SUPABASE_SECRET_KEY`を優先し、既存変数名の互換性も保持。既存`SUPABASE_SERVICE_ROLE_KEY`へ新しい`sb_secret_...`を保存する場合も対応する。キーの取得・新規発行・削除・失効・旧キー停止はしていない。実キーを使った疎通は未確認。
+- preflightの個別存在フラグは新旧共通の`supabase_public_key_present`／`supabase_server_key_present`にした。値やprefixをログへ出さず、構成チェックを緩めない。2026-10-30の[Data API明示grant変更](https://supabase.com/changelog/45329-breaking-change-tables-not-exposed-to-data-and-graphql-api-automatically)も確認し、現行bootstrapがprofile／badgeのservice_role権限を明示grantしていることをソースで再確認。既存DBの権限は変更しない。
 - 最新版を空のPython 3.12.13環境へハッシュ照合付きでインストールし、実ローカルPostgreSQL 17で **268 passed / 2 warnings / 14.48秒**。39パッケージの互換性確認も合格。外部Auth・Stripe・メールはMock。
 - `requirements.in`／`requirements-dev.in`を編集元とし、間接依存を含むrequirementsをバージョン・SHA256で固定。[uvの公式手順](https://docs.astral.sh/uv/pip/compile/)を使用し、CIも`--require-hashes`と`pip check`を追加。macOS以外のOS markerも含むが、Python 3.12のmacOS／Linux以外は未検証。
 - `pip-audit`で生成済みlockを公開脆弱性DBへ照会し、既知脆弱性なし。未知の問題がない保証ではない。
