@@ -20,6 +20,12 @@
 
 10/10の開始時にGitHubの前回最新commit `56a535c4e4603b189a689c104d7339b7a227ddac`のCI successを確認。Railwayには新しい配備・反映待ち変更がなく、service_roleキー不足による停止は継続していた。以下の249件等は10/9時点の履歴であり、上記268件が現在のローカル証拠。
 
+10/10の追加変更は既存PR #1へ反映。GitHubのコードcommitは`9b8e786b72594164e75b6c088e7971ffb0b866e4`、全tree `6e08e35e4ed6c74e03e960b0f3d9989a72c27ea1`はローカルと一致。[外部CI](https://github.com/kegkeg4/toolbako/actions/runs/37955305762)ではLinux・Python 3.12・実PostgreSQL 17で **268 passed / 2 warnings / 14.46秒**、ハッシュ付きインストールと`pip check`もsuccess。Auth・Stripe・メール等の外部APIはMock。
+
+RailwayはStart Commandが管理画面側で上書きされていたため、コードcommit更新と`--no-access-log`追加の2件を反映待ちにした。patch `59114231-c90d-4d1d-81ee-f3c40c021703`はSTAGED、対象は既存webのみ、destructive=false、変数変更・データ削除・新規有料リソースなし。**accept-deployは実行しておらず、旧版が稼働したまま**。既存service_roleの再入力後、パッチに想定外の変更がないことを確認し、配備と実接続試験を再開する。実Stripeを有効にするパッチではない。
+
+今回起動したローカル試験用PostgreSQLは試験後に停止した。ユーザーの8000番開発サーバーは操作していない。
+
 - Python 3.12.13と実ローカルPostgreSQL 17で **249 passed / 2 warnings / 15.37秒**。Stripe・Supabase Auth・メール等のHTTP APIはMock。ログ抑制修正前の版も248件合格。
 - 直接依存をバージョン固定した検証環境の39パッケージの互換性確認、`pip-audit`の公開DB照会（既知脆弱性なし）、全差分の`git diff --check`に合格。推移的依存の完全なlockfileはまだない。警告2件はテストクライアントの非推奨API。未知の脆弱性がないことは保証しない。
 - Sandboxの結果不明Transfer／銀行Payoutについて、元のリクエスト・金額・口座・source・metadataをGETで照合する復旧処理を追加。別管理者、MFA、30分の有効期限、二重送金拒否、監査記録・DB原子性を検証。残高は確認中も予約し、再送しない。Checkout・返金・reversalの結果不明は未対応。

@@ -7,8 +7,8 @@
 - 外部Sentryへ送るイベントをallowlistから再構築。例外本文、URL、Query、Cookie、Header、ユーザー情報、scope extras、breadcrumb、変数、ソース行、添付を除外し、自動integration／trace／profiling／log／metrics／sessionを停止。実SDKのシリアライズ済みenvelopeを含む15件を追加。実Sentryへの通信・通知は未試験。
 - 呼出者指定の問い合わせ番号を廃止し、サーバーのUUIDを使用。監視障害が安全な500応答を壊さないことと、設定エラーがDSNをログへ出さないことを検証。
 - OAuth codeなどのURL情報が標準access logに残らないようRailway／Procfileへ`--no-access-log`を追加。配備先の上書きStart Commandとproxyログは実環境での反映・確認が必要。
-- 直接依存とlockの一致、全パッケージのバージョン／ハッシュ、本番とテストlockの一致、CIハッシュ必須設定の3件を追加。CIの最新版反映・外部実行は別途確認する。
-- **公開NO-GOを継続**。Railwayの実行時service_roleキーは未入力で、新しい配備・実DB／Auth試験は停止中。キー以外の金融復旧・実決済等の残課題も変更なし。
+- 直接依存とlockの一致、全パッケージのバージョン／ハッシュ、本番とテストlockの一致、CIハッシュ必須設定の3件を追加。[Linuxの外部CI](https://github.com/kegkeg4/toolbako/actions/runs/37955305762)もハッシュ付きインストール・`pip check`・実PostgreSQL 17で **268 passed / 2 warnings / 14.46秒、success**。
+- **公開NO-GOを継続**。Railwayへ検証済みcommit `9b8e786b72594164e75b6c088e7971ffb0b866e4`と安全なStart Commandの2件をSTAGEDで準備。未反映で、再配備はしていない。前回配備の実行時service_roleキーは空で、ユーザーの再入力・実DB／Auth試験を待つ。キー以外の金融復旧・実決済等の残課題も変更なし。
 
 ## 2026-10-09 リリース準備の再検証（履歴）
 
