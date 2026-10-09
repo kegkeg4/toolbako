@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}2段階認証 — ツールバコ{% endblock %}
+{% block page_styles %}<link rel="stylesheet" href="/static/mfa.css?v={{ asset_version }}">{% endblock %}
+{% block content %}
+<section class="account-page narrow-account mfa-page">
+  <div class="account-head"><span class="section-kicker">ACCOUNT SECURITY</span><h1>認証アプリで本人確認</h1><p>管理・売上の操作を守るための追加確認です。確認はこの端末で10分間有効です。</p></div>
+  {% if mfa_error %}<p class="form-error" role="alert">{{ mfa_error }}</p>{% endif %}
+  {% if enrollment %}
+  <div class="balance-card"><h2>1. 認証アプリに追加</h2><p>Google AuthenticatorなどでQRコードを読み取ってください。</p>
+    {% if enrollment.qr %}<img src="{{ enrollment.qr }}" width="220" height="220" alt="認証アプリに登録するQRコード">{% endif %}
+    <details><summary>手動で入力する場合</summary><p>アカウント名：ツールバコ ／ 種類：時間ベース</p><code>{{ enrollment.secret }}</code></details>
+    <p>このキーは他人に教えないでください。認証アプリを失うと重要操作ができなくなるため、アプリの安全なバックアップも設定してください。</p>
+  </div>
+  {% endif %}
+  {% if enrollment or factors %}
+  <form class="mfa-form" action="/security/mfa/verify" method="post">
+    <input type="hidden" name="next" value="{{ next }}">
+    {% if enrollment %}<input type="hidden" name="factor_id" value="{{ enrollment.id }}">
+    {% elif factors|length == 1 %}<input type="hidden" name="factor_id" value="{{ factors[0].id }}">
+    {% else %}<label for="factor">認証アプリ</label><select id="factor" name="factor_id">{% for factor in factors %}<option value="{{ factor.id }}">{{ factor.friendly_name or '認証アプリ' }}</option>{% endfor %}</select>{% endif %}
+    <label for="mfa-code">{{ '2. ' if enrollment else '' }}認証アプリに表示された6桁のコード</label>
+    <input id="mfa-code" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" minlength="6" maxlength="6" required autofocus>
+    <button class="button" type="submit">確認して続ける</button>
+  </form>
+  {% else %}
+  <p>まず認証アプリを登録します。パスワードに加えて、スマートフォンのコードでアカウントを守ります。</p>
+  <form action="/security/mfa/enroll" method="post"><input type="hidden" name="next" value="{{ next }}"><button class="button">認証アプリの登録を始める</button></form>
+  {% endif %}
+  <p><a href="/security">セキュリティ設定へ戻る</a> · <a href="/support">認証できない場合の相談</a></p>
+</section>
+{% endblock %}

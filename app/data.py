@@ -6,6 +6,9 @@ from threading import RLock
 from typing import Any
 from uuid import uuid4
 
+from .config import settings
+from .payout_policy import RESERVED_PAYOUT_STATUSES, payout_fee, scheduled_payout_date
+
 CATEGORIES = ["業務効率化", "文章・ライティング", "画像・デザイン", "開発者ツール", "マーケティング", "学習・教育", "エンタメ・ネタ", "データ分析", "その他"]
 AI_OPTIONS = ["Claude", "ChatGPT", "Gemini", "Codex", "Copilot", "その他"]
 PRICE_LABELS = {"free": "無料", "paid": "買い切り", "consultation": "相談して決める"}
@@ -27,6 +30,12 @@ TRANSFER_STATUS_LABELS = {
 }
 
 now = datetime.now(timezone.utc)
+
+
+def platform_fee_for(amount: int, *, custom: bool = False) -> int:
+    """Return the integer yen platform fee used by every sales ledger row."""
+    rate = settings.custom_fee_rate if custom else settings.platform_fee_rate
+    return round(max(0, amount) * rate)
 SEED_TOOLS: list[dict[str, Any]] = [
     {"slug":"minutes-magic","name":"議事録マジック","tagline":"会議のメモを、次の行動が見える議事録へ。","description_md":"## 会議後の10分を取り戻す\n\nラフなメモを貼るだけで、決定事項・担当者・期限を整理します。購入後、会社用フォーマットへの調整もDMで相談できます。","category":"業務効率化","price_type":"paid","price":980,"distribution":"webapp","ai_used":["Claude"],"tags":["議事録","仕事術","要約"],"author_name":"mugi","author_username":"mugi","author_id":"seller-mugi","like_count":126,"view_count":1480,"sales_count":38,"rating":4.9,"support_days":14,"created_at":now-timedelta(hours=7),"accent":"coral"},
     {"slug":"pixel-recipe","name":"Pixel Recipe","tagline":"スクショから、デザインのレシピを抽出。","description_md":"## 見た目を言葉にする\n\n画像を入れると、配色・余白・タイポグラフィの特徴を説明します。買い切りでアップデートも受け取れます。","category":"画像・デザイン","price_type":"paid","price":1500,"distribution":"webapp","ai_used":["Gemini"],"tags":["デザイン","配色","UI"],"author_name":"sora","author_username":"sora","author_id":"seller-sora","like_count":94,"view_count":920,"sales_count":21,"rating":4.8,"support_days":7,"created_at":now-timedelta(days=1),"accent":"blue"},
@@ -38,7 +47,7 @@ SEED_TOOLS: list[dict[str, Any]] = [
 
 
 class DemoStore:
-    def __init__(self) -> None:
+    def __init__(self, *, seed: bool = True) -> None:
         self._lock = RLock()
         self.tools = deepcopy(SEED_TOOLS)
         option_map = {"minutes-magic":[{"id":"format","name":"社内フォーマットへの調整","price":1500},{"id":"setup","name":"オンライン導入サポート（30分）","price":3000}],"commit-senpai":[{"id":"install","name":"環境構築サポート","price":2000},{"id":"custom","name":"独自レビュー規則の追加","price":5000}],"pixel-recipe":[{"id":"team","name":"チーム利用ライセンス","price":4000}]}
@@ -171,6 +180,12 @@ class DemoStore:
         }
         self.connected_accounts: dict[str, dict[str, Any]] = {}
         self.account_sessions: dict[str, dict[str, Any]] = {}
+        if not seed:
+            # Production must start empty, never with fictitious users, sales,
+            # reviews or verified-creator credentials. Keep collection types.
+            for value in vars(self).values():
+                if isinstance(value, (dict, list, set)):
+                    value.clear()
 
     @staticmethod
     def _license_key(order: dict[str, Any]) -> str:
@@ -197,6 +212,7 @@ class DemoStore:
     def create(self, values: dict[str, Any]) -> dict[str, Any]:
         passport = {"data_handling":"販売者に確認してください","execution":"未設定","license":"購入前に確認","source_included":False,"commercial_use":False,"skill_level":"未設定","verified_on":"未確認","security":"審査待ち","quality_score":70,"update_policy":"販売者に確認してください","requirements":"未設定"}
         item = {**values, "id": str(uuid4()), "like_count": 0, "view_count": 0, "sales_count": 0, "rating": None, "support_days": 7, "estimated_delivery_days":values.get("estimated_delivery_days", 1), "fulfillment_type":values.get("fulfillment_type", "custom"), "purchase_notes":values.get("purchase_notes", ""), "faq":values.get("faq", []), "customization_available":values.get("customization_available", True), "exclusive_available":values.get("exclusive_available", False), "transfer_review_status":values.get("transfer_review_status", "pending" if values.get("exclusive_available") else "not_requested"), "exclusive_price_min":values.get("exclusive_price_min", 0), "transfer_assets":values.get("transfer_assets", []), "tech_stack":values.get("tech_stack", ""), "monthly_revenue":values.get("monthly_revenue", 0), "monthly_profit":values.get("monthly_profit", 0), "monthly_cost":values.get("monthly_cost", 0), "weekly_ops_hours":values.get("weekly_ops_hours", 0), "handover_days":values.get("handover_days", 14), "exclusive_summary":values.get("exclusive_summary", ""), "created_at": now, "accent": "coral", "is_published": False, "status":"draft", "capacity":5, "supports_subscription":False, "subscription_price":0, "safety_scan":{"status":"pending","label":"安全チェック待ち","checked_at":None}, "options":[], "passport":passport, "versions":[]}
+        item["created_at"] = datetime.now(timezone.utc)
         with self._lock: self.tools.insert(0, item)
         return item
 
@@ -316,18 +332,18 @@ class DemoStore:
             tool = self.get_public(slug)
             if not tool or tool.get("price_type") != "paid": raise ValueError("not purchasable")
             if self.blocked_between(user["id"], user["username"], tool["author_id"], tool["author_username"]): raise ValueError("blocked")
-            active = sum(1 for x in self.orders if x["seller_id"] == tool["author_id"] and x["tool_slug"] == slug and x["status"] in {"in_progress","awaiting_acceptance","cancel_pending"})
-            if active >= tool.get("capacity", 5): raise ValueError("capacity reached")
             if billing_type == "subscription" and not tool.get("supports_subscription"): raise ValueError("subscription unavailable")
             existing = next((x for x in self.orders if x["buyer_id"] == user["id"] and x["tool_slug"] == slug and x["status"] != "cancelled" and x.get("payment_status", "paid") not in {"cancelled", "expired"}), None)
             if existing: return (existing, False) if return_created else existing
+            active = sum(1 for x in self.orders if x["seller_id"] == tool["author_id"] and x["tool_slug"] == slug and x["status"] in {"in_progress","awaiting_acceptance","cancel_pending"})
+            if active >= tool.get("capacity", 5): raise ValueError("capacity reached")
             selected_options = [x for x in tool.get("options",[]) if x["id"] in (option_ids or [])]
             base_amount = tool["subscription_price"] if billing_type == "subscription" else tool["price"]
             subtotal = base_amount + sum(x["price"] for x in selected_options)
             coupon_code, discount, coupon_record = self.coupon_discount(user["id"], tool, subtotal, coupon)
             total = subtotal - discount
             seller_account = self.registered_users.get(tool["author_username"], {})
-            order = {"id":str(uuid4()),"tool_slug":slug,"tool_name":tool["name"],"buyer_id":user["id"],"buyer_name":user["display_name"],"buyer_username":user["username"],"buyer_email":user.get("email"),"seller_id":tool["author_id"],"seller_name":tool["author_name"],"seller_username":tool["author_username"],"seller_email":tool.get("author_email") or seller_account.get("email"),"amount":total,"base_amount":base_amount,"primary_payment_amount":total,"discount":discount,"coupon":coupon_code if discount else None,"selected_options":selected_options,"platform_fee":round(total*.1),"status":"in_progress","payment_status":"pending" if payment_pending else "paid","sales_recorded":not payment_pending,"messages":[],"delivery":None,"revision_count":0,"cancel_reason":None,"reviewed":False,"buyer_reviewed":False,"extras":[],"billing_type":billing_type,"fulfillment_type":tool.get("fulfillment_type", "custom"),"license_key":None,"created_at":datetime.now(timezone.utc),"updated_at":datetime.now(timezone.utc)}
+            order = {"id":str(uuid4()),"tool_slug":slug,"tool_name":tool["name"],"buyer_id":user["id"],"buyer_name":user["display_name"],"buyer_username":user["username"],"buyer_email":user.get("email"),"seller_id":tool["author_id"],"seller_name":tool["author_name"],"seller_username":tool["author_username"],"seller_email":tool.get("author_email") or seller_account.get("email"),"amount":total,"base_amount":base_amount,"primary_payment_amount":total,"discount":discount,"coupon":coupon_code if discount else None,"selected_options":selected_options,"platform_fee":platform_fee_for(total),"platform_fee_rate":settings.platform_fee_rate,"status":"in_progress","payment_status":"pending" if payment_pending else "paid","sales_recorded":not payment_pending,"messages":[],"delivery":None,"revision_count":0,"cancel_reason":None,"reviewed":False,"buyer_reviewed":False,"extras":[],"billing_type":billing_type,"fulfillment_type":tool.get("fulfillment_type", "custom"),"license_key":None,"created_at":datetime.now(timezone.utc),"updated_at":datetime.now(timezone.utc)}
             order["receipt_no"] = f"TB-{order['created_at'].strftime('%Y%m')}-{order['id'][-8:].upper()}"
             self.orders.insert(0, order)
             if not payment_pending: tool["sales_count"] += 1
@@ -471,7 +487,7 @@ class DemoStore:
             proposal = next((x for x in conversation["proposals"] if x["id"] == proposal_id and x["status"] == "open"), None)
             if not proposal: raise ValueError("proposal not found")
             if proposal.get("expires_at") and proposal["expires_at"] < datetime.now(timezone.utc): proposal["status"] = "expired"; raise ValueError("expired")
-            order = {"id":str(uuid4()),"tool_slug":conversation["tool_slug"],"tool_name":proposal["title"],"buyer_id":user["id"],"buyer_name":user["display_name"],"buyer_username":user["username"],"seller_id":conversation["seller_id"],"seller_name":conversation["seller_name"],"seller_username":conversation["seller_username"],"amount":proposal["amount"],"base_amount":proposal["amount"],"primary_payment_amount":proposal["amount"],"platform_fee":round(proposal["amount"]*.1),"status":"in_progress","messages":conversation["messages"].copy(),"delivery":None,"revision_count":0,"cancel_reason":None,"reviewed":False,"buyer_reviewed":False,"is_custom":True,"delivery_days":proposal["delivery_days"],"extras":[],"billing_type":"one_time","license_key":None,"created_at":datetime.now(timezone.utc),"updated_at":datetime.now(timezone.utc)}
+            order = {"id":str(uuid4()),"tool_slug":conversation["tool_slug"],"tool_name":proposal["title"],"buyer_id":user["id"],"buyer_name":user["display_name"],"buyer_username":user["username"],"seller_id":conversation["seller_id"],"seller_name":conversation["seller_name"],"seller_username":conversation["seller_username"],"amount":proposal["amount"],"base_amount":proposal["amount"],"primary_payment_amount":proposal["amount"],"platform_fee":platform_fee_for(proposal["amount"], custom=True),"platform_fee_rate":settings.custom_fee_rate,"status":"in_progress","messages":conversation["messages"].copy(),"delivery":None,"revision_count":0,"cancel_reason":None,"reviewed":False,"buyer_reviewed":False,"is_custom":True,"delivery_days":proposal["delivery_days"],"extras":[],"billing_type":"one_time","license_key":None,"created_at":datetime.now(timezone.utc),"updated_at":datetime.now(timezone.utc)}
             order["receipt_no"] = f"TB-{order['created_at'].strftime('%Y%m')}-{order['id'][-8:].upper()}"
             self.orders.insert(0, order)
             proposal["status"] = "purchased"
@@ -714,7 +730,8 @@ class DemoStore:
     def add_extra_payment(self, order: dict[str, Any], amount: int, note: str) -> None:
         with self._lock:
             extra = {"id":str(uuid4()),"amount":amount,"note":note[:200],"created_at":datetime.now(timezone.utc)}
-            order.setdefault("extras", []).append(extra); order["amount"] += amount; order["platform_fee"] += round(amount*.1); order["updated_at"] = extra["created_at"]
+            rate = order.get("platform_fee_rate", settings.custom_fee_rate if order.get("is_custom") else settings.platform_fee_rate)
+            order.setdefault("extras", []).append(extra); order["amount"] += amount; order["platform_fee"] += round(amount * rate); order["updated_at"] = extra["created_at"]
 
     def reserve_extra_payment(self, order: dict[str, Any], amount: int, note: str) -> tuple[dict[str, Any], bool]:
         with self._lock:
@@ -759,6 +776,11 @@ class DemoStore:
             due = [item for item in self.account_deletions if item.get("status") == "scheduled" and item.get("delete_after") and item["delete_after"] <= now]
             for deletion in due:
                 user_id = deletion["user_id"]
+                if any(p["seller_id"] == user_id and p.get("status") not in {"paid", "completed", "cancelled"} for p in self.payouts):
+                    # Do not erase the Connect account while funds are reserved
+                    # or a bank failure/unknown provider outcome is unresolved.
+                    deletion["hold_reason"] = "振込の結果確認が完了するまで退会処理を保留しています"
+                    continue
                 usernames = [name for name, account in self.registered_users.items() if account.get("id") == user_id]
                 for username in usernames:
                     self.registered_users.pop(username, None)
@@ -872,7 +894,7 @@ class DemoStore:
             created_at = datetime.now(timezone.utc)
             amount = application["amount"]
             seller_account = self.registered_users.get(application["applicant_username"], {})
-            order = {"id":str(uuid4()),"tool_slug":"custom-request","tool_name":item["title"],"buyer_id":owner["id"],"buyer_name":owner["display_name"],"buyer_username":owner["username"],"buyer_email":owner.get("email"),"seller_id":application["applicant_id"],"seller_name":application["applicant_name"],"seller_username":application["applicant_username"],"seller_email":seller_account.get("email"),"amount":amount,"base_amount":amount,"primary_payment_amount":amount,"platform_fee":round(amount*.1),"status":"in_progress","payment_status":"pending" if payment_pending else "paid","sales_recorded":False,"messages":[],"delivery":None,"revision_count":0,"cancel_reason":None,"reviewed":False,"buyer_reviewed":False,"extras":[],"billing_type":"one_time","license_key":None,"delivery_days":application["delivery_days"],"checkout_cancel_path":f"/requests/{request_id}","created_at":created_at,"updated_at":created_at}
+            order = {"id":str(uuid4()),"tool_slug":"custom-request","tool_name":item["title"],"buyer_id":owner["id"],"buyer_name":owner["display_name"],"buyer_username":owner["username"],"buyer_email":owner.get("email"),"seller_id":application["applicant_id"],"seller_name":application["applicant_name"],"seller_username":application["applicant_username"],"seller_email":seller_account.get("email"),"amount":amount,"base_amount":amount,"primary_payment_amount":amount,"platform_fee":platform_fee_for(amount, custom=True),"platform_fee_rate":settings.custom_fee_rate,"status":"in_progress","payment_status":"pending" if payment_pending else "paid","sales_recorded":False,"messages":[],"delivery":None,"revision_count":0,"cancel_reason":None,"reviewed":False,"buyer_reviewed":False,"is_custom":True,"extras":[],"billing_type":"one_time","license_key":None,"delivery_days":application["delivery_days"],"checkout_cancel_path":f"/requests/{request_id}","created_at":created_at,"updated_at":created_at}
             order["receipt_no"] = f"TB-{created_at.strftime('%Y%m')}-{order['id'][-8:].upper()}"
             application["status"] = "selected"
             item["status"] = "contracted"
@@ -889,10 +911,45 @@ class DemoStore:
     def available_balance(self, user_id: str) -> int:
         with self._lock:
             completed = [order for order in self.orders if order["seller_id"] == user_id and order["status"] == "completed" and order.get("payment_status", "paid") == "paid" and order.get("refund_status") != "completed" and order.get("dispute_status") != "provider_dispute"]
-            paid_out = sum(payout["amount"] for payout in self.payouts if payout["seller_id"] == user_id and payout["status"] in {"processing","completed"})
+            paid_out = sum(payout["amount"] for payout in self.payouts if payout["seller_id"] == user_id and payout["status"] in RESERVED_PAYOUT_STATUSES)
             return max(0, sum(order["amount"] - order["platform_fee"] for order in completed) - paid_out)
 
-    def finance_snapshot(self) -> dict[str, Any]:
+    def process_expired_payouts(self, user_id: str | None = None, *, at: datetime | None = None) -> list[dict[str, Any]]:
+        """Explicit demo job only; GET requests must never trigger fund movement.
+
+        Reserve only aged, still-unallocated earnings, FIFO. No Stripe operation
+        is performed. The production ledger/worker is a separate release gate.
+        """
+        if not settings.demo_mode:
+            raise RuntimeError("production payouts require the transactional ledger worker")
+        at = at or datetime.now(timezone.utc)
+        cutoff = at - timedelta(days=settings.payout_auto_days)
+        created: list[dict[str, Any]] = []
+        with self._lock:
+            seller_ids = {user_id} if user_id else {o["seller_id"] for o in self.orders}
+            for seller_id in seller_ids:
+                account = self.connected_accounts.get(seller_id, {})
+                if account.get("payouts_paused") or not account.get("payouts_enabled") or not account.get("details_submitted"):
+                    continue
+                def earned_at(order):
+                    return order.get("funds_available_at") or order.get("completed_at") or order.get("updated_at") or order["created_at"]
+                orders = sorted((o for o in self.orders if o["seller_id"] == seller_id and o["status"] == "completed" and o.get("payment_status", "paid") == "paid" and o.get("refund_status") != "completed" and o.get("dispute_status") != "provider_dispute"), key=earned_at)
+                reserved = sum(p["amount"] for p in self.payouts if p["seller_id"] == seller_id and p["status"] in RESERVED_PAYOUT_STATUSES)
+                amount = 0
+                for order in orders:
+                    net = max(0, order["amount"] - order["platform_fee"])
+                    allocated = min(reserved, net)
+                    reserved -= allocated
+                    if earned_at(order) <= cutoff:
+                        amount += net - allocated
+                if amount < settings.payout_minimum:
+                    continue
+                payout = self.create_payout(seller_id, amount, at=at)
+                payout.update(kind="auto_expired", reason=f"{settings.payout_auto_days}日以上経過した未申請売上（デモ）")
+                created.append(payout)
+        return created
+
+    def finance_snapshot(self, *, ledger: bool = False) -> dict[str, Any]:
         """Build the operations view from immutable order/payment facts.
 
         This remains a read model while the demo store is active. The production
@@ -977,7 +1034,7 @@ class DemoStore:
                     "fund_state": fund_state,
                 })
 
-            return {
+            result = {
                 "gross_paid": sum(order.get("amount", 0) for order in paid_orders),
                 "completed_gmv": sum(order.get("amount", 0) for order in completed_orders),
                 "platform_fee_earned": sum(order.get("platform_fee", 0) for order in completed_orders),
@@ -985,6 +1042,7 @@ class DemoStore:
                 "seller_payable": sum(max(0, order.get("amount", 0) - order.get("platform_fee", 0)) for order in completed_orders),
                 "held": sum(max(0, order.get("amount", 0) - order.get("platform_fee", 0)) for order in held_orders),
                 "paid_out": paid_out_total,
+                "payout_fee_total": sum(payout.get("fee", 0) for payout in self.payouts if payout.get("status") in {"processing", "completed", "paid"}),
                 "refund_total": refund_total,
                 "disputed_total": disputed_total,
                 "available_to_payout": sum(seller["payout_eligible"] for seller in sellers.values()),
@@ -993,6 +1051,10 @@ class DemoStore:
                 "transactions": transactions,
                 "payouts": sorted(self.payouts, key=lambda item: item.get("created_at", now), reverse=True),
             }
+            if ledger:
+                from .finance import summary
+                return summary(self, result)
+            return result
 
     def set_seller_payout_hold(self, seller_id: str, paused: bool) -> dict[str, Any]:
         with self._lock:
@@ -1001,11 +1063,17 @@ class DemoStore:
             account["payouts_paused_at"] = datetime.now(timezone.utc) if paused else None
             return account
 
-    def create_payout(self, user_id: str, amount: int) -> dict[str, Any]:
+    def create_payout(self, user_id: str, amount: int, *, at: datetime | None = None) -> dict[str, Any]:
+        if not settings.demo_mode:
+            raise RuntimeError("production payouts require the transactional ledger worker")
         with self._lock:
-            if amount < 1 or amount > self.available_balance(user_id): raise ValueError("invalid amount")
-            payout = {"id":str(uuid4()),"seller_id":user_id,"amount":amount,"status":"processing","created_at":datetime.now(timezone.utc)}
+            if self.connected_accounts.get(user_id, {}).get("payouts_paused"):
+                raise ValueError("payouts paused")
+            fee = payout_fee(amount, settings)
+            if amount > self.available_balance(user_id): raise ValueError("invalid amount")
+            created_at = at or datetime.now(timezone.utc)
+            payout = {"id":str(uuid4()),"seller_id":user_id,"amount":amount,"fee":fee,"net_amount":amount-fee,"kind":"requested","status":"processing","created_at":created_at,"scheduled_for":scheduled_payout_date(created_at),"payout_weekday":settings.payout_weekday_label}
             self.payouts.insert(0, payout)
             return payout
 
-store = DemoStore()
+store = DemoStore(seed=settings.demo_mode)

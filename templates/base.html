@@ -4,7 +4,8 @@
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
   <title>{% block title %}ツールバコ — AIツールが集まる、みんなの道具箱{% endblock %}</title>
   <meta name="description" content="{% block description %}個人が作ったAIツールを見つけて、試して、応援できる場所。{% endblock %}">
-  <meta name="robots" content="{{ robots_value }}"><link rel="canonical" href="{{ canonical_url }}">
+  <meta name="robots" content="{% if preview_mode %}noindex, nofollow{% else %}{{ robots_value }}{% endif %}"><link rel="canonical" href="{{ canonical_url }}">
+  {% if preview_mode %}<link rel="stylesheet" href="/static/preview.css?v={{ asset_version }}">{% endif %}
   <meta property="og:type" content="website"><meta property="og:site_name" content="ツールバコ">
   <meta property="og:title" content="{% block og_title %}ツールバコ{% endblock %}"><meta property="og:description" content="{% block og_description %}AIツールが集まる、みんなの道具箱{% endblock %}">
   <meta property="og:url" content="{{ canonical_url }}">{% block og_image %}<meta property="og:image" content="{{ og_image_url }}">{% endblock %}<meta name="twitter:card" content="summary_large_image"><meta name="twitter:title" content="{% block twitter_title %}ツールバコ{% endblock %}"><meta name="twitter:description" content="{% block twitter_description %}AIツールが集まる、みんなの道具箱{% endblock %}"><meta name="twitter:image" content="{{ og_image_url }}">
@@ -14,6 +15,7 @@
 </head>
 <body class="{% block body_class %}{% endblock %}">
   <a class="skip-link" href="#main-content">本文へ移動</a>
+  {% if preview_mode %}<aside class="preview-notice" aria-label="公開準備中のサイトについて"><strong>公開準備中 · {% if demo_mode %}デモ版{% else %}接続テスト環境{% endif %}</strong><p>{% if demo_mode %}購入・振込はシミュレーションです。実際のお支払い・送金は行われません。{% else %}一般のお客様向けのサービスはまだ開始していません。決済テストは専用のテスト情報で行ってください。{% endif %}<br>商品・販売件数・評価にはサンプルを含みます。個人情報や本物のカード情報を入力しないでください。</p></aside>{% endif %}
   <header class="site-header"><a class="brand brand-logo-link" href="/" aria-label="ツールバコ ホーム"><img class="brand-logo-header" src="/static/brand/toolbako-logo-header.png?v={{ asset_version }}" width="560" height="180" alt="" fetchpriority="high"><span class="sr-only">ツールバコ</span></a>
     {% block header_search %}{% endblock %}
     <nav>{% block header_nav %}<a href="/tools">ツールを探す</a><a href="/transfers">独占譲渡</a><a href="/creators">つくれる人</a><a href="/match" class="nav-feature">AI診断</a><a href="/requests">募集を探す</a>

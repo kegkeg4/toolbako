@@ -8,13 +8,16 @@
   </div>
   <div class="finance-flow-note">
     <b>購入代金 → 取引中は保留 → 納品承諾 → 手数料確定 → 販売者へ振込</b>
-    <small>返金・カード異議申立て・本人確認未完了・運営保留中の売上は振込対象外です。本番値はStripeと台帳を照合します。</small>
+    <small>返金・カード異議申立て・本人確認未完了・運営保留中の売上は振込対象外です。通常{{ platform_fee_percent }}%・カスタマイズ{{ custom_fee_percent }}%。{{ payout_schedule_label }}。</small>
   </div>
   <div class="finance-kpis">
     <article><small>決済済み総額</small><b>¥{{ '{:,}'.format(finance.gross_paid) }}</b><span>決済確認済み</span></article>
     <article><small>確定GMV</small><b>¥{{ '{:,}'.format(finance.completed_gmv) }}</b><span>取引完了分</span></article>
     <article><small>ONE販売手数料（総額）</small><b>¥{{ '{:,}'.format(finance.platform_fee_earned) }}</b><span>決済手数料 ¥{{ '{:,}'.format(finance.processor_fee_total) }} を別途照合</span></article>
     <article><small>振込可能額</small><b>¥{{ '{:,}'.format(finance.available_to_payout) }}</b><span>販売者合計</span></article>
+    <article><small>申請済み・予約中</small><b>¥{{ '{:,}'.format(finance.payout_reserved|default(0)) }}</b><span>結果確認までは再申請不可</span></article>
+    <article><small>銀行振込完了</small><b>¥{{ '{:,}'.format(finance.paid_out) }}</b><span>Stripeの結果確認済み（デモを除く）</span></article>
+    <article><small>振込手数料</small><b>¥{{ '{:,}'.format(finance.payout_fee_total|default(0)) }}</b><span>3,000円未満は160円</span></article>
     <article><small>取引中保留</small><b>¥{{ '{:,}'.format(finance.held) }}</b><span>納品・承諾待ち</span></article>
     <article><small>返金・口座保留</small><b>¥{{ '{:,}'.format(finance.refund_total + finance.disputed_total + finance.blocked_for_payout) }}</b><span>振込除外・確認待ち</span></article>
   </div>
@@ -55,7 +58,7 @@
         <span>¥{{ '{:,}'.format(order.amount) }}</span>
         <span>¥{{ '{:,}'.format(order.platform_fee) }}</span>
         <span>¥{{ '{:,}'.format(order.seller_net) }}</span>
-        <span class="fund-state fund-{{ order.fund_state }}">{{ {'available':'振込可能','payout_blocked':'口座・運営保留','held':'取引中保留','refunded':'返金済み','disputed':'異議申立て','payment_pending':'決済待ち','cancelled':'取消'}[order.fund_state] }}</span>
+        <span class="fund-state fund-{{ order.fund_state }}">{{ {'available':'振込可能','payout_blocked':'振込予約・口座・運営保留','held':'取引中保留','refunded':'返金済み','refund_pending':'返金処理・照合中','disputed':'異議申立て','payment_pending':'決済待ち','cancelled':'取消'}[order.fund_state] }}</span>
       </div>
       {% endfor %}
     </div>
@@ -65,7 +68,33 @@
     <summary>振込履歴を表示</summary>
     <div class="finance-table payout-finance-table">
       <div class="finance-row finance-head"><span>振込ID</span><span>販売者</span><span>金額</span><span>状態</span><span>受付日時</span></div>
-      {% for payout in finance.payouts %}<div class="finance-row"><span>{{ payout.id[:8] }}</span><span>{{ payout.seller_id }}</span><span>¥{{ '{:,}'.format(payout.amount) }}</span><span>{{ payout.status }}</span><span>{{ payout.created_at.strftime('%Y/%m/%d %H:%M') }}</span></div>{% else %}<p>振込履歴はありません。</p>{% endfor %}
+      {% for payout in finance.payouts %}<div class="finance-row"><span>{{ payout.id[:8] }}</span><span>{{ payout.seller_id }}</span><span>¥{{ '{:,}'.format(payout.net_amount|default(payout.amount)) }}<small>申請額 ¥{{ '{:,}'.format(payout.amount) }}／手数料 ¥{{ '{:,}'.format(payout.fee|default(0)) }}</small></span><span>{{ payout_labels.get(payout.status, '運営確認中') }}{% if payout.hold_reason %}<small>{{ payout.hold_reason }}</small>{% endif %}{% if finance_controls_ready and payout.finance_v2 and not payout.provider_payout_id and payout.status in ['requested','transferring','awaiting_funds','held','review'] %}<form method="post" action="/admin/payouts/{{ payout.id }}/cancel"><button data-confirm="テスト環境の申請です。銀行振込を開始していない分配を取り消し、Stripeで資金の戻しを確認してから予約を解除します。">申請・分配の取消（テスト）</button></form>{% endif %}</span><span>{{ payout.created_at.strftime('%Y/%m/%d %H:%M') }}</span></div>{% else %}<p>振込履歴はありません。</p>{% endfor %}
     </div>
   </details>
+
+  {% if finance_controls_ready %}
+  <details class="finance-details">
+    <summary>結果不明の振込を照合する（テスト環境）</summary>
+    <p>Stripeの分配・銀行振込記録を読み取り、金額・口座・注文との一致を確認します。残高の予約は保持されます。照合した管理者とは別の管理者が、2段階認証後に30分以内に承認してください。</p>
+    {% for payout in finance.payouts if payout.finance_v2 and payout.status == 'review' %}
+    <article class="finance-flow-note">
+      <b>申請 {{ payout.id[:8] }} · ¥{{ '{:,}'.format(payout.net_amount) }}</b>
+      <small>{{ payout.hold_reason|default('Stripeの結果確認が必要です') }}</small>
+      {% set recovery = payout.reconciliation|default({}) %}
+      {% if recovery.status == 'proposed' %}
+      <small>照合した記録: {{ recovery.provider_reference }} · 確認者: {{ recovery.proposed_by }}</small>
+      {% if recovery.proposed_by != user.id %}
+      <form method="post" action="/admin/payouts/{{ payout.id }}/reconcile/approve">
+        <input type="hidden" name="proposal_id" value="{{ recovery.id }}">
+        <button data-confirm="Stripeの記録を再照合し、一致した場合のみ処理を再開します。新しい送金は作成しません。">別の管理者として照合を承認</button>
+      </form>
+      {% else %}<small>別の管理者による承認を待っています。</small>{% endif %}
+      {% endif %}
+      <form method="post" action="/admin/payouts/{{ payout.id }}/reconcile/propose">
+        <button>Stripeの記録を読み取り照合</button>
+      </form>
+    </article>
+    {% else %}<p>結果不明の振込はありません。</p>{% endfor %}
+  </details>
+  {% endif %}
 </section>

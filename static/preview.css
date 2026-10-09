@@ -1,0 +1,18 @@
+.preview-notice {
+  padding: 12px max(20px, calc((100vw - 1200px) / 2));
+  border-bottom: 1px solid #d9def1;
+  background: #f0f3fc;
+  color: #343d5d;
+  font-size: 13px;
+  line-height: 1.65;
+}
+.preview-notice strong {
+  display: block;
+  margin-bottom: 3px;
+  color: #343285;
+  font-size: 13px;
+}
+.preview-notice p { margin: 0; font-size: inherit; line-height: inherit; }
+@media (max-width: 600px) {
+  .preview-notice { padding: 10px 16px; font-size: 12px; }
+}

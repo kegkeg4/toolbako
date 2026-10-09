@@ -59,6 +59,7 @@ class SessionService:
         sid = secrets.token_urlsafe(32)
         now_utc = datetime.now(timezone.utc)
         with self.store._lock:
+            self.store.account_sessions.pop(request.session.get("sid"), None)
             self.store.account_sessions[sid] = {
                 "user": dict(user),
                 "created_at": now_utc,
@@ -67,6 +68,17 @@ class SessionService:
         request.session.clear()
         request.session["sid"] = sid
         return user
+
+    def rotate(self, request: Request) -> None:
+        """Invalidate the pre-step-up cookie when privilege is elevated."""
+        with self.store._lock:
+            record = self.store.account_sessions.pop(request.session.get("sid"), None)
+            if record is None:
+                raise ValueError("session expired")
+            sid = secrets.token_urlsafe(32)
+            self.store.account_sessions[sid] = record
+            request.session.clear()
+            request.session["sid"] = sid
 
     def update(self, request: Request, user: dict[str, Any]) -> dict[str, Any]:
         sid = request.session.get("sid")
@@ -113,6 +125,12 @@ class SessionService:
         if request.session.get("user"):
             request.session.clear()
         if user:
+            # Provider verification can finish in a webhook, after this session
+            # was created. Read the authoritative result on every request.
+            identity = self.store.identity_applications.get(user["id"])
+            if identity:
+                user["identity_status"] = identity.get("status", "not_started")
+                user["is_verified"] = user["identity_status"] == "verified"
             user.setdefault("is_verified", False)
             user.setdefault("identity_status", "verified" if user.get("is_verified") else "not_started")
             user.setdefault("email_verified", True)

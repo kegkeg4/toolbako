@@ -16,18 +16,22 @@ uvicorn app.main:app --reload
 
 ## Supabase設定
 
-1. Supabase SQL Editorで `supabase/schema.sql` と `supabase/migrations/` 内のSQLをファイル名順に実行します。`20260716_hybrid_sales.sql` まで適用されていることを確認します。
-2. Authentication > Providers で Twitter と Google を有効化します。
-3. Authentication > URL Configuration に `SITE_BASE_URL/auth/callback` を追加します。
-4. `.env` に Supabase URL / anon key / service role keyを設定します。
+1. 現行のruntime保存方式では、新規の会員0件プロジェクトに `supabase/bootstrap_runtime_auth.sql`、続いて `python -m app.database migrate` を適用します。既存会員・プロフィールがあるDBではbootstrapを実行せず、別の移行／バックフィルをレビューしてください。旧 `supabase/schema.sql` と公開commerceテーブル向けのmigrationsを混ぜて一括実行しないでください。
+2. 外部OAuthを使う場合だけ、Authentication > Providers で必要なプロバイダーを設定します。メール認証とは別の準備です。
+3. Authentication > URL Configuration のSite URLを公開先へ設定し、`SITE_BASE_URL/auth/callback` と `SITE_BASE_URL/auth/recovery` を個別に許可します。ワイルドカードは使いません。
+4. サーバーの非公開環境変数に Supabase URL / anon key / service role keyを設定します。DBはSession poolerとTLSを利用し、`DATABASE_URL` にパスワードを含めない場合は `PGPASSWORD` を別の秘密変数として設定できます。
 5. 本番では `DEMO_MODE=false` とし、`SESSION_SECRET` を十分長いランダム値に変更します。
-6. `/readyz` と管理画面 `/admin` の公開準備度が100になるまで実決済を有効化しません。
+6. `/readyz` と管理画面 `/admin` は設定・実装条件の確認です。100%になっても実機決済・負荷・復元試験の代替にはなりません。
 
 Twitter OAuthのSupabase provider名は `twitter` です。X Developer Portal側のCallback URLには Supabase Dashboardに表示されるcallback URLを指定してください。アプリ側はOAuthのアクセストークンをURL fragmentへ残さず、サーバー側PKCEで交換します。
 
 ## Railway
 
-リポジトリをRailwayへ接続し、`.env.example` と同じ環境変数を設定します。`railway.json` と `Procfile` に起動・ヘルスチェック設定を含めています。現状の `STATE_DB_PATH` はデモ／ステージング用です。実決済を伴う公開では、注文・在庫・Webhook・売上を同一トランザクションで扱うPostgres repositoryへ置換してください。`PRIVATE_STORAGE_PATH` は永続ボリューム上の絶対パスに設定します。
+リポジトリをRailwayへ接続し、`.env.example` を参照して対象環境の変数を設定します。`railway.json` と `Procfile` に起動・ヘルスチェック設定を含めています。`STATE_DB_PATH` のSQLite保存はデモ用で、本番は `DATABASE_URL` によるPostgres保存を使用します。現在のPostgres実装は全状態JSONB＋排他制御の互換層で、金融台帳のみ別テーブルに正規化しています。実サービスE2E・負荷・障害復旧試験の合格までは本番決済を開始できません。`PRIVATE_STORAGE_PATH` は永続ボリューム上の絶対パスに設定します。
+
+配備前の接続確認は、対象サーバーの秘密変数が使える環境で `python -m app.deployment_check` を実行します。DBのスキーマversion、Auth API、サーバー専用プロフィールAPI、匿名アクセス拒否を読み取りだけで確認し、不備があれば終了コード1になります。パスワードやAPIレスポンスは表示しません。**この合格は公開・課金開始の承認ではなく、`/readyz` の判定も緩めません。**
+
+`railway.json` にPre-deploy Commandと `/deploymentz` ヘルスチェックを設定済みです。`/deploymentz` は安全な接続試験環境の起動確認であり、本番決済の開始判定ではありません。`/readyz` は引き続き全公開条件を確認し、決済未検証なら503を返します。既存の旧版へ接続設定だけを先に反映しないでください。最新の作業状況は [リリース作業記録](RELEASE_PROGRESS_2026-10-09.md) を参照してください。
 
 ## 実装済み範囲
 
@@ -61,10 +65,16 @@ Twitter OAuthのSupabase provider名は `twitter` です。X Developer Portal側
 - SQLite永続化オプション、Stripe署名Webhook、Connect販売者登録
 - Stripe Checkout・返金・定期解約・Identityの接続コード
 - 非公開納品ファイル、危険ZIP・偽装形式検査、ClamAV接続
-- 77件の自動テスト、依存関係固定、`pip check`と`pip-audit`による整合性・既知脆弱性確認
+- 認証アプリの登録・コード検証・重要操作時の10分間MFA確認（Supabase実機試験は未完了）
+- Redis原子的カウンタと障害時のアクセス停止（複数台での実機試験は未完了）
+- 単発JPYの売上・振込予約・分配・返金台帳とSandbox限定の分配／振込／取消worker
+- 結果不明のSandbox分配／振込の読み取り専用照合と、別管理者2名・MFAによる復旧承認
+- 自動テスト、依存関係固定（最新の検証範囲は `RELEASE_PROGRESS_2026-10-09.md` を参照）
 
-デモモードでは実際の請求や送金は発生しません。本番モードではStripe Connect/Checkout/Identityと署名Webhookを使用する分岐を実装済みです。外部アカウントの契約、審査、鍵設定、法務情報は運営者作業です。ココナラとの機能比較は `COCONALA_PARITY_AUDIT.md`、最新の公開条件は `PRODUCTION_CHECKLIST.md`、厳格な再監査結果は `QA_REPORT.md` を参照してください。
+デモモードでは実際の請求や送金は発生しません。単発購入の台帳・分配／振込worker・結果不明の分配／振込の二者照合をローカルPostgres＋Mock Stripeで検証しました。実Stripe接続、結果不明のCheckout／返金／分配取消の復旧、銀行振込失敗後の再振込・振込後の回収、月額台帳、保有期限対応は未完了です。`sk_live_` / `rk_live_` キーによるAPI書き込みはコードで停止しています。解除には設定変更ではなく、残る実装と実機検証が必要です。外部アカウントの契約、審査、鍵設定、法務情報は運営者による確認が必要です。最新の状態は `RELEASE_PROGRESS_2026-10-09.md` を参照してください。
 
 ## 本番接続時の補足
 
-認証はSupabase Authへ接続し、デモ／単一プロセス検証では取引データをSQLiteスナップショットへ永続化できます。実カード決済を有効にする前にPostgres repositoryへ置換し、注文・Webhook・監査ログを同一トランザクションで処理してください。さらに分散レート制限、AAL2 MFA、追記専用監査ログが必要です。service role keyはサーバー内のみで使い、ブラウザへ返さないでください。
+認証はSupabase Authへ接続します。`DATABASE_URL` がある場合、Postgres互換repositoryを全業務ルートで利用し、注文・Webhook処理済みID・監査ログ・メールoutboxを同一トランザクションで保存します。本番ではDB未設定時にアクセスを停止し、SQLiteへフォールバックしません。`python -m app.database migrate` で専用runtimeスキーマを作成し、`python -m app.database check` で確認します。デモデータは移行されません。
+
+この方式は全状態JSONB＋リクエスト排他制御の互換層です。単発購入の金融台帳は別の4テーブルに正規化し、業務状態と同時に保存します。実負荷試験・本番接続は未完了で、本番決済ガードは維持しています。Supabaseのdirect接続またはsession poolerを使い、transaction poolerは使わないでください。DBモードのメールは `python -m app.mail_worker --limit 20` で送信します。分配／振込workerの手順と制限は [売上・振込運用](PAYOUT_OPERATIONS.md)、保存方式・検証結果は [2026-09-22の実装記録](RELEASE_PROGRESS_2026-09-22.md) を参照してください。service role keyやprovider tokenはサーバー内だけで扱い、ログ・公開バックアップへ出さないでください。

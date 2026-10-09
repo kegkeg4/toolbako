@@ -1,9 +1,10 @@
 {
   "$schema": "https://railway.com/railway.schema.json",
-  "build": { "builder": "NIXPACKS" },
+  "build": { "builder": "RAILPACK" },
   "deploy": {
     "startCommand": "uvicorn app.main:app --host 0.0.0.0 --port $PORT",
-    "healthcheckPath": "/readyz",
+    "preDeployCommand": ["python -m app.deployment_check"],
+    "healthcheckPath": "/deploymentz",
     "restartPolicyType": "ON_FAILURE",
     "restartPolicyMaxRetries": 5
   }

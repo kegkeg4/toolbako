@@ -4,6 +4,7 @@ import io
 import json
 import time
 import zipfile
+from datetime import date, timedelta
 
 from fastapi.testclient import TestClient
 from app.main import app
@@ -142,7 +143,7 @@ def test_signup_and_account_surfaces():
 def test_public_request_flow():
     client.get('/auth/demo?next=/')
     assert client.get('/requests').status_code == 200
-    created = client.post('/requests/new', data={'title':'在庫を予測するAIツール','category':'データ分析','detail':'CSVから来月の在庫を予測したい','budget_min':30000,'budget_max':100000,'deadline':'2026-07-28','terms_agreement':'yes'}, follow_redirects=False)
+    created = client.post('/requests/new', data={'title':'在庫を予測するAIツール','category':'データ分析','detail':'CSVから来月の在庫を予測したい','budget_min':30000,'budget_max':100000,'deadline':(date.today() + timedelta(days=14)).isoformat(),'terms_agreement':'yes'}, follow_redirects=False)
     assert created.status_code == 303
     detail_url = created.headers['location']
     assert '在庫を予測するAIツール' in client.get(detail_url).text
@@ -239,7 +240,7 @@ def test_creator_search_and_rich_profile_settings():
     assert listing.status_code == 200
     assert 'つくれる人から探す' in listing.text
     assert 'デモクリエイター' in listing.text
-    assert listing.headers.get('x-robots-tag') is None
+    assert listing.headers.get('x-robots-tag') == 'noindex, nofollow'
 
     member = TestClient(app)
     member.post('/signup', data={'display_name':'設定確認','username':'profile_rich','email':'profile-rich@example.com','password':'password123','terms_agreement':'yes'}, follow_redirects=False)
@@ -687,7 +688,7 @@ def test_session_cookie_is_opaque_and_private_pages_are_not_cached():
 
 def test_seo_filtering_recovery_and_accessibility_surfaces():
     filtered = client.get('/tools?q=AI&price_type=paid&ai=Codex&sort=popular')
-    assert '<meta name="robots" content="noindex, follow">' in filtered.text
+    assert '<meta name="robots" content="noindex, nofollow">' in filtered.text
     assert 'price_type=paid' in filtered.text and 'ai=Codex' in filtered.text
     recovery = client.get('/auth/recovery')
     assert recovery.status_code == 200
@@ -914,7 +915,10 @@ def test_refund_webhook_uses_primary_payment_amount_after_tip():
     try:
         response = client.post('/webhooks/stripe',content=payload,headers={'stripe-signature':f't={timestamp},v1={digest}','content-type':'application/json'})
         assert response.status_code == 200
-        assert order['refund_status'] == 'completed' and order['status'] == 'cancelled'
+        # Refunding the primary charge must not claim the additional payment
+        # was refunded too. Its provider reference is missing in this fixture.
+        assert order['refund_status'] == 'partial' and order['status'] == 'cancel_pending'
+        assert order['refund_confirmed_amount'] == 1000
     finally:
         object.__setattr__(settings, 'stripe_webhook_secret', previous)
         store.orders.remove(order)

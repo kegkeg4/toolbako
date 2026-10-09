@@ -18,6 +18,11 @@ from .request_context import request_id_context
 
 logger = logging.getLogger("toolbako.requests")
 
+try:
+    from redis.asyncio import Redis
+except ImportError:  # Redis is optional in local/demo mode.
+    Redis = None
+
 
 class ProductionGuardMiddleware(BaseHTTPMiddleware):
     def __init__(self, app, settings):
@@ -26,6 +31,24 @@ class ProductionGuardMiddleware(BaseHTTPMiddleware):
         self._hits: dict[str, deque[float]] = defaultdict(deque)
         self._lock = Lock()
         self._request_count = 0
+        self._redis = Redis.from_url(settings.redis_url, decode_responses=True, socket_connect_timeout=2, socket_timeout=2) if Redis and settings.redis_url else None
+
+    async def _distributed_allowed(self, key: str, limit: int) -> bool | None:
+        """Increment and set expiry atomically; configured Redis must fail closed."""
+        if not self._redis:
+            return None
+        try:
+            redis_key = f"toolbako:ratelimit:{key}"
+            count = await self._redis.eval(
+                "local n = redis.call('INCR', KEYS[1]); "
+                "if n == 1 or redis.call('TTL', KEYS[1]) < 0 then redis.call('EXPIRE', KEYS[1], 60) end; return n",
+                1, redis_key,
+            )
+            return count <= limit
+        except Exception:
+            # Do not log exception strings: they may include credential URLs.
+            logger.warning("distributed rate limiter unavailable")
+            return None
 
     async def dispatch(self, request: Request, call_next):
         security_path = str(request.scope.get("path", ""))
@@ -38,7 +61,7 @@ class ProductionGuardMiddleware(BaseHTTPMiddleware):
         if length and length.isdigit() and int(length) > self.settings.max_request_bytes:
             return self._finish(JSONResponse({"error":"request_too_large","request_id":request_id}, status_code=413), request, request_id)
 
-        if not security_path.startswith(("/static/", "/healthz", "/readyz")):
+        if not security_path.startswith(("/static/", "/healthz", "/readyz", "/deploymentz")):
             forwarded = request.headers.get("x-forwarded-for", "").split(",")[0].strip()
             direct_ip = request.client.host if request.client else "unknown"
             trusted_proxy = False
@@ -49,40 +72,57 @@ class ProductionGuardMiddleware(BaseHTTPMiddleware):
                 except ValueError:
                     trusted_proxy = False
             client_ip = forwarded if trusted_proxy and forwarded else direct_ip
-            bucket = "auth" if security_path.startswith(("/login","/signup","/auth/","/forgot-password")) else "general"
-            if self.settings.is_production:
+            bucket = "auth" if security_path.startswith(("/login","/signup","/auth/","/forgot-password","/security/mfa")) else "general"
+            if self.settings.is_deployed:
                 limit = self.settings.auth_rate_limit_per_minute if bucket == "auth" else self.settings.rate_limit_per_minute
             else:
                 # Local development and the deterministic test client share one
                 # loopback IP; production remains strictly rate-limited.
                 limit = max(self.settings.rate_limit_per_minute, 10_000)
             key = f"{client_ip}:{bucket}"
-            now = monotonic()
-            with self._lock:
-                self._request_count += 1
-                if self._request_count % 1000 == 0:
-                    stale = [stored_key for stored_key,stored_hits in self._hits.items() if not stored_hits or stored_hits[-1] < now-60]
-                    for stored_key in stale: self._hits.pop(stored_key,None)
-                hits = self._hits[key]
-                while hits and hits[0] < now - 60: hits.popleft()
-                if len(hits) >= limit:
-                    response = JSONResponse({"error":"rate_limited","request_id":request_id}, status_code=429, headers={"Retry-After":"60"})
-                    return self._finish(response, request, request_id)
-                hits.append(now)
+            distributed_allowed = await self._distributed_allowed(key, limit) if self.settings.is_deployed else None
+            if self.settings.is_deployed and self.settings.redis_url and distributed_allowed is None:
+                return self._finish(JSONResponse({"error":"security_service_unavailable","request_id":request_id}, status_code=503, headers={"Retry-After":"30"}), request, request_id)
+            if distributed_allowed is False:
+                response = JSONResponse({"error":"rate_limited","request_id":request_id}, status_code=429, headers={"Retry-After":"60"})
+                return self._finish(response, request, request_id)
+            if distributed_allowed is True:
+                # Redis is the source of truth across workers; skip the local
+                # bucket so one process cannot double-count the same request.
+                pass
+            else:
+                now = monotonic()
+                with self._lock:
+                    self._request_count += 1
+                    if self._request_count % 1000 == 0:
+                        stale = [stored_key for stored_key,stored_hits in self._hits.items() if not stored_hits or stored_hits[-1] < now-60]
+                        for stored_key in stale: self._hits.pop(stored_key,None)
+                    hits = self._hits[key]
+                    while hits and hits[0] < now - 60: hits.popleft()
+                    if len(hits) >= limit:
+                        response = JSONResponse({"error":"rate_limited","request_id":request_id}, status_code=429, headers={"Retry-After":"60"})
+                        return self._finish(response, request, request_id)
+                    hits.append(now)
 
-        if self.settings.is_production and request.method in {"POST","PUT","PATCH","DELETE"} and not security_path.startswith("/webhooks/"):
+        if self.settings.is_deployed and request.method in {"POST","PUT","PATCH","DELETE"} and not security_path.startswith("/webhooks/"):
             source = request.headers.get("origin") or request.headers.get("referer")
             if not source:
                 return self._finish(JSONResponse({"error":"origin_required","request_id":request_id}, status_code=403), request, request_id)
-            source_host = urlparse(source).netloc
-            expected_host = urlparse(self.settings.site_base_url).netloc
-            if source_host != expected_host:
+            source_url = urlparse(source)
+            expected_url = urlparse(self.settings.site_base_url)
+            if (source_url.scheme, source_url.netloc) != (expected_url.scheme, expected_url.netloc):
                 return self._finish(JSONResponse({"error":"invalid_origin","request_id":request_id}, status_code=403), request, request_id)
 
         try:
             response = await call_next(request)
+            if request.method in {"POST","PUT","PATCH","DELETE"} and response.status_code < 400:
+                persist = getattr(request.app.state, "persist", None)
+                if persist:
+                    result = persist()
+                    if inspect.isawaitable(result):
+                        await result
         except Exception as exc:
-            if not self.settings.is_production:
+            if not self.settings.is_deployed:
                 raise
             logger.exception("Unhandled request error request_id=%s path=%s",request_id,security_path)
             try:
@@ -94,12 +134,6 @@ class ProductionGuardMiddleware(BaseHTTPMiddleware):
                 response = HTMLResponse(f'<!doctype html><html lang="ja"><meta charset="utf-8"><title>問題が発生しました</title><body><main><h1>一時的な問題が発生しました</h1><p>操作は繰り返さず、しばらくしてから再読み込みしてください。</p><p>お問い合わせ番号: <code>{request_id}</code></p><a href="/support">ヘルプを開く</a></main></body></html>',status_code=500)
             else:
                 response = JSONResponse({"error":"internal_server_error","request_id":request_id}, status_code=500)
-        if request.method in {"POST","PUT","PATCH","DELETE"} and response.status_code < 400:
-            persist = getattr(request.app.state, "persist", None)
-            if persist:
-                result = persist()
-                if inspect.isawaitable(result):
-                    await result
         return self._finish(response, request, request_id)
 
     def _finish(self, response: Response, request: Request, request_id: str) -> Response:
@@ -112,12 +146,14 @@ class ProductionGuardMiddleware(BaseHTTPMiddleware):
         response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
         response.headers["Origin-Agent-Cluster"] = "?1"
         response.headers["X-Permitted-Cross-Domain-Policies"] = "none"
+        if not self.settings.is_production:
+            response.headers["X-Robots-Tag"] = "noindex, nofollow"
         csp_nonce = getattr(request.state, "csp_nonce", "")
         response.headers["Content-Security-Policy"] = f"default-src 'self'; script-src 'self' 'nonce-{csp_nonce}'; style-src 'self'; img-src 'self' data:; connect-src 'self'; font-src 'self' data:; frame-ancestors 'none'; base-uri 'self'; object-src 'none'; form-action 'self'"
         if self.settings.site_base_url.startswith("https://"):
             response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains; preload"
         security_path = str(request.scope.get("path", ""))
-        if security_path.startswith(("/mypage","/orders/","/messages","/seller","/admin","/settings","/security","/verification","/library","/payouts","/purchases","/subscriptions","/notifications","/updates","/account/","/auth/","/checkout/","/transfer-inquiries/")) or security_path in {"/login", "/signup", "/forgot-password"}:
+        if security_path.startswith(("/mypage","/orders/","/messages","/seller","/admin","/settings","/security","/verification","/library","/payouts","/purchases","/subscriptions","/notifications","/updates","/account/","/auth/","/checkout/","/transfer-inquiries/")) or security_path in {"/login", "/signup", "/forgot-password", "/healthz", "/readyz", "/deploymentz"}:
             response.headers["Cache-Control"] = "no-store, private"
         elif security_path.startswith("/static/"):
             response.headers["Cache-Control"] = "public, max-age=31536000, immutable"

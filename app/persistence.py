@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import stat
 from datetime import datetime
 from pathlib import Path
 from threading import Lock
@@ -37,17 +38,25 @@ def decode_value(value: Any) -> Any:
 
 
 class SQLiteStateStore:
-    """Crash-safe single-instance persistence for demo and first production rollout."""
+    """Single-instance demo persistence, NOT a production financial repository."""
     def __init__(self, path: str):
         self.path = Path(path).expanduser() if path else None
         self._lock = Lock()
         if self.path:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            os.chmod(self.path.parent, 0o700)
+            # Do not chmod an existing/shared parent (e.g. /tmp or the user's
+            # project). Only newly created storage directories are private.
+            self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            fd = os.open(self.path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
+            try:
+                info = os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                    raise ValueError("SQLite demo storage must be a regular, unlinked file")
+                os.fchmod(fd, 0o600)
+            finally:
+                os.close(fd)
             with self._connect() as db:
                 db.execute("pragma journal_mode=WAL")
                 db.execute("create table if not exists app_state (id integer primary key check(id=1), payload text not null, updated_at text not null)")
-            os.chmod(self.path, 0o600)
 
     @property
     def enabled(self) -> bool: return self.path is not None
