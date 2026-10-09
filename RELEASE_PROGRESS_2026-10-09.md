@@ -13,7 +13,10 @@
 - Supabaseの実Connect画面でSession poolerのホスト・ポート5432・ユーザーを確認。従来の接続先と一致し、地域からホストを推測して変更していない。パスワードreset・キー再発行・スキーマ／権限変更なし。
 - DB接続・スキーマ失敗へ固定allowlistの原因コードだけをログに追加。SQLSTATEと既知の接続失敗シグネチャをメモリ内で分類し、例外本文・DSN・ホスト・ユーザー・パスワード・tracebackは出さない。認証失敗と判明する前にパスワード不正とは断定しない。
 - 41件の原因分類・秘密情報非出力試験を追加。Python 3.12.13・専用実ローカルPostgreSQL 17で **335 passed / 2 warnings / 22.41秒**、DB試験skipなし。外部Auth・Stripe・メールはMock。試験用PostgreSQLは停止済み。
-- この追加診断はまだ配備前。新版未稼働、**本番決済NO-GO継続**。以下のパスワード入力待ちは前段階の履歴。
+- 診断コードcommit `d6bdd74aab393220cf7208af1e9ee75eaf9a0325`の全tree `4eb61435f8f811ebe7af9ccc45d27e7745a70d75`はローカルと一致。[Linux外部CI](https://github.com/kegkeg4/toolbako/actions/runs/37962678920)は **335 passed / 2 warnings / 14.59秒、success**、ハッシュ付きインストールと`pip check`も合格。
+- 反映待ちは既存webのcommit更新1件だけ、削除・変数変更なしと確認して配備。deployment `a866c640-fa72-477a-937f-86778ee0f643`は同commitをbuildし、Pre-deployで停止。固定原因コードは **`authentication_failed`**。`PGPASSWORD`の実行時存在はtrue、Auth／profiles／badge API・匿名profiles拒否は合格のまま。
+- 現在登録された値ではDB認証に失敗するため、正しい既存DBパスワードの直接再入力が必要。Supabaseのログインパスワードやservice_roleキーではない。`PGPASSWORD`にはURLエンコードせずそのまま入力し、Sealを保持する。値をチャットへ貼らない。不明な場合のresetは既存接続にも影響するため、本人の確認・操作に引き継ぎ、無断resetしない。
+- 新版未稼働、**本番決済NO-GO継続**。診断以外の公開条件を完了扱いにしていない。以下のパスワード未注入は前段階の履歴。
 
 ## 10/10：サーバー用キー入力後の実接続（履歴）
 
@@ -138,7 +141,7 @@ Railway APIではservice_roleの変数名とSeal状態は存在する。**名前
 
 ## 有料開始までの残作業
 
-1. service_role値の注入・Auth／profiles／badgeの実API接続は完了。次は実行時に空だった既存sealed `PGPASSWORD`へユーザーがDBパスワードを直接入力し、再配備・Pre-deployでPostgres接続を確認する。GitHub公開・CIは完了。実会員登録の合格とは別。
+1. service_roleと`PGPASSWORD`値の実行時注入・Auth／profiles／badgeの実API接続は完了。Postgres接続は`authentication_failed`で停止。既存sealed `PGPASSWORD`へユーザーが正しいDBパスワードを直接入力し、再配備・Pre-deployで確認する。不明な場合のresetは既存接続への影響を確認して本人が操作する。GitHub公開・CIは完了。実会員登録の合格とは別。
 2. 実Supabase会員登録、メール確認、ログイン、パスワード再設定、MFA。管理者2人の実アカウントID登録と復旧運用確認。
 3. Stripe SandboxのCheckout・Webhook・JPY Connect分配・銀行Payout・返金・異議申立てE2E。本番実行ガードを外す前に証拠を保存する。
 4. Checkout／返金／reversalの結果不明、銀行振込後の回収、銀行失敗後の再申請、部分返金・定期課金台帳・異議申立て終了後の復元。

@@ -5,8 +5,9 @@
 - Railway実行時の`PGPASSWORD`値の存在はtrueに改善。ただし実DBプローブはfalseでPre-deploy停止、新版は未稼働。API接続と匿名profiles拒否は引き続き合格。パスワードの値は取得していない。
 - Supabaseの実Connect画面でSession poolerの正式な接続先を照合。接続先変更・パスワードreset・キー再発行・スキーマ／権限変更なし。
 - 接続／スキーマ失敗へ固定原因コードだけを追加する41件を検証。プロバイダー例外本文・接続先・資格情報はログへ出さず、公開判定を緩めない。
-- Python 3.12.13・専用実ローカルPostgreSQL 17で **335 passed / 2 warnings / 22.41秒**、DB試験skipなし。外部Auth・Stripe・メールはMock。追加診断の外部CI／実配備はこれから。
-- **本番決済NO-GO継続**。以下の入力待ちは前段階の履歴。最新の実配備結果は`RELEASE_PROGRESS_2026-10-09.md`へ追記する。
+- Python 3.12.13・専用実ローカルPostgreSQL 17で **335 passed / 2 warnings / 22.41秒**、DB試験skipなし。外部Auth・Stripe・メールはMock。[Linux外部CI](https://github.com/kegkeg4/toolbako/actions/runs/37962678920)も **335 passed / 2 warnings / 14.59秒、success**。公開treeはローカルと一致。
+- 診断版の実Pre-deployで固定原因コード **`authentication_failed`** を確認。パスワード未注入は解消したが、現在の値ではDB認証に失敗。正しい既存DBパスワードの本人による直接再入力が必要。不明なら既存接続への影響を確認したうえで本人がresetする。値の取得・無断resetはしない。
+- **本番決済NO-GO継続**。実Auth登録・決済・その他の公開条件も未完了。以下の未注入／入力待ちは前段階の履歴。最新の実配備結果は`RELEASE_PROGRESS_2026-10-09.md`。
 
 ## 2026-10-10 サーバー用キー入力後の実接続（履歴）
 
