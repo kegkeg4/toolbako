@@ -94,6 +94,6 @@ Railway／Procfileの起動には`--no-access-log`が必要です。標準access
 
 認証はSupabase Authへ接続します。`DATABASE_URL` がある場合、Postgres互換repositoryを全業務ルートで利用し、注文・Webhook処理済みID・監査ログ・メールoutboxを同一トランザクションで保存します。本番ではDB未設定時にアクセスを停止し、SQLiteへフォールバックしません。`python -m app.database migrate` で専用runtimeスキーマを作成し、`python -m app.database check` で確認します。デモデータは移行されません。
 
-この方式は全状態JSONB＋リクエスト排他制御の互換層です。単発購入の金融台帳は別の4テーブルに正規化し、業務状態と同時に保存します。実負荷試験・本番接続は未完了で、本番決済ガードは維持しています。Supabaseのdirect接続またはsession poolerを使い、transaction poolerは使わないでください。DBモードのメールは `python -m app.mail_worker --limit 20` で送信します。分配／振込workerの手順と制限は [売上・振込運用](PAYOUT_OPERATIONS.md)、保存方式・検証結果は [2026-09-22の実装記録](RELEASE_PROGRESS_2026-09-22.md) を参照してください。service role keyやprovider tokenはサーバー内だけで扱い、ログ・公開バックアップへ出さないでください。
+この方式は全状態JSONB＋リクエスト排他制御の互換層です。単発購入の金融台帳は別の4テーブルに正規化し、業務状態と同時に保存します。staging実接続は確認済みですが、実負荷試験・本番決済運用は未完了で、本番決済ガードは維持しています。Supabaseのdirect接続またはsession poolerを使い、transaction poolerは使わないでください。DBモードのメールは `python -m app.mail_worker --limit 20` で送信します。分配／振込workerの手順と制限は [売上・振込運用](PAYOUT_OPERATIONS.md)、保存方式・検証結果は [2026-09-22の実装記録](RELEASE_PROGRESS_2026-09-22.md) を参照してください。service role keyやprovider tokenはサーバー内だけで扱い、ログ・公開バックアップへ出さないでください。
 
 stagingのDB／Auth実接続と新版配備は確認済みです（最新の証拠は[配備記録](RELEASE_PROGRESS_2026-10-09.md)）。DB境界は全リクエストで最新状態をロック下で読み、不変の状態・空のoutbox・検証済み金融状態の場合だけ保存を省きます。GETの期限処理・認証・監査等の変更や決済予約の保存は省略しません。[SupabaseのSession pooler指針](https://supabase.com/docs/guides/database/connecting-to-postgres)に従い、session lockに必要な接続モードを維持します。これは直列化の解消や本番負荷の合格ではありません。

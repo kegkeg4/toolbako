@@ -6,13 +6,15 @@
 
 運営主体は合同会社ONE。既存のRailway `rare-manifestation` / `web`を使用し、新しい有料サービスは作成しない。会員・取引用のSupabaseはユーザー確認済みのプロジェクトを使用。秘密値はソース・記録・チャットに載せず、封印済み変数は取得しない。
 
-## 10/10：閲覧時の不要なDB保存を削減（最新・配備前）
+## 10/10：閲覧時の不要なDB保存を削減・配備成功（最新）
 
 - Supabase／Postgresの接続指針に沿って、通常閲覧でも状態全体をUPDATE・COMMITする処理を修正。毎回のDBロックと最新状態の読込は維持し、全STATE_FIELDSが不変・通知outboxが空・金融台帳の検証済みhashが同じ場合だけ保存を省く。GETという理由だけでは省かず、期限処理・認証・監査・注文・通知の変更は保存する。
 - schema versionと状態の読込を1つのSELECTにまとめた。ロック取得は先行する別SQLのまま維持し、SELECT内の評価順に依存しない。異なるworkerのsetエンコード順だけで不要な保存が起きないよう、読込直後のcheckpointを当該workerの表現へ正規化した。
 - worker初回および他workerが金融状態を変えた場合は台帳整合性を再確認する。決済前予約・結果照合の明示トランザクションは省略しない。新しい依存・外部サービス・スキーマ／権限・秘密変数は変更していない。
 - 18件追加。専用実ローカルPostgreSQL 17・Python 3.12.13で **373 passed / 2 warnings / 25.72秒**、DB skipなし。外部Auth／Stripe／メールはMock。最初の追加試験3件は試験用UPDATE／DELETEのRETURNING漏れで失敗し、試験コードを修正後に全件再実行した。
-- 変更前の匿名HTTP 6回を逐次実行した結果、トップ1807／1591ms、商品一覧1579／1499ms、ログイン1545／1501ms、すべて200。クライアントの通信を含むHTTP応答時間であり、CWV・p95・負荷試験ではない。変更後の実測・外部CI・配備成功はまだこの記録時点では未確認。
+- 変更前の匿名HTTP 6回を逐次実行した結果、トップ1807／1591ms、商品一覧1579／1499ms、ログイン1545／1501ms、すべて200。変更後は同じ順序・同じクライアントでトップ2112／1276ms、商品一覧1015／1035ms、ログイン1303／1062ms、すべて200。各6件の中央値は **1562→1169ms**（約25%低下）。初回応答はむしろ遅く、コールド接続・worker初回検証・ネットワーク・他アクセス等を含む少数サンプルで、厳密なA/B・CWV・p95・負荷試験ではない。高負荷の公開合格にはしない。
+- コードcommit `a4b92b3da71455fb0fb9df0a6dfde33ecb52ce6d`の全tree `59510950e2d70ff32bd78702892668add5a7db49`はローカルと一致。[Linux外部CI](https://github.com/kegkeg4/toolbako/actions/runs/38025584059)は **373 passed / 2 warnings / 16.37秒、success**、ハッシュ照合と`pip check`も合格。既存webのcommit更新1件だけを再確認して反映し、deployment `300f11ae-723b-49c6-80e7-e70636f715d3`は同commitで **SUCCESS**。DB／Auth／profiles／badge API・匿名profiles拒否の読取専用Pre-deployはすべてtrue、配備後の反映待ち変更なし。
+- 配備後の`/healthz`・`/deploymentz`200、live_payments_enabled=false。`/readyz`は意図した503／ready=false／14/24のまま。登録200・未設定SNSなし、未ログイン管理画面403、マイページ／販売者／メッセージ／出品303ログイン、デモログイン／別アプリの`/schedules`404を再確認。ユーザーの実アカウント・ファイル・決済は操作していない。
 - web-perfスキル指定のChrome DevTools MCPが未接続（navigate_page／performance_start_traceなし）のため、ブラウザーCWV監査は保留。HTTP測定をLCP／INP／CLSの代用にしない。精密監査にはChrome DevTools MCPの接続が必要。
 - **本番決済NO-GO継続**。ユーザーが登録を試しているブラウザーや入力値には触れていない。登録成功・確認メール・MFA・Sandbox決済等を完了扱いにしない。
 
