@@ -1,11 +1,13 @@
 # ツールバコ 本番公開チェックリスト
 
-更新日: 2026-07-22
+更新日: 2026-10-10
+
+判定：**本番決済は公開不可**。最新の証拠と変更内容は `RELEASE_PROGRESS_2026-10-09.md` を参照。管理画面の項目数はサービス完成度ではありません。
 
 ## あなた側で用意・決定が必要なもの
 
 - [ ] 公開ドメイン、DNS、TLS、ホスティング先を決定する
-- [ ] Supabase本番プロジェクトを作り、URL・anon key・service role keyを安全なSecretsへ登録する
+- [x] 専用SupabaseのURL・公開／サーバーキー・DB接続情報をRailwayへ登録し、Auth／profiles／badge API・Postgres runtime schemaの実接続と新版配備を確認する（実会員登録は未完了）
 - [ ] Stripe本番アカウント、Connect、Identity、Webhook endpointを有効化し、各Secretを登録する
 - [ ] Resend等の送信ドメインを認証し、SPF・DKIM・DMARCを設定する
 - [ ] 合同会社ONEの代表者、住所、電話番号、問い合わせ先、会社URLを確認し、特定商取引法表示と一致させる
@@ -16,21 +18,40 @@
 
 ## コード／インフラ側で公開前に必要なもの
 
-- [ ] Supabaseへ `supabase/schema.sql` と `supabase/migrations/` 内のSQLをファイル名順に適用する
-- [ ] `DemoStore`／SQLiteスナップショットを本番Postgres repositoryへ置換する
-- [ ] 注文作成・Webhook claim・状態更新・監査ログを同一DBトランザクションにする
+- [x] 間接依存を含むハッシュ付きrequirementsを固定し、空のPython 3.12環境からの再インストールと互換性・脆弱性監査を確認する
+- [x] 外部監視の送信前allowlist、添付除外、自動telemetry停止、問い合わせ番号のサーバー生成、URL access log停止をコードとテストで確認する
+- [x] Supabaseの現行opaqueキー・旧JWTキーの互換性、ユーザーJWT分離、設定優先順をコード・Mockで検証する（実キーでの疎通は未完了）
+- [ ] 隔離したSupabase環境でSQLの依存関係・適用・RLS試験を行い、確認済みの手順だけを本番へ適用する
+- [x] 全ルートで利用するPostgres互換repositoryを実装（staging実接続済み、高負荷対策は未完了。単発売上の金融テーブルは別に正規化）
+- [x] 不変な閲覧の不要UPDATE／COMMITを省略し、schema／stateの読込を統合する（ローカル実Postgres・外部CI合格、staging配備と匿名HTTP確認済み。GETの状態変更・outbox・金融検証・決済予約は省略しない。CWV／高負荷の合格ではない）
+- [x] 注文作成・Webhook claim・状態更新・監査ログ・通知メールoutboxを同一DBトランザクションにする（ローカル実Postgresで検証）
+- [ ] ステージング／本番の専用DB・TLS・session接続・権限・バックアップを設定し、復元訓練する
+- [x] 通知メールworker、排他claim、再送キー、期限超過reviewを実装
+- [ ] 通知メールworkerの配備、監視、review対応・保持期間を設定する
 - [ ] Webhook outbox／再試行／dead-letterと一意制約で、複数ワーカーでも二重処理を防ぐ
-- [ ] RedisまたはエッジWAFへレート制限を集約し、複数ワーカーで回避できないようにする
-- [ ] Supabase AAL2を検証するMFA登録・チャレンジ・管理／振込操作時の再認証を実装する
-- [ ] 追記専用の永続監査ログと検索・保持・改ざん検知を実装する
+- [x] Redisのカウンタと期限設定を原子的に実行し、接続障害時はアクセスを停止する
+- [ ] Redisに実接続し、複数ワーカーで共通の制限・障害復旧を検証する
+- [x] Supabase MFA登録・チャレンジ・AAL2確認・セッションID更新・重要操作時の10分間制限を実装する
+- [ ] 実際のSupabaseで登録、誤コード、期限切れ、OAuth、トークン更新、端末紛失時の回復を検証する
+- [x] SNS認証を明示allowlistで制御し、未設定のGoogle／Xを表示・redirectしない（任意機能。有効化はSupabase側の設定と実際のcallback検証後に`OAUTH_PROVIDERS`へ追加する）
+- [x] 追記専用の永続監査ログと更新・削除拒否／内容変更検出を実装する
+- [ ] 監査ログの長期検索・保持期間・バックアップ運用を設定する
 - [ ] 退会期限を処理する定期ジョブをPostgres repository上で実装し、法定保持データだけ匿名化して残す
 - [ ] Stripe invoice、charge、payment intent、refund、disputeのIDを注文・定期課金へ永続化する
-- [ ] `20260722_financial_ledger.sql` を適用し、決済・手数料・販売者売上・返金・振込を追記型台帳へ記録する
+- [x] runtime version 2へ単発JPYの決済・割当・分配・返金・銀行振込の追記台帳を実装（旧public SQLではなく実際のruntimeへ接続）
+- [x] Sandbox限定の振込申請・分配・銀行振込・銀行振込前の分配取消worker、タイムアウト／保存前クラッシュ／Webhook照合をローカルで検証
+- [ ] 実Stripe SandboxでJP/JPY口座と接続し、分配・入金・返金・取消を照合する
+- [x] 結果不明のSandbox分配／銀行振込をGETだけで照合し、別管理者2名・MFA・30分期限で復旧承認する（ローカルPostgres＋Mock Stripeで検証）
+- [x] 結果不明のSandbox単発Checkout／追加支払い／全額Refundを、GET・別管理者2名・MFA・30分期限で照合復旧する（ローカルPostgres＋Mock Stripeで検証。再請求・再返金は行わない）
+- [x] 結果不明のSandbox分配取消をGET・二者承認で復旧し、取消の意思を維持する（ローカルPostgres＋Mock Stripe。実Stripeの検証は別項目）
+- [x] キャンセル合意と全明細を検証し、未要求の残りの全額返金だけを二者承認で1件ずつ再開する（Sandbox限定、既存要求は再送しない。ローカルPostgres＋Mock Stripeで検証）
+- [ ] 振込失敗後の再振込、振込後の回収、定期課金台帳を仕上げる
+- [ ] 120日案を見直し、Stripe手動振込の保有期限を満たす規約・自動処理・アラートを確定する
 - [ ] 振込処理は運営保留、本人確認、異議申立て、返金、二者承認を検証してからStripe APIを呼ぶ
 - [ ] Stripe ConnectのTransfer／Payout方式と周期を確定し、納品承諾前に販売者の銀行口座へ出金されないことを検証する
 - [ ] 非公開オブジェクトストレージとClamAVを接続し、署名付きURLと保存期限を確認する
 - [ ] production環境で `DEMO_MODE=false`、十分な `SESSION_SECRET`、`ALLOWED_HOSTS`、proxy設定を確認する
-- [ ] ログへアクセストークン、Cookie、本人確認情報、納品ファイル内容を出さないことを確認する
+- [ ] 新版配備後、ホスティング側proxyを含む実ログ・実監視先でアクセストークン、Cookie、本人確認情報、納品ファイル内容が出ないことを確認する（アプリ／SDK側のローカル検査は完了）
 
 ## 本番相当環境で必ず行う試験
 

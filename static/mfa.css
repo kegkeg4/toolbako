@@ -1,0 +1,12 @@
+.mfa-page { max-width: 680px; }
+.mfa-page .balance-card h2 { margin: 0 0 12px; font-size: 20px; }
+.mfa-page .balance-card img { display: block; max-width: 100%; height: auto; margin: 20px auto; background: #fff; border-radius: 12px; }
+.mfa-page .balance-card code { display: block; overflow-wrap: anywhere; padding: 12px 0; font-size: 16px; letter-spacing: .08em; }
+.mfa-page details summary { cursor: pointer; }
+.mfa-form { display: grid; gap: 16px; padding: 28px; margin: 24px 0; background: #fff; border: 1px solid var(--line); border-radius: 18px; }
+.mfa-form label { font-weight: 700; font-size: 14px; }
+.mfa-form input:not([type="hidden"]), .mfa-form select { width: 100%; min-width: 0; min-height: 48px; padding: 12px; border: 1px solid #bfc1d4; border-radius: 10px; font: inherit; }
+.mfa-form input[name="code"] { font-size: 22px; letter-spacing: .3em; }
+.mfa-form input:focus-visible, .mfa-form select:focus-visible { outline: 3px solid #5557d9; outline-offset: 3px; }
+.mfa-form .button { min-height: 48px; }
+@media (max-width: 480px) { .mfa-form { padding: 20px; } .mfa-page .balance-card { padding: 20px; } }
