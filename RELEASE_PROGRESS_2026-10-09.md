@@ -17,7 +17,9 @@
 - HTTPを3並列で確認した際、多くのページで約3〜4秒の応答を観測。ネットワーク・DB排他／直列処理・配備地域等を含む計測であり、CWVやp95ではない。高負荷・速度の公開合格にはしない。
 - Google／Xボタンが表示される一方、実Supabaseは両方`provider is not enabled`で400を返す不具合を確認。実ユーザーのログインやアカウント作成はしていない。
 - `OAUTH_PROVIDERS`を明示allowlistにして、APIキー登録だけではSNSログインを有効と扱わない修正を追加。未設定のボタンと区切りを非表示、直接アクセスも外部へ飛ばさず503の案内。設定済みproviderでは既存PKCE・安全な復帰先を維持。デモ案内も実際のDEMO_MODEのみで表示する。
-- 20件の追加試験。Python 3.12.13・専用実ローカルPostgreSQL 17で **355 passed / 2 warnings / 20.70秒**、DB skipなし。最初の実行はsandboxがローカルTCPを拒否して60件setup errorだったため、合格証拠には使わず、専用ローカルDBへの権限を付けて全件再実行した。試験用DBは停止済み。外部Auth／Stripe／メールはMock。SNS導線修正の外部CI／配備はこれから。
+- 20件の追加試験。Python 3.12.13・専用実ローカルPostgreSQL 17で **355 passed / 2 warnings / 20.70秒**、DB skipなし。最初の実行はsandboxがローカルTCPを拒否して60件setup errorだったため、合格証拠には使わず、専用ローカルDBへの権限を付けて全件再実行した。試験用DBは停止済み。外部Auth／Stripe／メールはMock。
+- 修正commit `bfc66dbf5d2773f6654f1976b1b2de7b7038a231`のtree `46107dbbbdf77122cd4d86c780101b777eed4cf6`はローカルと一致。[Linux外部CI](https://github.com/kegkeg4/toolbako/actions/runs/37967040779)は **355 passed / 2 warnings / 15.00秒、success**、ハッシュ照合と`pip check`も合格。既存webのcommit変更1件だけを確認して反映し、deployment `91e59bc0-dc86-43d2-81af-bd2d26835315`は **SUCCESS**。DB／Auth読取専用Pre-deployはすべて合格のまま。
+- 修正版の実HTTPでログイン・登録200、メール入力あり／未設定SNSボタン・デモログイン案内なしを確認。未設定SNSの直接URLは503で外部redirectなし。`/deploymentz`200／live_payments_enabled=false、`/readyz`503／14/24を維持。実ブラウザーの登録画面でもSNSボタン0、横はみ出しなしを再確認。SNSの設定を外部で変更・認可したのではなく、未設定機能を有効と誤表示する不具合を直した。
 - **本番決済NO-GO継続**。本番モード・実決済・取引メール・ファイル検査／非公開永続化・監視・管理者・窓口／法務・Redis等は未完了。次は本人管理のテスト用メールで実登録・確認・ログインを通す。パスワード入力と規約同意は本人に引き継ぎ、勝手に会員を作らない。
 
 ## 10/10：DBパスワード入力後の実接続（履歴）

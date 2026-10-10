@@ -6,7 +6,8 @@
 - 公開URLの27ルートで予期しない5xxなし。未ログイン管理画面403、会員／販売者／メッセージ／出品303、デモログインと`/schedules`404。不正登録422、異なるOrigin403、長すぎるログイン401を確認。実会員作成やメール送信はしていない。
 - PC1440px／スマートフォン390pxのトップ、390pxの登録画面で横はみ出しなし。ロゴ読込とモバイルメニューの登録導線、ブラウザーerrorなしを確認。全画面・負荷の合格ではない。3並列HTTP確認で約3〜4秒の応答を観測し、速度の追加改善が必要。
 - 未設定のGoogle／Xが登録・ログイン画面に表示され、実Supabaseが400を返す不具合を発見。`OAUTH_PROVIDERS`の明示allowlist、未設定ボタン非表示／外部redirect拒否、既存PKCE／safe next維持、実DEMO_MODEのみのデモ案内へ修正。外部SNSログインはまだ未設定・未検証。
-- 20件を追加し、専用実ローカルPostgreSQL 17・Python 3.12.13で **355 passed / 2 warnings / 20.70秒**。DB skipなし、外部Auth／Stripe／メールはMock。最初のsandboxによるローカルTCP拒否は環境setup errorで、合格に数えず全件再実行。修正の外部CI／配備はこれから。
+- 20件を追加し、専用実ローカルPostgreSQL 17・Python 3.12.13で **355 passed / 2 warnings / 20.70秒**。DB skipなし、外部Auth／Stripe／メールはMock。最初のsandboxによるローカルTCP拒否は環境setup errorで、合格に数えず全件再実行。
+- [Linux外部CI](https://github.com/kegkeg4/toolbako/actions/runs/37967040779)も **355 passed / 2 warnings / 15.00秒、success**、公開treeはローカルと一致。修正版deploymentはSUCCESS、実DB／AuthのPre-deployも合格維持。実ログイン／登録画面200、未設定SNSボタン・デモログイン案内なし、未設定SNS直接URL503／外部redirectなしを再確認。
 - **本番決済NO-GO継続**。会員登録・確認メール・ログイン・MFA、Stripe Sandbox、メール／ファイル／運営／法務等は残る。詳細は`RELEASE_PROGRESS_2026-10-09.md`。
 
 ## 2026-10-10 DBパスワード入力後の検証（履歴）
