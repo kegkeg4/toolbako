@@ -52,6 +52,7 @@ from .payout_worker import sandbox_payouts_ready
 from .refunds import request_order_refunds
 from .reconciliation import propose_recovery, approve_recovery
 from .payment_reconciliation import KINDS as PAYMENT_RECOVERY_KINDS, payment_recovery_inventory, propose_payment_recovery, approve_payment_recovery
+from .refund_resumption import refund_resumption_inventory, propose_refund_resumption, approve_refund_resumption
 from .deployment_check import configuration_checks
 from .supabase_api import supabase_headers
 
@@ -1103,6 +1104,7 @@ async def order_transition(request: Request, order_id: str, action: str, reason:
     if action == "cancel_accept" and not settings.demo_mode:
         if order.get("status") != "cancel_pending" or order.get("cancel_requested_by") == user["id"]: raise HTTPException(409)
         if order.get("payment_status") != "paid" or not order.get("payment_reference"): raise HTTPException(409,"返金対象の決済を確認できません")
+        order.update(refund_cancel_accepted_by=user["id"], refund_cancel_accepted_at=datetime.now(timezone.utc))
         try:
             await request_order_refunds(store, order, stripe)
         except FinanceConflict as exc:
@@ -1115,8 +1117,11 @@ async def order_transition(request: Request, order_id: str, action: str, reason:
             order["refund_status"] = "review"
             await persist_state()
             raise HTTPException(502,"返金処理を開始できませんでした") from exc
-    try: store.transition(order, action, reason, user["id"])
-    except ValueError: raise HTTPException(409, "現在の状態では操作できません")
+    if not (action == "cancel_accept" and not settings.demo_mode):
+        try: store.transition(order, action, reason, user["id"])
+        except ValueError: raise HTTPException(409, "現在の状態では操作できません")
+    # Real cancellation remains pending until every payment's full refund is
+    # verified by webhook/reconciliation, not merely accepted by the API.
     store.audit(user["id"], f"order.{action}", order_id, request.headers.get("x-request-id", ""))
     recipient = order.get("seller_email") if user["id"] == order["buyer_id"] else order.get("buyer_email")
     action_label = {"accept":"納品承諾","revise":"修正依頼","cancel_request":"キャンセル申請","cancel_accept":"キャンセル合意","cancel_reject":"キャンセル却下"}[action]
@@ -2348,7 +2353,31 @@ async def admin(request: Request):
     if not is_admin(user): raise HTTPException(403, "管理者のみアクセスできます")
     users = sorted([{"username":username, **account} for username,account in store.registered_users.items()], key=lambda item:item.get("display_name") or item["username"])
     recoveries = await payment_recovery_inventory(database_store, store) if database_store else {"items": [], "truncated": False}
-    return templates.TemplateResponse(request, "admin.html", context(request, tools=store.tools, users=users, reports=store.reports, cases=store.support_cases, audit_logs=store.audit_logs[:50], readiness=readiness_summary(settings, runtime_database_ready=bool(database_store and await database_store.probe())), finance=store.finance_snapshot(ledger=bool(database_store)), finance_controls_ready=settings.demo_mode or sandbox_payouts_ready(settings), payout_labels=PAYOUT_LABELS, payment_recoveries=recoveries, payment_recovery_ready=bool(database_store and sandbox_payouts_ready(settings) and len(set(settings.admin_user_ids)) >= 2)))
+    return templates.TemplateResponse(request, "admin.html", context(request, tools=store.tools, users=users, reports=store.reports, cases=store.support_cases, audit_logs=store.audit_logs[:50], readiness=readiness_summary(settings, runtime_database_ready=bool(database_store and await database_store.probe())), finance=store.finance_snapshot(ledger=bool(database_store)), finance_controls_ready=settings.demo_mode or sandbox_payouts_ready(settings), payout_labels=PAYOUT_LABELS, payment_recoveries=recoveries, refund_resumptions=refund_resumption_inventory(store), payment_recovery_ready=bool(database_store and sandbox_payouts_ready(settings) and len(set(settings.admin_user_ids)) >= 2)))
+
+
+@app.post("/admin/orders/{order_id}/refund-resumption/{action}")
+async def admin_resume_refund(request: Request, order_id: str, action: str, proposal_id: str = Form("")):
+    user = current_user(request)
+    if not is_admin(user) or action not in {"propose", "approve"}:
+        raise HTTPException(403)
+    if not database_store or not sandbox_payouts_ready(settings):
+        raise HTTPException(409, "返金再開は接続済みのテスト環境のみ操作できます")
+    if not mfa.recent(request):
+        return RedirectResponse("/security/mfa?next=/admin", 303)
+    order = next((o for o in store.orders if o["id"] == order_id), None)
+    if not order:
+        raise HTTPException(404)
+    try:
+        if action == "propose":
+            await propose_refund_resumption(database_store, store, stripe, settings, order, user["id"])
+        else:
+            await approve_refund_resumption(database_store, store, stripe, settings, order, user["id"], proposal_id, send_email_safely)
+    except StripeOutcomeUnknown:
+        raise
+    except (FinanceConflict, RuntimeError):
+        raise HTTPException(409, "返金明細の照合・再開を確認できません。重複操作せず運営で詳細確認してください") from None
+    return RedirectResponse("/admin#refund-resumption", 303)
 
 
 @app.post("/admin/orders/{order_id}/reconcile/{kind}/{action}")
@@ -2406,7 +2435,7 @@ async def admin_cancel_payout(request: Request, payout_id: str):
         raise HTTPException(409, "銀行振込を開始した申請は取り消せません。Stripeの結果照合が必要です")
     if payout["status"] == "cancelled":
         return RedirectResponse("/admin#finance", 303)
-    payout["status"] = "reversing"
+    payout.update(status="reversing", cancellation_requested=True)
     store.audit(user["id"], "payout.cancel_requested", payout_id, request.headers.get("x-request-id", ""))
     return RedirectResponse("/admin#finance", 303)
 

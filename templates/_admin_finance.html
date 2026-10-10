@@ -74,8 +74,8 @@
 
   {% if finance_controls_ready %}
   <details class="finance-details">
-    <summary>結果不明の振込を照合する（テスト環境）</summary>
-    <p>Stripeの分配・銀行振込記録を読み取り、金額・口座・注文との一致を確認します。残高の予約は保持されます。照合した管理者とは別の管理者が、2段階認証後に30分以内に承認してください。</p>
+    <summary>結果不明の分配・分配取消・振込を照合する（テスト環境）</summary>
+    <p>Stripeの分配・分配取消・銀行振込記録を読み取り、金額・口座・注文との一致を確認します。再送はしません。取消の申請は復旧後も取消処理を継続し、銀行振込へは進みません。残高の予約は保持されます。照合した管理者とは別の管理者が、2段階認証後に30分以内に承認してください。</p>
     {% for payout in finance.payouts if payout.finance_v2 and payout.status == 'review' %}
     <article class="finance-flow-note">
       <b>申請 {{ payout.id[:8] }} · ¥{{ '{:,}'.format(payout.net_amount) }}</b>
@@ -126,5 +126,30 @@
       {% endif %}
     </article>
     {% else %}<p>結果不明の購入決済・返金はありません。</p>{% endfor %}
+  </details>
+  <details id="refund-resumption" class="finance-details">
+    {% set resumptions = refund_resumptions|default({'items': [], 'truncated': false}) %}
+    <summary>途中で止まった全額返金を再開する（テスト環境）</summary>
+    <p>これは結果不明な返金の再送ではありません。キャンセル合意と全明細を照合し、既存の返金がすべて全額成功した場合だけ、まだ一度も要求していない明細を1件ずつ返金します。別々の管理者2名・直近の2段階認証・30分以内の承認が必要です。</p>
+    {% if not payment_recovery_ready %}<p class="control-unavailable">テスト用Stripe・永続DB・別々の管理者2名を接続した後に操作できます。本番では使えません。</p>{% endif %}
+    {% if resumptions.truncated %}<p role="alert">100件まで表示しています。残りも保留中です。</p>{% endif %}
+    {% for recovery in resumptions['items'] %}
+    <article class="finance-flow-note">
+      <b>{{ recovery.tool_name }} · {{ recovery.order_id[:8] }}</b>
+      {% set proposal = recovery.proposal or {} %}
+      {% if proposal.status == 'proposed' %}
+      <small>未要求 {{ proposal.remaining_count }}件 · 次の返金 ¥{{ '{:,}'.format(proposal.next_amount) }}{% if not proposal.next_operation %}（既存返金の状態復元のみ）{% endif %} · 確認者 {{ proposal.proposed_by }}</small>
+      {% if payment_recovery_ready and proposal.proposed_by != user.id %}
+      <form method="post" action="/admin/orders/{{ recovery.order_id }}/refund-resumption/approve">
+        <input type="hidden" name="proposal_id" value="{{ proposal.id }}">
+        <button data-confirm="テスト環境の全明細を再照合します。未要求の明細があれば、新たなテスト返金を1件だけ作成します。既存の返金は再送しません。">別の管理者として返金再開を承認</button>
+      </form>
+      {% elif proposal.proposed_by == user.id %}<small>別の管理者による承認を待っています（30分以内）。</small>{% endif %}
+      {% endif %}
+      {% if payment_recovery_ready %}
+      <form method="post" action="/admin/orders/{{ recovery.order_id }}/refund-resumption/propose"><button>全明細を読み取り、再開可否を確認</button></form>
+      {% endif %}
+    </article>
+    {% else %}<p>キャンセル合意を記録した、再開確認待ちの全額返金はありません。</p>{% endfor %}
   </details>
 </section>

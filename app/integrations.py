@@ -138,11 +138,14 @@ class StripeIntegration:
             "metadata[payout_id]": payout["id"],
         }, account=payout["account_id"])
 
-    async def reverse_allocation(self, allocation: dict):
-        return await self._post(f"transfers/{allocation['transfer_id']}/reversals", {
+    def reversal_data(self, allocation: dict):
+        return {
             "_idempotency_key": f"reverse-allocation-{allocation['id']}",
             "amount": str(allocation["transfer_amount"]), "metadata[allocation_id]": allocation["id"],
-        })
+        }
+
+    async def reverse_allocation(self, allocation: dict):
+        return await self._post(f"transfers/{allocation['transfer_id']}/reversals", self.reversal_data(allocation))
 
     async def create_account_link(self, account_id: str) -> dict[str, Any]:
         return await self._post("account_links", {"_idempotency_key":f"account-link-{account_id}-{uuid4()}","account":account_id,"refresh_url":f"{self.base_url}/seller/payments?refresh=1","return_url":f"{self.base_url}/seller/payments?returned=1","type":"account_onboarding"})

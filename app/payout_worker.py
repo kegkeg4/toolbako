@@ -51,6 +51,8 @@ async def run_step(backend, store, stripe, settings, *, payout_id=None, at=None)
         payout = next((p for p in candidates if p["status"] in {"bank_pending", "reversing"} or p["scheduled_for"] <= at), None)
         if not payout:
             return "idle"
+        if payout["status"] == "reversing":
+            payout["cancellation_requested"] = True
         try:
             await _step(backend, store, stripe, payout)
         except StripeOutcomeUnknown:
@@ -94,6 +96,10 @@ async def _step(backend, store, stripe, payout):
                     or not allocation.get("source_charge") or result.get("source_transaction") != allocation["source_charge"]):
                 raise FinanceConflict("分配結果の復元に失敗しました")
             allocation["transfer_id"] = result["id"]
+    # Cancellation intent survives review/recovery. Never resume a bank payout
+    # just because an uncertain transfer was successfully reconciled.
+    if payout.get("cancellation_requested"):
+        payout["status"] = "reversing"
     if payout["status"] == "reversing":
         allocation = next((a for a in payout["allocations"] if a.get("transfer_id") and not a.get("reversal_id")), None)
         if allocation:

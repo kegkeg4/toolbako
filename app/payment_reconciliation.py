@@ -18,7 +18,7 @@ from .payout_worker import sandbox_payouts_ready
 KINDS = {"checkout": "購入決済", "extra": "追加支払い", "refund": "購入分の返金", "refund_extra": "追加支払いの返金"}
 
 
-def _allowed(backend, store, stripe, settings, actor_id):
+def require_sandbox_review(backend, store, stripe, settings, actor_id):
     if (not sandbox_payouts_ready(settings) or stripe.journal is not backend
             or stripe.secret_key != settings.stripe_secret_key or stripe.charge_mode != "separate"
             or actor_id not in settings.admin_user_ids or len(set(settings.admin_user_ids)) < 2
@@ -75,12 +75,12 @@ async def _target(backend, store, stripe, order, kind, extra_id):
     return extra, amount, data, operation_id, operation
 
 
-def _metadata_matches(metadata, order, extra):
+def payment_metadata_matches(metadata, order, extra):
     return (isinstance(metadata, dict) and metadata.get("order_id") == order["id"]
             and (metadata.get("extra_id") == extra["id"] if extra else "extra_id" not in metadata))
 
 
-async def _payment_proof(stripe, order, extra, payment_id, amount, *, refund=False):
+async def sandbox_payment_proof(stripe, order, extra, payment_id, amount, *, refund=False):
     if not isinstance(payment_id, str) or not payment_id.startswith("pi_"):
         raise FinanceConflict("元決済の識別情報を確認できません")
     payment = await stripe.retrieve_payment(payment_id)
@@ -88,7 +88,7 @@ async def _payment_proof(stripe, order, extra, payment_id, amount, *, refund=Fal
             or payment.get("livemode") is not False or payment.get("status") != "succeeded"
             or type(payment.get("amount")) is not int or payment["amount"] != amount
             or type(payment.get("amount_received")) is not int or payment["amount_received"] != amount
-            or payment.get("currency") != "jpy" or not _metadata_matches(payment.get("metadata"), order, extra)
+            or payment.get("currency") != "jpy" or not payment_metadata_matches(payment.get("metadata"), order, extra)
             or payment.get("transfer_group") != f"order-{order['id']}"
             or payment.get("transfer_data") is not None or payment.get("application_fee_amount") is not None
             or payment.get("on_behalf_of") is not None):
@@ -117,7 +117,7 @@ async def _inspect(backend, store, stripe, order, kind, extra_id, at):
     objects = await stripe.list_financial_objects(operation["endpoint"], params=params)
     if any(not isinstance(obj.get("metadata"), dict) for obj in objects):
         raise FinanceConflict("Stripeの照合記録の形式を確認できません")
-    matches = [obj for obj in objects if _metadata_matches(obj["metadata"], order, extra)]
+    matches = [obj for obj in objects if payment_metadata_matches(obj["metadata"], order, extra)]
     if len(matches) != 1:
         raise FinanceConflict("該当記録が0件または複数あります。再送せずStripeで詳細確認してください")
     remote = matches[0]
@@ -139,7 +139,7 @@ async def _inspect(backend, store, stripe, order, kind, extra_id, at):
         if status == "complete" and payment_status == "paid":
             if part.get("payment_reference") and part["payment_reference"] != remote.get("payment_intent"):
                 raise FinanceConflict("元決済が変更されています")
-            proof = await _payment_proof(stripe, order, extra, remote.get("payment_intent"), amount)
+            proof = await sandbox_payment_proof(stripe, order, extra, remote.get("payment_intent"), amount)
         elif status == "open" and payment_status == "unpaid":
             url = remote.get("url")
             parsed = urlparse(url) if isinstance(url, str) else None
@@ -158,7 +158,7 @@ async def _inspect(backend, store, stripe, order, kind, extra_id, at):
                 or (part.get("refund_reference") and part["refund_reference"] != remote["id"])):
             raise FinanceConflict("返金の注文・全額・元決済が一致しません")
         # Refund objects have no livemode attribute. Prove it on their parent PI.
-        proof = await _payment_proof(stripe, order, extra, remote["payment_intent"], amount, refund=True)
+        proof = await sandbox_payment_proof(stripe, order, extra, remote["payment_intent"], amount, refund=True)
         if remote.get("charge") != proof["charge"] or (remote["status"] == "succeeded" and proof["amount_refunded"] != amount):
             raise FinanceConflict("返金の元請求・確定額が一致しません")
         identity = {key: remote.get(key) for key in ("id", "metadata", "status", "amount", "currency", "payment_intent", "charge")}
@@ -174,7 +174,7 @@ async def _bounded_inspect(*args):
 
 
 async def propose_payment_recovery(backend, store, stripe, settings, order, kind, actor_id, *, extra_id="", at=None):
-    _allowed(backend, store, stripe, settings, actor_id)
+    require_sandbox_review(backend, store, stripe, settings, actor_id)
     at = at or datetime.now(timezone.utc)
     extra, operation_id, operation, remote, fingerprint = await _bounded_inspect(backend, store, stripe, order, kind, extra_id, at)
     proposal = {"id": str(uuid4()), "status": "proposed", "proposed_by": actor_id, "proposed_at": at,
@@ -187,7 +187,7 @@ async def propose_payment_recovery(backend, store, stripe, settings, order, kind
 
 
 async def approve_payment_recovery(backend, store, stripe, settings, order, kind, actor_id, proposal_id, email_sender, *, extra_id="", at=None):
-    _allowed(backend, store, stripe, settings, actor_id)
+    require_sandbox_review(backend, store, stripe, settings, actor_id)
     extra = _part(order, kind, extra_id)
     proposal = (extra or order).get("payment_reconciliations", {}).get(kind, {})
     at = at or datetime.now(timezone.utc)

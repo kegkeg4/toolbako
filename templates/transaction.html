@@ -1,15 +1,20 @@
 {% extends "base.html" %}
 {% block title %}取引ルーム — {{ order.tool_name }}{% endblock %}
 {% block content %}
+{% set refund_in_progress = order.refund_status|default('') in ['processing','pending','partial','review'] %}
 <section class="transaction-page">
   <header class="transaction-head">
-    <div><a href="{{ '/purchases' if user.id==order.buyer_id else '/seller' }}">← 取引一覧</a><span class="status-pill status-{{ order.status }}">{{ status_labels[order.status] }}</span><h1>{{ order.tool_name }}</h1><p>販売者：{{ order.seller_name }}　注文番号：{{ order.id[:8] }}</p></div>
+    <div><a href="{{ '/purchases' if user.id==order.buyer_id else '/seller' }}">← 取引一覧</a><span class="status-pill status-{{ order.status }}">{{ '返金確認中' if refund_in_progress else ('返金済み・キャンセル完了' if order.refund_status|default('')=='completed' else status_labels[order.status]) }}</span><h1>{{ order.tool_name }}</h1><p>販売者：{{ order.seller_name }}　注文番号：{{ order.id[:8] }}</p></div>
     <div class="transaction-price"><small>お支払い金額</small><b>¥{{ '{:,}'.format(order.amount) }}</b></div>
   </header>
   <div class="transaction-layout">
     <section class="room">
       <div class="flow-stepper"><span class="done">1<small>購入</small></span><i></i><span class="{% if order.status != 'in_progress' %}done{% endif %}">2<small>制作・準備</small></span><i></i><span class="{% if order.status in ['awaiting_acceptance','completed'] %}done{% endif %}">3<small>正式な納品</small></span><i></i><span class="{% if order.status == 'completed' %}done{% endif %}">4<small>承諾・評価</small></span></div>
-      {% if order.status=='awaiting_acceptance' %}
+      {% if refund_in_progress %}
+      <div class="cancel-alert" role="status"><b>全額返金の確認中です</b><p>確認済み ¥{{ '{:,}'.format(order.refund_confirmed_amount|default(0)) }} ／ お支払い ¥{{ '{:,}'.format(order.amount) }}。追加支払いを含むすべての返金が確認されるまで、取引は処理中です。返金申請を繰り返さず、運営の確認をお待ちください。</p>{% if order.refund_status=='review' %}<small>通信結果などを運営が確認しています。</small>{% endif %}</div>
+      {% elif order.refund_status|default('')=='completed' %}
+      <div class="complete-alert"><b>✓ 全額返金を確認しました</b><p>カード会社側へ返金が反映されるまで時間がかかる場合があります。</p></div>
+      {% elif order.status=='awaiting_acceptance' %}
       <div class="delivery-alert"><span>📦</span><div><b>正式な納品が届きました</b><p>{% if user.id==order.buyer_id %}内容を確認し、問題なければ承諾してください。修正は1回まで依頼できます。{% else %}購入者の確認を待っています。{% endif %}{% if order.auto_close_at %}<br>{{ order.auto_close_at.strftime('%Y/%m/%d %H:%M') }}までに操作がない場合は自動完了します。{% endif %}</p></div></div>
       {% elif order.status=='cancel_pending' %}
       <div class="cancel-alert"><b>キャンセルリクエスト</b><p>{{ order.cancel_reason }}</p>{% if order.cancel_requested_by != user.id %}<div><form action="/orders/{{ order.id }}/actions/cancel_accept" method="post"><button>キャンセルに合意</button></form><form action="/orders/{{ order.id }}/actions/cancel_reject" method="post"><button>差し戻す</button></form></div>{% else %}<small>取引相手の回答を待っています。</small>{% endif %}</div>
@@ -27,10 +32,12 @@
 
     <aside class="transaction-side">
       <div class="side-panel"><h3>取引メニュー</h3>
-        {% if order.status=='awaiting_acceptance' and user.id==order.buyer_id %}<form action="/orders/{{ order.id }}/actions/accept" method="post"><button class="button full">納品を承諾する</button></form>{% if order.revision_count < 1 %}<form action="/orders/{{ order.id }}/actions/revise" method="post"><button class="outline-button full">修正を依頼する</button></form>{% endif %}
+        {% if refund_in_progress %}<div class="waiting-box"><b>返金の結果を確認しています</b><p>この画面から再申請はできません。困ったときは運営へお問い合わせください。</p><a href="/support">運営に問い合わせる</a></div>
+        {% elif order.refund_status|default('')=='completed' %}<div class="waiting-box"><b>返金済みの取引です</b><p>取引記録と書類を確認できます。</p></div>
+        {% elif order.status=='awaiting_acceptance' and user.id==order.buyer_id %}<form action="/orders/{{ order.id }}/actions/accept" method="post"><button class="button full">納品を承諾する</button></form>{% if order.revision_count < 1 %}<form action="/orders/{{ order.id }}/actions/revise" method="post"><button class="outline-button full">修正を依頼する</button></form>{% endif %}
         {% elif order.status=='in_progress' and user.id==order.seller_id %}<form class="delivery-form" action="/orders/{{ order.id }}/deliver" method="post" enctype="multipart/form-data"><label for="delivery-note">正式な納品</label><textarea id="delivery-note" name="note" required placeholder="納品物・導入手順・ライセンス情報を記載"></textarea><label for="delivery-file">納品ファイル（任意・50MBまで）</label><input id="delivery-file" class="delivery-upload" type="file" name="delivery_file" accept=".zip,.pdf,.txt,.md,.json,.csv,.py,.js,.ts,.html,.css,.png,.jpg,.jpeg,.webp"><small>ZIPは展開容量と危険なパスも検査します。</small><button class="button full">安全検査して正式納品</button></form>
         {% else %}<div class="waiting-box"><b>{{ '出品者が対応中です' if user.id==order.buyer_id and order.status!='completed' else ('購入者の確認待ちです' if order.status!='completed' else '取引記録を確認できます') }}</b><p>{{ 'ルームで連絡できます。' if room_open else 'クローズ後も帳票と納品物を確認できます。' }}</p></div>{% if demo_mode and order.status=='in_progress' and user.id==order.buyer_id %}<form action="/orders/{{ order.id }}/demo-deliver" method="post"><input type="hidden" name="note" value="ツール本体、導入手順書、ライセンス情報を納品します。内容をご確認ください。"><button class="demo-action full">デモ：出品者から納品を受け取る</button></form>{% endif %}{% endif %}
-        {% if order.status in ['in_progress','awaiting_acceptance'] %}<details class="cancel-box"><summary>取引をキャンセルしたい</summary><form action="/orders/{{ order.id }}/actions/cancel_request" method="post"><label class="sr-only" for="cancel-reason">キャンセル理由</label><textarea id="cancel-reason" name="reason" required placeholder="キャンセル理由"></textarea><button>リクエストを送る</button></form></details>{% endif %}
+        {% if not refund_in_progress and order.status in ['in_progress','awaiting_acceptance'] %}<details class="cancel-box"><summary>取引をキャンセルしたい</summary><form action="/orders/{{ order.id }}/actions/cancel_request" method="post"><label class="sr-only" for="cancel-reason">キャンセル理由</label><textarea id="cancel-reason" name="reason" required placeholder="キャンセル理由"></textarea><button>リクエストを送る</button></form></details>{% endif %}
         <details class="dispute-box"><summary>{{ '運営が調査中です' if order.dispute_status|default('') in ['open','investigating'] else '解決できない問題を運営へ相談' }}</summary>{% if order.dispute_status|default('') in ['open','investigating'] %}<p>取引記録を保全し、運営が確認しています。</p>{% else %}<form action="/orders/{{ order.id }}/dispute" method="post"><label class="sr-only" for="dispute-detail">紛争申請の詳細</label><textarea id="dispute-detail" name="detail" minlength="20" maxlength="2000" required placeholder="相手と話し合った内容、問題点、希望する対応を入力"></textarea><button>紛争申請を送る</button></form>{% endif %}</details>
       </div>
 
