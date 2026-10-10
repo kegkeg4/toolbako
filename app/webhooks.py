@@ -12,7 +12,7 @@ from typing import Any, Awaitable, Callable
 from fastapi import HTTPException, Request
 from .finance import FinanceConflict
 from .payout_worker import apply_bank_status, verify_bank_payout
-from .refunds import apply_refund_result
+from .payment_state import apply_checkout_payment, apply_checkout_expiry, apply_refund_payment
 
 
 EmailSender = Callable[[str | None, str, str], Awaitable[bool]]
@@ -241,68 +241,17 @@ class StripeWebhookService:
                 title = "振込が完了しました" if payout["status"] == "paid" else "振込状況の確認が必要です"
                 self.store.notify(payout["seller_id"], title, f"¥{payout['net_amount']:,}", "/payouts", "transactions")
         elif state["paid_checkout_event"] and metadata.get("order_id") and metadata.get("extra_id"):
-            if order and extra and extra.get("status") != "paid":
-                self.store.add_extra_payment(order, extra["amount"], extra["note"])
-                extra["platform_fee"] = round(extra["amount"] * order.get("platform_fee_rate", self.settings.platform_fee_rate))
-                extra["status"] = "paid"
-                extra["payment_reference"] = obj.get("payment_intent")
-                self.store.notify(order["seller_id"], "追加支払いが届きました", f"{order['tool_name']} · ¥{extra['amount']:,}", f"/orders/{order['id']}", "transactions")
-                emails.append((order.get("seller_email"), f"[ツールバコ] {order['tool_name']} の追加支払が完了しました", f"追加支払: ¥{extra['amount']:,}\n{self.settings.site_base_url}/orders/{order['id']}"))
+            if order and extra:
+                emails.extend(apply_checkout_payment(self.store, self.settings, order, extra, obj))
         elif state["paid_checkout_event"] and metadata.get("order_id") and order:
-            if order.get("payment_status") == "paid" and order.get("payment_reference") == obj.get("payment_intent"):
-                return emails
-            order["payment_status"] = "paid"
-            order.setdefault("primary_platform_fee", order["platform_fee"])
-            order["payment_reference"] = obj.get("payment_intent")
-            if not order.get("sales_recorded"):
-                tool = self.store.get(order.get("tool_slug", ""))
-                if tool:
-                    tool["sales_count"] += 1
-                order["sales_recorded"] = True
-            self.store.complete_instant_order(order)
-            customer_email = (obj.get("customer_details") or {}).get("email")
-            if customer_email:
-                order["buyer_email"] = customer_email
-            if obj.get("subscription") and subscription:
-                subscription["status"] = "active"
-                subscription["provider_subscription_id"] = obj["subscription"]
-                invoice_id = obj.get("invoice")
-                if invoice_id and not any(item.get("provider_invoice_id") == invoice_id for item in subscription.setdefault("payments", [])):
-                    subscription["payments"].append({"provider_invoice_id":invoice_id,"amount":subscription["amount"],"status":"paid","paid_at":datetime.now(timezone.utc)})
-            emails.extend([
-                (order.get("buyer_email"), f"[ツールバコ] {order['tool_name']} のご購入を確認しました", f"ご購入ありがとうございます。取引ルームが開きました。\n{self.settings.site_base_url}/orders/{order['id']}"),
-                (order.get("seller_email"), f"[ツールバコ] {order['tool_name']} が購入されました", f"新しい取引を確認してください。\n{self.settings.site_base_url}/orders/{order['id']}"),
-            ])
-            self.store.notify(order["buyer_id"], "購入が完了しました", order["tool_name"], f"/orders/{order['id']}", "transactions")
-            self.store.notify(order["seller_id"], "新しい注文が入りました", f"{order.get('buyer_name') or '購入者'}さんが購入しました", f"/orders/{order['id']}", "transactions")
-        elif event_type == "checkout.session.expired" and extra:
-            if extra.get("status") == "pending":
-                extra["status"] = "expired"
-        elif event_type == "checkout.session.expired" and order and order.get("payment_status") == "pending":
-            self.store.release_coupon(order)
-            order["payment_status"] = "expired"
-            order["status"] = "cancelled"
-            order["updated_at"] = datetime.now(timezone.utc)
-            for item in self.store.subscriptions:
-                if item.get("order_id") == order["id"]:
-                    item["status"] = "expired"
+            emails.extend(apply_checkout_payment(self.store, self.settings, order, None, obj, subscription))
+        elif event_type == "checkout.session.expired" and order:
+            apply_checkout_expiry(self.store, order, extra)
         elif event_type == "identity.verification_session.verified" and application:
             application["status"] = "verified"
             application["verified_at"] = datetime.now(timezone.utc)
         elif event_type in {"charge.refunded", "refund.updated"} and order:
-            was_complete = order.get("refund_status") == "completed"
-            complete = apply_refund_result(order, extra, obj, event_type)
-            if complete and order.get("status") == "cancel_pending":
-                order["status"] = "cancelled"
-                order["cancel_requested_by"] = None
-                order.pop("cancel_previous_status", None)
-            if complete and order.get("sales_recorded"):
-                tool = self.store.get(order.get("tool_slug", ""))
-                if tool:
-                    tool["sales_count"] = max(0, tool["sales_count"] - 1)
-                order["sales_recorded"] = False
-            if complete and not was_complete:
-                emails.append((order.get("buyer_email"), f"[ツールバコ] {order['tool_name']} の全額返金を確認しました", "カード会社側へ返金が反映されるまで時間がかかる場合があります。"))
+            emails.extend(apply_refund_payment(self.store, order, extra, obj, event_type))
         elif event_type == "identity.verification_session.requires_input" and application:
             application["status"] = "rejected"
             application["rejection_reason"] = "本人確認書類を確認できませんでした。審査画面から再提出してください。"

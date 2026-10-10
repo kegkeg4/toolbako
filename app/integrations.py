@@ -155,7 +155,8 @@ class StripeIntegration:
         if response.status_code >= 400: raise RuntimeError("Stripe account lookup failed")
         return response.json()
 
-    async def create_checkout(self, order: dict[str, Any], destination: str) -> dict[str, Any]:
+    def checkout_data(self, order: dict[str, Any], destination: str) -> dict[str, Any]:
+        """One canonical payload for submission and read-only reconciliation."""
         if self.charge_mode == "separate" and order.get("billing_type") == "subscription":
             raise RuntimeError("月額契約は請求ごとの売上分配を検証するまで受付を停止しています")
         cancel_path = order.get("checkout_cancel_path") or f"/checkout/{order['tool_slug']}"
@@ -178,16 +179,22 @@ class StripeIntegration:
                 data["payment_intent_data[transfer_data][destination]"] = destination
             else:
                 data["payment_intent_data[transfer_group]"] = f"order-{order['id']}"
-        return await self._post("checkout/sessions", data)
+        return data
 
-    async def create_extra_checkout(self, order: dict[str, Any], extra: dict[str, Any], destination: str) -> dict[str, Any]:
+    async def create_checkout(self, order: dict[str, Any], destination: str) -> dict[str, Any]:
+        return await self._post("checkout/sessions", self.checkout_data(order, destination))
+
+    def extra_checkout_data(self, order: dict[str, Any], extra: dict[str, Any], destination: str) -> dict[str, Any]:
         data = {"_idempotency_key":f"extra-{extra['id']}","mode":"payment","success_url":f"{self.base_url}/orders/{order['id']}?extra=success","cancel_url":f"{self.base_url}/orders/{order['id']}?extra=cancelled","line_items[0][quantity]":"1","line_items[0][price_data][currency]":"jpy","line_items[0][price_data][unit_amount]":str(extra["amount"]),"line_items[0][price_data][product_data][name]":extra["note"],"metadata[order_id]":order["id"],"metadata[extra_id]":extra["id"],"payment_intent_data[metadata][order_id]":order["id"],"payment_intent_data[metadata][extra_id]":extra["id"]}
         if self.charge_mode == "destination":
             data["payment_intent_data[application_fee_amount]"] = str(round(extra["amount"] * order.get("platform_fee_rate", settings.platform_fee_rate)))
             data["payment_intent_data[transfer_data][destination]"] = destination
         else:
             data["payment_intent_data[transfer_group]"] = f"order-{order['id']}"
-        return await self._post("checkout/sessions", data)
+        return data
+
+    async def create_extra_checkout(self, order: dict[str, Any], extra: dict[str, Any], destination: str) -> dict[str, Any]:
+        return await self._post("checkout/sessions", self.extra_checkout_data(order, extra, destination))
 
     async def create_transfer(self, *, amount: int, destination: str, order_id: str, source_transaction: str | None = None) -> dict[str, Any]:
         """Release a seller's net balance for separate charges and transfers.
@@ -206,14 +213,17 @@ class StripeIntegration:
     async def cancel_subscription(self, subscription_id: str, idempotency_key: str) -> dict[str, Any]:
         return await self._post(f"subscriptions/{subscription_id}", {"_idempotency_key":idempotency_key,"cancel_at_period_end":"true"})
 
-    async def refund_payment(self, payment_intent: str, order_id: str, *, extra_id: str | None = None) -> dict[str, Any]:
+    def refund_data(self, payment_intent: str, order_id: str, *, extra_id: str | None = None) -> dict[str, Any]:
         key = f"refund-extra-{order_id}-{extra_id}" if extra_id else f"refund-{order_id}"
         data = {"_idempotency_key":key,"payment_intent":payment_intent,"metadata[order_id]":order_id}
         if extra_id:
             data["metadata[extra_id]"] = extra_id
         if self.charge_mode == "destination":
             data.update({"reverse_transfer":"true","refund_application_fee":"true"})
-        return await self._post("refunds", data)
+        return data
+
+    async def refund_payment(self, payment_intent: str, order_id: str, *, extra_id: str | None = None) -> dict[str, Any]:
+        return await self._post("refunds", self.refund_data(payment_intent, order_id, extra_id=extra_id))
 
     async def create_identity_session(self, user_id: str) -> dict[str, Any]:
         return await self._post("identity/verification_sessions", {"_idempotency_key":f"identity-{user_id}-{uuid4()}","type":"document","metadata[user_id]":user_id,"return_url":f"{self.base_url}/verification?returned=1","options[document][require_matching_selfie]":"true"})

@@ -1,4 +1,4 @@
-# 売上・振込運用（2026-10-09、Sandbox限定）
+# 売上・振込運用（2026-10-10、Sandbox限定）
 
 ## 公開判定
 
@@ -49,21 +49,33 @@
 
 ## 要対応状態
 
-- **review**：結果不明・不一致。新しいキーで再送しない。管理画面の「結果不明の振込を照合する」から、GETだけでStripe記録と台帳を照合する。分配／銀行振込の成功記録が一意・完全一致した場合に限り、別の管理者が30分以内に再照合して承認できる。両者とも直近MFAが必要。0件・複数件・不一致・不完全な一覧では状態を変えず予約を保持する。記録がないことを再送許可と解釈しない。Checkout／返金／分配取消の結果不明はこの画面の対象外。
+- **review**：結果不明・不一致。新しいキーで再送しない。管理画面の「結果不明の振込を照合する」から、GETだけでStripe記録と台帳を照合する。分配／銀行振込の成功記録が一意・完全一致した場合に限り、別の管理者が30分以内に再照合して承認できる。両者とも直近MFAが必要。0件・複数件・不一致・不完全な一覧では状態を変えず予約を保持する。記録がないことを再送許可と解釈しない。Checkout／返金は下記の別画面で照合する。分配取消の結果不明はまだ対象外。
 - **bank_failed**：銀行口座情報・返戻金をStripeで確認。元の申請は予約状態を保つ。別申請を作って残高を二重に渡さない。再振込の承認・試験は未完了。
 - **held**：運営による販売者保留。保留解除はこの理由だけを再開する。返金・紛争・結果不明は解除しない。
 - **reversing**：運営が申請取消を要求。workerが分配を取り消し、資金回収確認後にcancelledへ進める。銀行振込開始済みはこの処理の対象外。
 - **refund partial/review**：本体と追加支払いの返金を照合する。返金未完了の売上を解放しない。
 
+## 結果不明の購入・返金の復旧
+
+管理画面「結果不明の購入・追加支払い・返金を照合する」は、永続DB・Stripe testキー・separate方式・別々の管理者2名を登録したstagingだけで操作できる。本番やliveキーでは操作不可。確認者・承認者とも直近MFAが必要。
+
+1. `stripe_operations`のpending／unknownを100件まで表示する。件数超過は警告し、注文と対応できない記録は操作ボタンを出さない。プロバイダーの応答JSONや秘密値は表示しない。
+2. 最初の管理者がGETだけで完全な一覧を取得する（最大10ページ・全照合30秒）。元要求のhash、注文／追加明細、JPY・金額・作成日時・戻りURL等を照合する。0件・複数件・不完全な一覧では保留継続。
+3. 別の管理者が30分以内に再取得し、照合結果が変更されていないことを承認する。購入完了の復旧にはPaymentIntent／元Chargeのテスト環境・支払済み全額・注文・送金グループ・返金／異議申立てなしも確認する。Refundにはlivemode属性がないため、元PaymentIntentとChargeで環境を確認する。
+4. open／unpaidのCheckoutはStripeの有効な購入URLだけを復元し、ツールを提供しない。expired／unpaidは期限切れにする。complete／paidの証拠がそろった場合だけ通常の購入状態に戻す。返金はsucceededの全額が確認できた場合だけ累計確定額へ反映し、pending／requires_actionは待機、failed／canceledは運営確認のままとする。
+5. journal・注文・追記監査・通知outboxを同じDBトランザクションで保存する。失敗時はまとめてrollback。復旧後のWebhookは販売件数・通知を重複させない。他の結果不明明細があれば振込保留を解除しない。
+
+**この処理は再請求・再返金を行わない。** Stripeで作成記録がない場合も自動再送しない。複数決済の全額取消で、最初の返金が不明になったためまだ要求していない残りの返金は、自動的に新規作成しない。全明細の照合と、未要求分を再開する明示的な運用／実機試験は別途必要。返金途中の売上は保留する。
+
 ## 本番前に残る事項
 
 - Stripe再認証、対象環境・アカウントの確定、Secrets登録、配備、実サービスE2E。Supabaseへのスキーマ追加・権限確認は9/23に完了。Railwayの接続変数と配備前チェックは保存済み・反映待ち。Auth URLと実接続の最新状態は `RELEASE_PROGRESS_2026-10-09.md` を参照。
 - 月額課金のinvoiceごとの売上・返金台帳。separate方式の月額Checkoutは受付停止し、売上だけ回収して分配できない状態を避ける。
-- 結果不明のCheckout／返金／分配取消の照合・復旧、銀行振込失敗後の再振込、振込後の返金・債権回収の運用。分配／銀行振込の成功記録に対する二者照合はローカル実装済みで、実Stripe試験は未完了。
+- 結果不明の分配取消の復旧、未要求の残りの返金の安全な再開、銀行振込失敗後の再振込、振込後の返金・債権回収の運用。分配／銀行振込／単発Checkout／全額Refundの二者照合はローカル実装済みで、実Stripe試験は未完了。
 - 部分返金後の残額再配分、紛争終了後の残高復元。現状は対象注文を保留する。
 - 未申請売上の自動振込、保有期限アラート、銀行休業日・処理遅延の運用と規約。
 - workerの配備・定期実行・停止監視・バックアップ復元・負荷試験。今回、外部の定期ジョブは作成していない。
 
 日本のStripe手動振込は原則90日以内の払出しが必要。従来の「120日後」案をそのまま本番採用しない。プラットフォーム残高からの送金時期も含め、Stripeと専門家にモデルを確認して規約を確定する。Stripeを「法的なエスクロー」と表示しない。
 
-参照：[手動振込・保有期限](https://docs.stripe.com/connect/manual-payouts)、[分離した支払いと送金](https://docs.stripe.com/connect/separate-charges-and-transfers)、[銀行振込API](https://docs.stripe.com/api/payouts/create)、[Transfer reversal](https://docs.stripe.com/api/transfer_reversals/create)。
+参照：[手動振込・保有期限](https://docs.stripe.com/connect/manual-payouts)、[分離した支払いと送金](https://docs.stripe.com/connect/separate-charges-and-transfers)、[銀行振込API](https://docs.stripe.com/api/payouts/create)、[Transfer reversal](https://docs.stripe.com/api/transfer_reversals/create)、[Checkout一覧](https://docs.stripe.com/api/checkout/sessions/list)、[返金一覧](https://docs.stripe.com/api/refunds/list)、[PaymentIntent](https://docs.stripe.com/api/payment_intents/object)、[冪等キーの保持期限](https://docs.stripe.com/api/idempotent_requests)。

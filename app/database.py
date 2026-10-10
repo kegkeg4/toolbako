@@ -343,6 +343,18 @@ class PostgresStateStore:
         )).fetchone()
         return dict(zip(("endpoint", "request_hash", "status", "created_at"), row)) if row else None
 
+    async def unresolved_payment_operations(self):
+        """Bounded admin inventory, without provider payloads or credentials."""
+        if self._connection is None:
+            raise StorageUnavailable("A database request boundary is required")
+        rows = await (await self._connection.execute(
+            "select operation_id,endpoint,status from toolbako_runtime.stripe_operations "
+            "where status in ('pending','unknown') and endpoint in ('checkout/sessions','refunds') "
+            "order by created_at,operation_id limit 101"
+        )).fetchall()
+        return {"items": [dict(zip(("id", "endpoint", "status"), row)) for row in rows[:100]],
+                "truncated": len(rows) > 100}
+
     async def reconcile_operation(self, operation_id: str, *, endpoint: str, request_hash: str, response: dict):
         """Commit verified recovery, business state and audit in one transaction."""
         if self._connection is None or not isinstance(response.get("id"), str):

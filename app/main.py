@@ -51,6 +51,7 @@ from .finance import FinanceConflict, PAYOUT_LABELS, balance as ledger_balance, 
 from .payout_worker import sandbox_payouts_ready
 from .refunds import request_order_refunds
 from .reconciliation import propose_recovery, approve_recovery
+from .payment_reconciliation import KINDS as PAYMENT_RECOVERY_KINDS, payment_recovery_inventory, propose_payment_recovery, approve_payment_recovery
 from .deployment_check import configuration_checks
 from .supabase_api import supabase_headers
 
@@ -273,11 +274,14 @@ async def stripe_outcome_unknown(request: Request, exc: StripeOutcomeUnknown):
     # evidence of a failed payment and must not allow a fresh purchase ID.
     user = current_user(request)
     for order in store.orders:
-        if exc.operation_id == f"checkout-{order['id']}":
+        keys = {f"checkout-{order['id']}", f"refund-{order['id']}"}
+        for extra in order.get("pending_extras", []):
+            keys.update((f"extra-{extra['id']}", f"refund-extra-{order['id']}-{extra['id']}"))
+        if exc.operation_id in keys:
             order["payment_reconciliation_required"] = True
     store.audit(user["id"] if user else None, "stripe.reconciliation_required", exc.operation_id)
     await persist_state()
-    message = "決済サービスからの応答を確認できませんでした。重複決済を防ぐため注文を保留しています。再購入せず、購入履歴を確認してサポートへお問い合わせください。"
+    message = "決済・返金サービスからの応答を確認できませんでした。二重処理を防ぐため注文を保留しています。再購入せず、返金申請も繰り返さず、購入履歴を確認してサポートへお問い合わせください。"
     return await friendly_http_error(request, HTTPException(502, message))
 
 
@@ -2343,7 +2347,32 @@ async def admin(request: Request):
     user = current_user(request)
     if not is_admin(user): raise HTTPException(403, "管理者のみアクセスできます")
     users = sorted([{"username":username, **account} for username,account in store.registered_users.items()], key=lambda item:item.get("display_name") or item["username"])
-    return templates.TemplateResponse(request, "admin.html", context(request, tools=store.tools, users=users, reports=store.reports, cases=store.support_cases, audit_logs=store.audit_logs[:50], readiness=readiness_summary(settings, runtime_database_ready=bool(database_store and await database_store.probe())), finance=store.finance_snapshot(ledger=bool(database_store)), finance_controls_ready=settings.demo_mode or sandbox_payouts_ready(settings), payout_labels=PAYOUT_LABELS))
+    recoveries = await payment_recovery_inventory(database_store, store) if database_store else {"items": [], "truncated": False}
+    return templates.TemplateResponse(request, "admin.html", context(request, tools=store.tools, users=users, reports=store.reports, cases=store.support_cases, audit_logs=store.audit_logs[:50], readiness=readiness_summary(settings, runtime_database_ready=bool(database_store and await database_store.probe())), finance=store.finance_snapshot(ledger=bool(database_store)), finance_controls_ready=settings.demo_mode or sandbox_payouts_ready(settings), payout_labels=PAYOUT_LABELS, payment_recoveries=recoveries, payment_recovery_ready=bool(database_store and sandbox_payouts_ready(settings) and len(set(settings.admin_user_ids)) >= 2)))
+
+
+@app.post("/admin/orders/{order_id}/reconcile/{kind}/{action}")
+async def admin_reconcile_payment(request: Request, order_id: str, kind: str, action: str, proposal_id: str = Form(""), extra_id: str = Form("")):
+    user = current_user(request)
+    if not is_admin(user) or action not in {"propose", "approve"}:
+        raise HTTPException(403)
+    if kind not in PAYMENT_RECOVERY_KINDS:
+        raise HTTPException(404)
+    if not database_store or not sandbox_payouts_ready(settings):
+        raise HTTPException(409, "決済・返金の照合は接続済みのテスト環境のみ操作できます")
+    if not mfa.recent(request):
+        return RedirectResponse("/security/mfa?next=/admin", 303)
+    order = next((o for o in store.orders if o["id"] == order_id), None)
+    if not order:
+        raise HTTPException(404)
+    try:
+        if action == "propose":
+            await propose_payment_recovery(database_store, store, stripe, settings, order, kind, user["id"], extra_id=extra_id)
+        else:
+            await approve_payment_recovery(database_store, store, stripe, settings, order, kind, user["id"], proposal_id, send_email_safely, extra_id=extra_id)
+    except (FinanceConflict, RuntimeError) as exc:
+        raise HTTPException(409, str(exc)) from None
+    return RedirectResponse("/admin#payment-recovery", 303)
 
 
 @app.post("/admin/sellers/{seller_id}/payouts/{action}")

@@ -97,4 +97,34 @@
     {% else %}<p>結果不明の振込はありません。</p>{% endfor %}
   </details>
   {% endif %}
+
+  <details id="payment-recovery" class="finance-details">
+    <summary>結果不明の購入・追加支払い・返金を照合する（テスト環境）</summary>
+    <p>Stripeの記録を読むだけで、再請求・再返金はしません。注文・金額・元決済が一致する記録を、別々の管理者2名が2段階認証後に確認します。0件・複数件・不一致の場合は保留を継続します。</p>
+    {% if not payment_recovery_ready %}<p class="control-unavailable">操作にはテスト用Stripe・永続DB・別々の管理者2名が必要です。本番の決済は引き続き停止しています。</p>{% endif %}
+    {% if payment_recoveries.truncated %}<p role="alert">100件まで表示しています。表示されていない記録も保留中です。運営で詳細確認してください。</p>{% endif %}
+    {% for recovery in payment_recoveries['items'] %}
+    <article class="finance-flow-note">
+      <b>{{ recovery.label }}{% if recovery.order_id %} · {{ recovery.tool_name }}{% endif %}</b>
+      <small>{{ recovery.id }} · {{ '応答不明' if recovery.status == 'unknown' else '要求後に結果未記録' }}</small>
+      {% if recovery.order_id and payment_recovery_ready %}
+      {% set proposal = recovery.proposal or {} %}
+      {% if proposal.status == 'proposed' %}
+      <small>照合した記録: {{ proposal.provider_reference }} · 確認者: {{ proposal.proposed_by }}</small>
+      {% if proposal.proposed_by != user.id %}
+      <form method="post" action="/admin/orders/{{ recovery.order_id }}/reconcile/{{ recovery.kind }}/approve">
+        <input type="hidden" name="proposal_id" value="{{ proposal.id }}">
+        <input type="hidden" name="extra_id" value="{{ recovery.extra_id }}">
+        <button data-confirm="Stripeの記録を再照合し、一致した場合だけ状態を復旧します。新しい請求・返金は作成しません。">別の管理者として照合を承認</button>
+      </form>
+      {% else %}<small>別の管理者による承認を待っています（30分以内）。</small>{% endif %}
+      {% endif %}
+      <form method="post" action="/admin/orders/{{ recovery.order_id }}/reconcile/{{ recovery.kind }}/propose">
+        <input type="hidden" name="extra_id" value="{{ recovery.extra_id }}">
+        <button>Stripeの記録を読み取り照合</button>
+      </form>
+      {% endif %}
+    </article>
+    {% else %}<p>結果不明の購入決済・返金はありません。</p>{% endfor %}
+  </details>
 </section>
