@@ -23,6 +23,7 @@
 - [x] Supabaseの現行opaqueキー・旧JWTキーの互換性、ユーザーJWT分離、設定優先順をコード・Mockで検証する（実キーでの疎通は未完了）
 - [ ] 隔離したSupabase環境でSQLの依存関係・適用・RLS試験を行い、確認済みの手順だけを本番へ適用する
 - [x] 全ルートで利用するPostgres互換repositoryを実装（staging実接続済み、高負荷対策は未完了。単発売上の金融テーブルは別に正規化）
+- [x] 不変な閲覧の不要UPDATE／COMMITを省略し、schema／stateの読込を統合する（ローカル実Postgresで検証。GETの状態変更・outbox・金融検証・決済予約は省略しない。実速度／負荷の合格ではない）
 - [x] 注文作成・Webhook claim・状態更新・監査ログ・通知メールoutboxを同一DBトランザクションにする（ローカル実Postgresで検証）
 - [ ] ステージング／本番の専用DB・TLS・session接続・権限・バックアップを設定し、復元訓練する
 - [x] 通知メールworker、排他claim、再送キー、期限超過reviewを実装

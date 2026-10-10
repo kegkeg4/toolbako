@@ -6,7 +6,17 @@
 
 運営主体は合同会社ONE。既存のRailway `rare-manifestation` / `web`を使用し、新しい有料サービスは作成しない。会員・取引用のSupabaseはユーザー確認済みのプロジェクトを使用。秘密値はソース・記録・チャットに載せず、封印済み変数は取得しない。
 
-## 10/10：DB接続・新版配備成功と実画面の検証（最新）
+## 10/10：閲覧時の不要なDB保存を削減（最新・配備前）
+
+- Supabase／Postgresの接続指針に沿って、通常閲覧でも状態全体をUPDATE・COMMITする処理を修正。毎回のDBロックと最新状態の読込は維持し、全STATE_FIELDSが不変・通知outboxが空・金融台帳の検証済みhashが同じ場合だけ保存を省く。GETという理由だけでは省かず、期限処理・認証・監査・注文・通知の変更は保存する。
+- schema versionと状態の読込を1つのSELECTにまとめた。ロック取得は先行する別SQLのまま維持し、SELECT内の評価順に依存しない。異なるworkerのsetエンコード順だけで不要な保存が起きないよう、読込直後のcheckpointを当該workerの表現へ正規化した。
+- worker初回および他workerが金融状態を変えた場合は台帳整合性を再確認する。決済前予約・結果照合の明示トランザクションは省略しない。新しい依存・外部サービス・スキーマ／権限・秘密変数は変更していない。
+- 18件追加。専用実ローカルPostgreSQL 17・Python 3.12.13で **373 passed / 2 warnings / 25.72秒**、DB skipなし。外部Auth／Stripe／メールはMock。最初の追加試験3件は試験用UPDATE／DELETEのRETURNING漏れで失敗し、試験コードを修正後に全件再実行した。
+- 変更前の匿名HTTP 6回を逐次実行した結果、トップ1807／1591ms、商品一覧1579／1499ms、ログイン1545／1501ms、すべて200。クライアントの通信を含むHTTP応答時間であり、CWV・p95・負荷試験ではない。変更後の実測・外部CI・配備成功はまだこの記録時点では未確認。
+- web-perfスキル指定のChrome DevTools MCPが未接続（navigate_page／performance_start_traceなし）のため、ブラウザーCWV監査は保留。HTTP測定をLCP／INP／CLSの代用にしない。精密監査にはChrome DevTools MCPの接続が必要。
+- **本番決済NO-GO継続**。ユーザーが登録を試しているブラウザーや入力値には触れていない。登録成功・確認メール・MFA・Sandbox決済等を完了扱いにしない。
+
+## 10/10：DB接続・新版配備成功と実画面の検証（履歴）
 
 - ユーザーの完了報告時には反映待ち変更なし、新deployment `41f2040d-b317-4b3a-94aa-4c9df99922a5`がbuild中だった。重複配備せず、その配備を追跡。実commit `77365a4a77ee6303043b9f99088f2b67dd16a398`の外部CIはsuccess。コードは検証済みd6bdd74aと同一で、記録だけ追加した版。
 - 配備は **SUCCESS**。Pre-deployの`connection_preflight_passed=true`、Postgres runtime schema・Auth／profiles／badge API・匿名profilesアクセス拒否は全項目true。パスワードの値は取得していない。本人がresetしたか既存値を再入力したかは、結果だけから断定しない。

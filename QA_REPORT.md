@@ -1,6 +1,13 @@
 # ツールバコ 厳格QAレポート
 
-## 2026-10-10 DB実接続・新版配備成功（最新）
+## 2026-10-10 不要な閲覧時DB書込の削減（最新・配備前）
+
+- 最新状態の読込・DBロックを維持したまま、不変な閲覧でのUPDATE／COMMITを省略。GETの期限処理・セッション・監査・通知・注文の変更、outboxだけの追加、worker初回／他workerの金融変更は省略しない。決済予約の原子性と失敗時rollbackも維持。
+- schema／stateの読込を1回にまとめるが、ロックSQLとは分離。異なるworkerのset配列順、未来／欠落schema、監査改ざん、クロスworker状態更新も追加検証。
+- 18件追加し、専用実ローカルPostgreSQL 17・Python 3.12.13で **373 passed / 2 warnings / 25.72秒**、DB skipなし、外部APIはMock。変更前の逐次匿名HTTPは1499〜1807ms（6件すべて200）。配備・変更後の実測は未確認。
+- Chrome DevTools MCPが未接続のため、web-perf指針によるCWV監査は保留。HTTP値をCWVや高負荷の合格証拠にしない。本番決済NO-GOは継続。
+
+## 2026-10-10 DB実接続・新版配備成功（履歴）
 
 - Railwayの新版はSUCCESS。Pre-deployでPostgres runtime schema・Auth／profiles／badge API・匿名profiles拒否はすべて合格。`/healthz`・`/deploymentz`は200、`/readyz`は意図した503／ready=false／ **24項目中14項目**。本番Stripe書込停止とstagingを維持。
 - 公開URLの27ルートで予期しない5xxなし。未ログイン管理画面403、会員／販売者／メッセージ／出品303、デモログインと`/schedules`404。不正登録422、異なるOrigin403、長すぎるログイン401を確認。実会員作成やメール送信はしていない。

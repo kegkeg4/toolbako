@@ -169,10 +169,20 @@ class PostgresStateStore:
             cursor = await conn.execute("select pg_try_advisory_lock(%s)", (LOCK_ID,))
             if not (await cursor.fetchone())[0]:
                 raise StorageUnavailable("Database is busy; retry later")
-            await self._check_schema(conn)
-            cursor = await conn.execute("select revision, payload from toolbako_runtime.marketplace_state where singleton")
+            # The advisory lock must be acquired in an earlier statement. Do
+            # not put it in this SELECT: PostgreSQL may evaluate its reads
+            # before the lock expression. Schema and state, however, can be
+            # read together, saving a network round trip on every navigation.
+            cursor = await conn.execute(
+                "select v.version, s.revision, s.payload "
+                "from toolbako_runtime.schema_version v "
+                "left join toolbako_runtime.marketplace_state s on s.singleton "
+                "where v.singleton"
+            )
             row = await cursor.fetchone()
-            if row is None:
+            if not row or row[0] != SCHEMA_VERSION:
+                raise StorageUnavailable("Database migration required", diagnostic_code="schema_version_mismatch")
+            if row[1] is None:
                 # Never silently copy a local/demo instance into production.
                 from .data import DemoStore
                 payload = snapshot(DemoStore(seed=False))
@@ -180,9 +190,13 @@ class PostgresStateStore:
                     "insert into toolbako_runtime.marketplace_state(singleton, payload) values (true, %s::jsonb)",
                     (json.dumps(payload),),
                 )
-                row = (0, payload)
-            self._revision, self._checkpoint = row
+                row = (SCHEMA_VERSION, 0, payload)
+            self._revision, self._checkpoint = row[1:]
             restore(store, self._checkpoint)
+            # JSON encodes sets as arrays. Another Python worker may have a
+            # different iteration order; compare with this worker's encoding
+            # of the freshly loaded state, not the other worker's array order.
+            self._checkpoint = snapshot(store)
             self._audit_hashes = {event["id"]: content_hash(event) for event in store.audit_logs}
             self._connection, self._store = conn, store
             self._emails = []
@@ -207,9 +221,9 @@ class PostgresStateStore:
             finally:
                 self._local_lock.release()
 
-    async def _save(self, conn):
+    async def _save(self, conn, *, payload=None):
         from .finance import sync_finance
-        payload = snapshot(self._store)
+        payload = snapshot(self._store) if payload is None else payload
         finance_hash = content_hash((payload["orders"], payload["payouts"]))
         # Ordinary navigation/session refresh must not issue per-sale SQL for
         # the whole ledger. The cache is accepted ONLY after a DB commit.
@@ -262,8 +276,18 @@ class PostgresStateStore:
         if self._connection is None:
             raise StorageUnavailable("A database request boundary is required")
         try:
+            payload = snapshot(self._store)
+            finance_hash = content_hash((payload["orders"], payload["payouts"]))
+            if (payload == self._checkpoint and not self._emails
+                    and finance_hash == self._last_finance_hash):
+                # This is NOT a GET/write route shortcut or a stale page cache.
+                # Each request still loads fresh committed state under the
+                # database lock. Expiry, auth, audit and financial mutations
+                # anywhere in STATE_FIELDS and an outbox-only change must save.
+                # The first save on each worker still verifies the subledger.
+                return
             async with self._connection.transaction():
-                committed = await self._save(self._connection)
+                committed = await self._save(self._connection, payload=payload)
             self._accept_commit(committed)
         except Exception:
             raise StorageUnavailable("Database commit failed") from None
