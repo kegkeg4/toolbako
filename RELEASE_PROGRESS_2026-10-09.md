@@ -6,13 +6,15 @@
 
 運営主体は合同会社ONE。既存のRailway `rare-manifestation` / `web`を使用し、新しい有料サービスは作成しない。会員・取引用のSupabaseはユーザー確認済みのプロジェクトを使用。秘密値はソース・記録・チャットに載せず、封印済み変数は取得しない。
 
-## 10/10：結果不明の購入・返金を二者照合で復旧（最新、配備前）
+## 10/10：結果不明の購入・返金を二者照合で復旧・配備成功（最新）
 
 - Sandbox限定の単発Checkout／追加支払い／全額Refund復旧を追加。新しいPOSTはせず、完全な一覧と元PaymentIntent／ChargeをGETして、元要求hash・注文・JPY金額・環境・作成日時・戻りURL・元決済等を確認する。0件・複数件・不一致・未入金・一覧上限では保留継続。testキーを含む追加の秘密変数、スキーマ／権限、有料リソースは変更していない。
 - 管理画面はpending／unknownを100件まで表示し、未対応記録と超過を警告する。操作には別々の管理者2名・両者の直近MFA・30分以内の提案・承認時の再取得と一致が必要。Stripeの一覧は10ページまで、全照合は30秒で停止する。
 - open／unpaidはStripeの購入URLだけを復元し、expired／unpaidは期限切れ、complete／paidは元請求の成功確認後だけ購入を反映する。Refundは元PaymentIntent／Chargeでtest環境を検証し、全額の成功時だけ確定額を反映。pending／failed等を完了や再返金に変えない。
 - 状態更新をWebhookと共通化し、復旧後のWebhookでも販売件数・通知を重複させない。注文・journal・監査・メールoutboxを同時commit／rollback。他の結果不明明細が残れば振込保留は継続する。復旧を口実に会員の連絡先をpayer情報で上書きせず、PaymentIntent client_secretを提案へ保存しない。
-- 77件追加し、専用実ローカルPostgreSQL 17・Python 3.12.13で **450 passed / 2 warnings / 31.34秒**、DB skipなし、外部StripeはMock。最初の新試験4件は試験用LIKE句のSQLプレースホルダーで失敗し、試験コード修正後66件・追加境界試験後の全450件を再実行した。最終の案内文変更で「再購入せず」が欠ける1件の回帰も検出し、案内を修正後に全450件を再実行した。外部CI・配備はこの段階では未確認。
+- 77件追加し、専用実ローカルPostgreSQL 17・Python 3.12.13で **450 passed / 2 warnings / 31.34秒**、DB skipなし、外部StripeはMock。最初の新試験4件は試験用LIKE句のSQLプレースホルダーで失敗し、試験コード修正後66件・追加境界試験後の全450件を再実行した。最終の案内文変更で「再購入せず」が欠ける1件の回帰も検出し、案内を修正後に全450件を再実行した。
+- [Linux外部CI](https://github.com/kegkeg4/toolbako/actions/runs/38033999477)は **450 passed / 2 warnings / 16.51秒、success**、依存ハッシュ確認と`pip check`も合格。code commit `c14a64078a00d5a8911ad7a347ce57bb0bdbc45e`の全tree `2b1ccaddae9f413bd7b99a60c9840328aab575bd`は検証済みローカルtreeと一致。既存webのcommit変更1件だけを再確認して反映し、deployment `afb64c48-93e2-4483-b830-a90251053b86`は同commitで **SUCCESS**。読取専用Pre-deployのDB／Auth／profiles／badge API／匿名profiles拒否等は全true。反映待ち変更なし。
+- 配備後の匿名15リクエストで、トップ／一覧／登録／ログイン／health／deploymentは200、管理GETおよび新しい復旧POSTは403、会員／販売者／メッセージ／出品は303、demo／schedulesは404。未設定SNSボタンなし。`/deploymentz`はlive_payments_enabled=false、`/readyz`は意図した **503／ready=false／14/24**を維持。実会員作成・メール・Stripe通信・実資金移動は行っていない。ユーザーの登録画面と入力は操作せず、試験用ローカルPostgreSQLは停止済み。
 - 実Stripe Sandbox／銀行入金の合格ではない。分配取消の結果不明、途中でまだ要求していない残りの返金、失敗後の再振込、振込後回収、定期課金台帳、実Auth／メール／運営条件は残る。本番決済NO-GOを維持。
 
 ## 10/10：閲覧時の不要なDB保存を削減・配備成功（履歴）

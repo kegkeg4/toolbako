@@ -1,11 +1,12 @@
 # ツールバコ 厳格QAレポート
 
-## 2026-10-10 購入・返金の結果不明を二者照合で復旧（最新、配備前）
+## 2026-10-10 購入・返金の結果不明を二者照合で復旧・配備成功（最新）
 
 - 単発Checkout・追加支払い・全額Refundについて、GETだけの二者照合を実装。元要求hash・注文／追加明細・JPY全額・環境・戻り先・PaymentIntent／Chargeの支払済み証拠を確認。0件・複数件・不完全な一覧・不一致・未入金では保留し、再POSTしない。
 - 別の管理者2名、両者の直近MFA、30分期限、承認時再取得、live／本番の拒否を検証。未入金Checkoutに利用権を出さず、未成功Refundを完了と表示しない。他の不明明細があれば振込は保留。
 - Webhookと復旧の状態更新を共通化。journal・業務状態・監査・通知outboxの原子的rollback、後着Webhookによる二重件数・通知の防止、信頼できない購入URL拒否、会員連絡先の維持、提案からの秘密値・payer情報除外を検証。
-- 77件追加。専用実ローカルPostgres 17・Python 3.12.13で **450 passed / 2 warnings / 31.34秒**、DB skipなし、Stripe／メールはMock。最終案内文の「再購入せず」が欠ける回帰1件を検出・修正後、全450件を再実行した。外部CI・配備はこの段階で未確認。
+- 77件追加。専用実ローカルPostgres 17・Python 3.12.13で **450 passed / 2 warnings / 31.34秒**、DB skipなし、Stripe／メールはMock。最終案内文の「再購入せず」が欠ける回帰1件を検出・修正後、全450件を再実行した。[Linux外部CI](https://github.com/kegkeg4/toolbako/actions/runs/38033999477)も **450 passed / 2 warnings / 16.51秒、success**、依存ハッシュ・`pip check`合格。全tree一致を確認した同コードの配備はSUCCESS、DB／Authの読取専用Pre-deployは全true。新しいサービス・秘密変数・スキーマは変更していない。
+- 匿名15リクエストで、トップ／一覧／登録／ログイン／health／deployment200、管理GET・復旧POST403、会員／販売者／メッセージ／出品303、demo／schedules404。未設定SNSなし、live_payments_enabled=false、`/readyz`は503／14/24を維持。実登録・メール・Stripe操作はしていない。ローカル試験Postgresは停止済み。
 - 実Stripe Sandbox、分配取消の結果不明、未要求の残りの返金の再開、失敗後の再振込、振込後回収、月額台帳等は未完了。本番決済NO-GO継続。
 
 ## 2026-10-10 不要な閲覧時DB書込の削減・配備成功（履歴）
