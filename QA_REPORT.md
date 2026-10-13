@@ -10,7 +10,7 @@
 - code commit `4816a98c9806bf66ead3e93a716fc147122af2fa`のdeployment `a2ade68e-512d-466b-8bdf-6567c765bf2c`は **SUCCESS**。実Pre-deployはDB／Authと2bucketの読取設定チェックが全true。匿名17リクエストに予期しない5xxなし（`/readyz`の503は未公開条件の意図した拒否）。未ログイン管理・復旧POST403、会員導線303、納品download404、本番課金停止を確認。ready=false／15/24は接続条件の数で、完成率ではない。canary objectは0件、書込試験なし。ローカル試験Postgresは停止済み。
 - 新しい常時有料サービスは未承認。実会員確認、Stripe Sandbox／本番、ClamAV／Redis／worker、ファイル保持・復元・孤立object清掃、監視・法務等が未完了。画面・テスト件数から公開完成を宣言しない。
 
-10/13追加：ユーザーは「追加費用なしで可能な範囲に限定」を選択。有料リソース・プラン変更を作らず、安全機能の未設定による停止を維持する。利用者が未接続のファイル添付を選択して503になる導線を非表示・準備中の案内へ修正。テキストだけの納品に検査済みの誤解を与えるボタン表現も修正。サーバー側の認可・検査・保存拒否は緩めない。追加8件を含む全回帰は **587 passed / 2 warnings / 40.26秒**、専用実ローカルPostgres 17・Python 3.12.13、DB skipなし、構文・差分検査合格。CI・配備は確認後に追記する。
+10/13追加：ユーザーは「追加費用なしで可能な範囲に限定」を選択。有料リソース・プラン変更を作らず、安全機能の未設定による停止を維持する。利用者が未接続のファイル添付を選択して503になる導線を非表示・準備中の案内へ修正。テキストだけの納品に検査済みの誤解を与えるボタン表現も修正。サーバー側の認可・検査・保存拒否は緩めない。追加8件を含む全回帰は **587 passed / 2 warnings / 40.26秒**、専用実ローカルPostgres 17・Python 3.12.13、DB skipなし、構文・差分検査合格。[Linux外部CI](https://github.com/kegkeg4/toolbako/actions/runs/38357140291)も **587 passed / 2 warnings / 33.97秒、success**、依存ハッシュ・`pip check`合格。全treeが一致するcode commitは`f4628cf5d45ba1adb5e818ffbd9dc7ea64663914`。deployment `e8ef873e-2cbe-47a6-be6b-37d7bdda0a60`は **SUCCESS**、実Pre-deployの19チェック全true。匿名7リクエストで予期しない5xxなし、ready=false／15/24・本番課金停止・管理403・納品404を維持。新しいサービス・Volume・Railway bucket・プラン変更なし、staged変更なし。ローカル試験Postgres停止済み。実Auth／Stripe／ファイル通しは未完了。
 
 ## 2026-10-10実装・10-13配備成功：分配取消の復旧・途中全額返金の安全な再開（履歴）
 
