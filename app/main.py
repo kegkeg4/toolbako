@@ -42,7 +42,7 @@ from .production import readiness_summary
 from .persistence import SQLiteStateStore
 from .database import DatabaseBoundaryMiddleware, PostgresStateStore
 from .integrations import EmailIntegration, StripeIntegration, StripeOutcomeUnknown
-from .files import clamav_scan, validate_delivery_file
+from .files import clamav_scan, validate_delivery_file, encode_thumbnail
 from .security import SessionService, hash_password, verify_password
 from .web import clean_visible_text, safe_http_url, safe_next, slugify
 from .webhooks import StripeWebhookService
@@ -55,6 +55,8 @@ from .payment_reconciliation import KINDS as PAYMENT_RECOVERY_KINDS, payment_rec
 from .refund_resumption import refund_resumption_inventory, propose_refund_resumption, approve_refund_resumption
 from .deployment_check import configuration_checks
 from .supabase_api import supabase_headers
+from .object_storage import SupabaseObjectStorage, ObjectStorageError, storage_ready
+from .operations import operation_summary
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -344,18 +346,25 @@ async def save_thumbnail(upload: UploadFile | None, slug: str) -> str | None:
     content = await upload.read(5_000_001)
     if len(content) > 5_000_000: raise HTTPException(422, "商品画像は5MB以下にしてください")
     try:
-        image = Image.open(io.BytesIO(content))
-        if image.format not in {"JPEG", "PNG", "WEBP"}: raise ValueError("unsupported image format")
-        image.verify()
-        image = Image.open(io.BytesIO(content))
-        if image.width * image.height > 25_000_000: raise ValueError("image dimensions too large")
-        image = image.convert("RGB")
-        image.thumbnail((1200, 900))
-    except Exception as exc:
-        raise HTTPException(422, "商品画像を読み込めませんでした") from exc
+        encoded = await asyncio.to_thread(encode_thumbnail, content)
+    except ValueError:
+        raise HTTPException(422, "商品画像を読み込めませんでした") from None
+    # New names avoid stale immutable CDN/browser cache after an image edit.
+    name = secrets.token_hex(16) + ".webp"
+    if settings.storage_provider == "supabase":
+        try:
+            storage = SupabaseObjectStorage(settings)
+            key = f"images/{name}"
+            await storage.upload(key, encoded, image=True)
+            return storage.image_url(key)
+        except ObjectStorageError:
+            raise HTTPException(503, "商品画像の永続保存を確認できません。保存先を設定してください") from None
+    if not settings.demo_mode:
+        raise HTTPException(503, "商品画像の永続保存先が未設定です。再配備で消える保存先は使用できません")
     upload_dir = ROOT / "static" / "uploads"; upload_dir.mkdir(parents=True, exist_ok=True)
-    path = upload_dir / f"{slug}.webp"; image.save(path, "WEBP", quality=88, method=6)
-    return f"/static/uploads/{slug}.webp"
+    path = upload_dir / name
+    await asyncio.to_thread(path.write_bytes, encoded)
+    return f"/static/uploads/{name}"
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -1055,18 +1064,28 @@ async def deliver_order(request: Request, order_id: str, note: str = Form(...), 
         elif not settings.demo_mode:
             raise HTTPException(503,"本番のファイル安全検査が未設定です")
         file_id = hashlib.sha256(content).hexdigest()[:24]
-        directory = Path(settings.private_storage_path) / order_id
-        directory.mkdir(parents=True,exist_ok=True)
-        directory.chmod(0o700)
-        path = directory / f"{file_id}{suffix}"
-        path.write_bytes(content)
-        path.chmod(0o600)
         safe_name = clean_visible_text(Path(delivery_file.filename).name, 1, 120, "ファイル名")
-        file_record = {"id":file_id,"name":safe_name,"path":str(path),"size":len(content),"sha256":hashlib.sha256(content).hexdigest(),"scan_status":"passed","scan_engine":scan_engine}
+        file_record = {"id":file_id,"name":safe_name,"size":len(content),"sha256":hashlib.sha256(content).hexdigest(),"scan_status":"passed","scan_engine":scan_engine}
+        if settings.storage_provider == "supabase":
+            try:
+                key = f"deliveries/{order_id}/{secrets.token_hex(16)}{suffix}"
+                file_record.update(await SupabaseObjectStorage(settings).upload(key, content))
+            except ObjectStorageError:
+                raise HTTPException(503, "納品ファイルの永続保存を確認できません。運営へお問い合わせください") from None
+        elif settings.demo_mode:
+            directory = Path(settings.private_storage_path) / order_id
+            directory.mkdir(parents=True,exist_ok=True)
+            directory.chmod(0o700)
+            path = directory / f"{file_id}{suffix}"
+            await asyncio.to_thread(path.write_bytes, content)
+            path.chmod(0o600)
+            file_record["path"] = str(path)
+        else:
+            raise HTTPException(503, "納品ファイルの永続保存先が未設定です")
     try:
         store.deliver(order, note)
     except ValueError as exc:
-        if file_record:
+        if file_record and file_record.get("path"):
             Path(file_record["path"]).unlink(missing_ok=True)
         raise HTTPException(409, "現在の状態では納品できません") from exc
     if file_record: order["delivery"].setdefault("files",[]).append(file_record)
@@ -1082,6 +1101,15 @@ async def download_delivery_file(request: Request, order_id: str, file_id: str):
     if not order or not order.get("delivery"): raise HTTPException(404)
     item = next((x for x in order["delivery"].get("files",[]) if x["id"]==file_id and x.get("scan_status")=="passed"),None)
     if not item: raise HTTPException(404)
+    if not settings.demo_mode and user["id"] == order["buyer_id"] and (order.get("payment_status") != "paid" or order.get("refund_status") or order.get("status") == "cancelled"):
+        raise HTTPException(404)
+    if item.get("storage_backend") == "supabase":
+        try:
+            url = await SupabaseObjectStorage(settings).signed_delivery_url(item, order_id)
+        except ObjectStorageError:
+            raise HTTPException(503, "納品ファイルのダウンロードを確認できません。運営へお問い合わせください") from None
+        store.audit(user["id"],"delivery.downloaded",f"{order_id}:{file_id}",request.headers.get("x-request-id", ""))
+        return RedirectResponse(url, 303, headers={"Cache-Control":"no-store, private", "Referrer-Policy":"no-referrer"})
     storage_root = Path(settings.private_storage_path).resolve()
     path = Path(item["path"]).resolve()
     if path != storage_root and storage_root not in path.parents: raise HTTPException(404)
@@ -2353,7 +2381,8 @@ async def admin(request: Request):
     if not is_admin(user): raise HTTPException(403, "管理者のみアクセスできます")
     users = sorted([{"username":username, **account} for username,account in store.registered_users.items()], key=lambda item:item.get("display_name") or item["username"])
     recoveries = await payment_recovery_inventory(database_store, store) if database_store else {"items": [], "truncated": False}
-    return templates.TemplateResponse(request, "admin.html", context(request, tools=store.tools, users=users, reports=store.reports, cases=store.support_cases, audit_logs=store.audit_logs[:50], readiness=readiness_summary(settings, runtime_database_ready=bool(database_store and await database_store.probe())), finance=store.finance_snapshot(ledger=bool(database_store)), finance_controls_ready=settings.demo_mode or sandbox_payouts_ready(settings), payout_labels=PAYOUT_LABELS, payment_recoveries=recoveries, refund_resumptions=refund_resumption_inventory(store), payment_recovery_ready=bool(database_store and sandbox_payouts_ready(settings) and len(set(settings.admin_user_ids)) >= 2)))
+    health = await operation_summary(database_store, settings) if database_store else None
+    return templates.TemplateResponse(request, "admin.html", context(request, tools=store.tools, users=users, reports=store.reports, cases=store.support_cases, audit_logs=store.audit_logs[:50], ops_health=health, readiness=readiness_summary(settings, runtime_database_ready=bool(database_store and await database_store.probe()), runtime_storage_ready=await storage_ready(settings)), finance=store.finance_snapshot(ledger=bool(database_store)), finance_controls_ready=settings.demo_mode or sandbox_payouts_ready(settings), payout_labels=PAYOUT_LABELS, payment_recoveries=recoveries, refund_resumptions=refund_resumption_inventory(store), payment_recovery_ready=bool(database_store and sandbox_payouts_ready(settings) and len(set(settings.admin_user_ids)) >= 2)))
 
 
 @app.post("/admin/orders/{order_id}/refund-resumption/{action}")
@@ -2637,7 +2666,7 @@ async def health(): return {"status":"ok", "mode":"supabase" if settings.supabas
 
 @app.get("/readyz")
 async def readiness():
-    result = readiness_summary(settings, runtime_database_ready=bool(database_store and await database_store.probe()))
+    result = readiness_summary(settings, runtime_database_ready=bool(database_store and await database_store.probe()), runtime_storage_ready=await storage_ready(settings))
     return JSONResponse(result, status_code=200 if result["ready"] or settings.demo_mode else 503)
 
 

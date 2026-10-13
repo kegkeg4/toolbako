@@ -73,6 +73,9 @@ class Settings:
     # Runtime storage is private and separate from the public PostgREST schema.
     database_url: str = os.getenv("DATABASE_URL", "").strip()
     private_storage_path: str = os.getenv("PRIVATE_STORAGE_PATH", "private_uploads")
+    storage_provider: str = os.getenv("STORAGE_PROVIDER", "local").strip().lower()
+    supabase_private_bucket: str = os.getenv("SUPABASE_PRIVATE_BUCKET", "").strip()
+    supabase_image_bucket: str = os.getenv("SUPABASE_IMAGE_BUCKET", "").strip()
     clamav_host: str = os.getenv("CLAMAV_HOST", "")
     clamav_port: int = int(os.getenv("CLAMAV_PORT", "3310"))
 

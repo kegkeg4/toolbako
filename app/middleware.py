@@ -147,7 +147,7 @@ class ProductionGuardMiddleware(BaseHTTPMiddleware):
         response.headers["X-Request-ID"] = request_id
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
-        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
         response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=(), payment=(self)"
         response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
         response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
@@ -156,7 +156,9 @@ class ProductionGuardMiddleware(BaseHTTPMiddleware):
         if not self.settings.is_production:
             response.headers["X-Robots-Tag"] = "noindex, nofollow"
         csp_nonce = getattr(request.state, "csp_nonce", "")
-        response.headers["Content-Security-Policy"] = f"default-src 'self'; script-src 'self' 'nonce-{csp_nonce}'; style-src 'self'; img-src 'self' data:; connect-src 'self'; font-src 'self' data:; frame-ancestors 'none'; base-uri 'self'; object-src 'none'; form-action 'self'"
+        from .object_storage import storage_configured, storage_origin
+        image_origin = " " + storage_origin(self.settings) if storage_configured(self.settings) else ""
+        response.headers["Content-Security-Policy"] = f"default-src 'self'; script-src 'self' 'nonce-{csp_nonce}'; style-src 'self'; img-src 'self' data:{image_origin}; connect-src 'self'; font-src 'self' data:; frame-ancestors 'none'; base-uri 'self'; object-src 'none'; form-action 'self'"
         if self.settings.site_base_url.startswith("https://"):
             response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains; preload"
         security_path = str(request.scope.get("path", ""))

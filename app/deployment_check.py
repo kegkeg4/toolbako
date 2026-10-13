@@ -124,6 +124,12 @@ async def connection_checks(settings: Settings) -> dict[str, bool]:
             except httpx.HTTPError:
                 return name, False
         results.update(await asyncio.gather(*(check(item) for item in checks)))
+    if settings.storage_provider == "supabase":
+        from .object_storage import SupabaseObjectStorage, ObjectStorageError
+        try:
+            results.update(await SupabaseObjectStorage(settings).checks())
+        except ObjectStorageError:
+            results.update(private_delivery_bucket=False, public_image_bucket=False)
     return results
 
 

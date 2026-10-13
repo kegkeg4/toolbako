@@ -10,7 +10,7 @@
     <div class="field-row"><div class="field"><label for="tool-category">カテゴリ <b>必須</b></label><select id="tool-category" name="category" required>{% for c in categories %}<option>{{ c }}</option>{% endfor %}</select></div><div class="field"><label for="tool-distribution">納品形式 <b>必須</b></label><select id="tool-distribution" name="distribution" required>{% for k,v in dist_labels.items() %}<option value="{{ k }}">{{ v }}</option>{% endfor %}</select></div></div>
     <div class="field"><label for="tool-tags">タグ</label><input id="tool-tags" name="tags" placeholder="議事録, 仕事術, 要約"><small>カンマ区切り・最大5個</small></div>
     <div class="field"><span class="field-label">使用AI</span><div class="check-grid">{% for ai in ai_options %}<label><input type="checkbox" name="ai_used" value="{{ ai }}"> {{ ai }}</label>{% endfor %}</div></div>
-    <div class="field"><label for="tool-thumbnail">商品画像</label><input id="tool-thumbnail" type="file" name="thumbnail" accept="image/jpeg,image/png,image/webp"><small>JPEG・PNG・WebP、5MBまで。未設定時は自動生成します。</small></div>
+    <div class="field"><label for="tool-thumbnail">商品画像</label><input id="tool-thumbnail" type="file" name="thumbnail" accept="image/jpeg,image/png,image/webp"><small>JPEG・PNG・WebP、5MBまで。商品画像は公開URLで表示されるため、個人情報や秘密情報を含めないでください。未設定時は自動生成します。</small></div>
   </fieldset>
   <fieldset class="form-section"><legend>2. 販売条件</legend>
     {% if not can_offer_exclusive %}<div class="verification-required-note"><b>独占譲渡の出品には本人確認が必要です</b><span>通常販売とカスタマイズ相談はこのまま出品できます。独占譲渡を有効にする場合は、先に<a href="/verification">本人確認</a>を完了してください。</span></div>{% endif %}

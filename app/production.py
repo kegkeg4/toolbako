@@ -7,7 +7,7 @@ from pathlib import Path
 from .config import Settings
 
 
-def readiness_checks(settings: Settings, *, runtime_database_ready: bool = False) -> list[dict[str, Any]]:
+def readiness_checks(settings: Settings, *, runtime_database_ready: bool = False, runtime_storage_ready: bool = False) -> list[dict[str, Any]]:
     """Return non-secret launch checks used by health and the admin console."""
     checks = [
         ("production_mode", "本番モード", settings.is_production and not settings.demo_mode, "あなた", "APP_ENV=production、DEMO_MODE=false"),
@@ -22,7 +22,7 @@ def readiness_checks(settings: Settings, *, runtime_database_ready: bool = False
         ("payments", "本番決済・売上分配の検証", False, "実機検証・残実装が必要", "単発JPYの台帳・分配・振込・取消worker、結果不明の分配／振込を別管理者2名で照合する処理をローカル検証。実Stripe試験、再振込・振込後回収、定期課金・保有期限対応は未完了。live書込は停止中"),
         ("email", "取引メール", settings.email_ready, "あなた", "メール送信APIと送信元ドメイン"),
         ("file_scan", "納品ファイル検査", bool(settings.clamav_host), "あなた", "ClamAV互換スキャナーの接続先"),
-        ("private_storage", "非公開ファイル保管", Path(settings.private_storage_path).is_absolute(), "あなた", "永続ボリューム上のPRIVATE_STORAGE_PATH"),
+        ("private_storage", "永続ファイル保管の接続", runtime_storage_ready if settings.storage_provider == "supabase" else settings.demo_mode and Path(settings.private_storage_path).is_absolute(), "接続・検証", "Supabaseの非公開納品bucketと公開画像bucketの実設定を確認。ローカル保存はデモのみ。ウイルス検査・実ファイルE2E・保持運用は別途必要"),
         ("monitoring", "エラー監視", bool(settings.sentry_dsn), "あなた", "監視サービスのDSN"),
         ("admins", "運営管理者", bool(settings.admin_user_ids), "あなた", "ADMIN_USER_IDSに2名以上を推奨"),
         ("support", "問い合わせ窓口", bool(settings.support_email), "あなた", "SUPPORT_EMAIL"),
@@ -38,8 +38,8 @@ def readiness_checks(settings: Settings, *, runtime_database_ready: bool = False
     return [{"key":key,"label":label,"ok":ok,"owner":owner,"requirement":requirement} for key,label,ok,owner,requirement in checks]
 
 
-def readiness_summary(settings: Settings, *, runtime_database_ready: bool = False) -> dict[str, Any]:
-    checks = readiness_checks(settings, runtime_database_ready=runtime_database_ready)
+def readiness_summary(settings: Settings, *, runtime_database_ready: bool = False, runtime_storage_ready: bool = False) -> dict[str, Any]:
+    checks = readiness_checks(settings, runtime_database_ready=runtime_database_ready, runtime_storage_ready=runtime_storage_ready)
     passed = sum(1 for item in checks if item["ok"])
     return {"ready":passed == len(checks), "passed":passed, "total":len(checks), "score":round(passed/len(checks)*100), "checks":checks,
             "notice":"設定・実装のチェックです。接続試験・負荷試験・決済実機試験の合格率やサービス完成度ではありません。"}
