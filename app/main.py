@@ -55,7 +55,7 @@ from .payment_reconciliation import KINDS as PAYMENT_RECOVERY_KINDS, payment_rec
 from .refund_resumption import refund_resumption_inventory, propose_refund_resumption, approve_refund_resumption
 from .deployment_check import configuration_checks
 from .supabase_api import supabase_headers
-from .object_storage import SupabaseObjectStorage, ObjectStorageError, storage_ready
+from .object_storage import SupabaseObjectStorage, ObjectStorageError, storage_ready, delivery_upload_available
 from .operations import operation_summary
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -231,6 +231,7 @@ def seo_metadata(request: Request) -> dict:
 
 
 def context(request: Request, **values):
+    values["delivery_upload_ready"] = delivery_upload_available(settings)
     status_labels = {"in_progress":"取引中","awaiting_acceptance":"納品確認待ち","completed":"取引完了","cancel_pending":"キャンセル確認中","cancelled":"キャンセル済み"}
     user = current_user(request)
     unread_notification_count = sum(1 for item in store.notifications if user and item.get("user_id") == user["id"] and not item.get("read"))

@@ -22,7 +22,11 @@
 - deployment `a2ade68e-512d-466b-8bdf-6567c765bf2c`は同code commitで **SUCCESS**。実Pre-deployのDB／Auth／profiles／badge／匿名profiles拒否に加え、非公開納品bucket／公開画像bucketの読取チェックはすべてtrue。Start Commandと読取専用Pre-deployを維持し、反映待ち変更なし。Storage canary objectは0件を読取確認し、外部ファイル書込・削除は実行していない。
 - 配備後の匿名17リクエストで、トップ／一覧／登録／ログイン／health／deployment200、管理GET・復旧POST403、会員／販売者／メッセージ／出品303、demo／schedules／権限のない納品download404。登録に未設定SNS／デモボタンなし、トップCSPに設定済みSupabase画像originあり。`live_payments_enabled=false`、`/readyz`は意図した **503／ready=false／15/24**。増えた1件は永続保存先の実設定接続で、完成率や実ファイルの合格ではない。本人の登録入力は操作せず、検証用ローカルPostgresは停止済み。
 
-実ファイル書込・署名download・匿名拒否・失効のcanaryは別途承認・一回実行手順が必要で、Mockやbucket metadata確認で完了扱いにしない。ClamAV／Redis／workerの追加費用は相談待ち。本番決済NO-GOを維持する。
+実ファイル書込・署名download・匿名拒否・失効のcanaryは別途承認・一回実行手順が必要で、Mockやbucket metadata確認で完了扱いにしない。本番決済NO-GOを維持する。
+
+### 10/13追記：追加費用なしの範囲に限定
+
+ユーザーは費用相談への回答で「追加費用なしで可能な範囲に限定」を選択。新しい有料サービス・常時リソース・プラン変更は行わない。既存サービスの使用量まで無料と保証しない。未接続の安全機能を省略する代わりに、取引画面のファイル添付はClamAV／永続保存の設定がない場合に非表示とし、準備中・テキスト納品の案内を表示する。テキスト送信を「安全検査済み」と誤解させるボタン表現を「正式に納品する」へ変更。直接POSTのサーバー検査・拒否は維持する。追加8件を含めた専用実ローカルPostgres 17・Python 3.12.13の全回帰は **587 passed / 2 warnings / 40.26秒**、DB skipなし、構文・差分検査合格。CI・配備結果は確認後に追記する。
 
 ## 10/10実装・10/13配備成功：分配取消の復旧・未要求全額返金の再開（履歴）
 

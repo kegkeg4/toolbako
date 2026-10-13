@@ -44,6 +44,11 @@ def safe_object_key(key):
     return key
 
 
+def delivery_upload_available(settings):
+    """UI capability only; every real upload still checks the live scanner."""
+    return bool(settings.demo_mode or (settings.clamav_host and storage_configured(settings)))
+
+
 async def storage_ready(settings):
     if not storage_configured(settings):
         return False

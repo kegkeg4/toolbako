@@ -14,7 +14,7 @@ from PIL import Image
 
 from app.config import Settings
 from app.data import DemoStore
-from app.object_storage import ObjectStorageError, SupabaseObjectStorage, storage_configured, storage_ready
+from app.object_storage import ObjectStorageError, SupabaseObjectStorage, storage_configured, storage_ready, delivery_upload_available
 from app.production import readiness_summary
 from test_database import database, query
 from test_finance import order as make_order
@@ -248,6 +248,29 @@ def test_readiness_requires_verified_buckets_not_absolute_ephemeral_path():
     assert next(x for x in readiness_summary(settings, runtime_storage_ready=True)["checks"] if x["key"] == "private_storage")["ok"]
     local = Settings(demo_mode=False, private_storage_path="/tmp/ephemeral")
     assert not next(x for x in readiness_summary(local)["checks"] if x["key"] == "private_storage")["ok"]
+
+
+@pytest.mark.parametrize("changes,available", [({"demo_mode": True, "storage_provider": "local"}, True),
+    ({"demo_mode": False}, False), ({"demo_mode": False, "clamav_host": "private-scanner"}, True),
+    ({"demo_mode": False, "clamav_host": "private-scanner", "storage_provider": "local"}, False),
+    ({"demo_mode": False, "clamav_host": "private-scanner", "supabase_service_role_key": ""}, False),
+    ({"demo_mode": False, "clamav_host": "private-scanner", "supabase_private_bucket": "toolbako-images"}, False)])
+def test_delivery_upload_control_requires_scanner_and_persistent_storage(changes, available):
+    assert delivery_upload_available(replace(configured(), **changes)) is available
+
+
+@pytest.mark.parametrize("available", [False, True])
+def test_delivery_form_explains_unavailable_attachment_without_claiming_text_scan(available):
+    from jinja2 import ChoiceLoader, DictLoader, Environment, FileSystemLoader
+    from pathlib import Path
+    env = Environment(loader=ChoiceLoader([DictLoader({"base.html": "{% block content %}{% endblock %}"}),
+        FileSystemLoader(Path(__file__).resolve().parents[1] / "templates")]), autoescape=True)
+    order = make_order(status="in_progress", seller_name="Seller", messages=[], delivery=None, revision_count=0)
+    html = env.get_template("transaction.html").render(order=order, user={"id": "seller"}, room_open=False,
+        review_open=False, demo_mode=False, delivery_upload_ready=available, status_labels={"in_progress": "取引中"})
+    assert ('name="delivery_file"' in html) is available
+    assert "正式に納品する" in html and "安全検査して正式納品" not in html
+    assert ("ファイル添付は準備中です" in html) is not available
 
 
 @pytest.mark.parametrize("fragments,clean", [([b"stream: OK\0"], True), ([b"str", b"eam: O", b"K\0"], True),
