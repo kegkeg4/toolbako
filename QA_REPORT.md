@@ -5,7 +5,9 @@
 - 非demoで再配備により消えるローカル保存を拒否。公開画像と非公開納品を別bucketへ保存し、所有する注文の参加者だけへ60秒署名URLを発行する。第三者・未決済・返金／取消済み購入者の拒否、tokenのDB／監査非保存、origin／path／query検証、公開画像のCSPとキャッシュ差替を検証。
 - ClamAVの分割応答を正しく読む修正、応答途中切れ・ERROR・混在・不正文字をcleanと扱わない検証を追加。検査未設定／停止／感染時、未決済／第三者の納品でStorageへアップロードしない。実ClamAV／EICARは未試験。
 - 操作を行わない運営滞留診断を追加。件数のみで、メール本文・宛先・外部応答・tokenを表示しない。期限切れの処理を無条件に再送しない。人工ファイルcanaryは明示flagがない場合読取専用、失敗時も今回のUUIDパスだけAPIで清掃する。
-- 専用実ローカルPostgres 17・Python 3.12.13で **579 passed / 2 warnings / 57.85秒**、DB skipなし、外部APIはMock。構文・差分検査と39パッケージの互換性確認合格。外部CI・配備・実Storageの結果は別途追記する。
+- 専用実ローカルPostgres 17・Python 3.12.13で **579 passed / 2 warnings / 57.85秒**、DB skipなし、外部APIはMock。構文・差分検査と39パッケージの互換性確認合格。[Linux外部CI](https://github.com/kegkeg4/toolbako/actions/runs/38350178672)も **579 passed / 2 warnings / 35.46秒、success**、ハッシュ必須インストール・`pip check`合格。全tree一致を確認したcode commitは`4816a98c9806bf66ead3e93a716fc147122af2fa`。配備・実Storage読取検証は別途追記する。
+- 書込canaryのPre-deploy設定は安全審査が拒否。持続的な保存・削除を配備設定へ入れず、読取専用を維持した。実ファイルcanaryは未実施で、別経路による迂回も行わない。顧客ファイルを使わない一回実行方法・承認を確認してから試験する。
+- code commit `4816a98c9806bf66ead3e93a716fc147122af2fa`のdeployment `a2ade68e-512d-466b-8bdf-6567c765bf2c`は **SUCCESS**。実Pre-deployはDB／Authと2bucketの読取設定チェックが全true。匿名17リクエストに予期しない5xxなし（`/readyz`の503は未公開条件の意図した拒否）。未ログイン管理・復旧POST403、会員導線303、納品download404、本番課金停止を確認。ready=false／15/24は接続条件の数で、完成率ではない。canary objectは0件、書込試験なし。ローカル試験Postgresは停止済み。
 - 新しい常時有料サービスは未承認。実会員確認、Stripe Sandbox／本番、ClamAV／Redis／worker、ファイル保持・復元・孤立object清掃、監視・法務等が未完了。画面・テスト件数から公開完成を宣言しない。
 
 ## 2026-10-10実装・10-13配備成功：分配取消の復旧・途中全額返金の安全な再開（履歴）

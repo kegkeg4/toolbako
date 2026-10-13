@@ -38,11 +38,13 @@ Twitter OAuthのSupabase provider名は `twitter` です。X Developer Portal側
 
 ## Railway
 
-リポジトリをRailwayへ接続し、`.env.example` を参照して対象環境の変数を設定します。`railway.json` と `Procfile` に起動・ヘルスチェック設定を含めています。`STATE_DB_PATH` のSQLite保存はデモ用で、本番は `DATABASE_URL` によるPostgres保存を使用します。現在のPostgres実装は全状態JSONB＋排他制御の互換層で、金融台帳のみ別テーブルに正規化しています。実サービスE2E・負荷・障害復旧試験の合格までは本番決済を開始できません。`PRIVATE_STORAGE_PATH` は永続ボリューム上の絶対パスに設定します。
+リポジトリをRailwayへ接続し、`.env.example` を参照して対象環境の変数を設定します。`railway.json` と `Procfile` に起動・ヘルスチェック設定を含めています。`STATE_DB_PATH` のSQLite保存はデモ用で、本番は `DATABASE_URL` によるPostgres保存を使用します。現在のPostgres実装は全状態JSONB＋排他制御の互換層で、金融台帳のみ別テーブルに正規化しています。実サービスE2E・負荷・障害復旧試験の合格までは本番決済を開始できません。非demoのファイル保存は`STORAGE_PROVIDER=supabase`と分離した`SUPABASE_PRIVATE_BUCKET`／`SUPABASE_IMAGE_BUCKET`が必須です。`PRIVATE_STORAGE_PATH`のローカル保存はデモだけに限定し、永続ボリュームのないコンテナへ実ファイルを保存しません。
 
 配備前の接続確認は、対象サーバーの秘密変数が使える環境で `python -m app.deployment_check` を実行します。DBのスキーマversion、Auth API、サーバー専用プロフィールAPI、匿名アクセス拒否を読み取りだけで確認し、不備があれば終了コード1になります。パスワードやAPIレスポンスは表示しません。**この合格は公開・課金開始の承認ではなく、`/readyz` の判定も緩めません。**
 
 `railway.json` にPre-deploy Commandと `/deploymentz` ヘルスチェックを設定済みです。`/deploymentz` は安全な接続試験環境の起動確認であり、本番決済の開始判定ではありません。`/readyz` は引き続き全公開条件を確認し、決済未検証なら503を返します。既存の旧版へ接続設定だけを先に反映しないでください。最新の作業状況は [リリース作業記録](RELEASE_PROGRESS_2026-10-09.md) を参照してください。
+
+Storage bucketの公開範囲・容量・MIMEはPre-deployで読取検証します。非公開納品のURLは参加者の認可後に60秒だけ発行し、署名をDB／監査へ保存しません。画像は公開URLなので下書きでも秘密情報を含めないでください。検査未設定時はファイル納品を停止します。運営の滞留確認は管理画面または`python -m app.operations`で読取だけ行います。実Storage書込・署名download・匿名拒否、ClamAV／EICAR、保持・孤立ファイル清掃・復元の合格は別途必要です。詳細は[本番公開チェックリスト](PRODUCTION_CHECKLIST.md)を参照してください。
 
 ## 秘密情報を送らないエラー監視
 

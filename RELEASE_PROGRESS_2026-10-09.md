@@ -6,7 +6,7 @@
 
 運営主体は合同会社ONE。既存のRailway `rare-manifestation` / `web`を使用し、新しい有料サービスは作成しない。会員・取引用のSupabaseはユーザー確認済みのプロジェクトを使用。秘密値はソース・記録・チャットに載せず、封印済み変数は取得しない。
 
-## 10/13：永続Storage・安全検査の応答修正・運営診断（実装済み／実接続検証中）
+## 10/13：永続Storage・安全検査の応答修正・運営診断（配備成功／実ファイル通し未完了）
 
 - 再配備で消えるコンテナ内ファイルを非demoで拒否。商品画像を変換済みWebP・公開専用bucketへ、納品ファイルをウイルス検査後の非公開bucketへ保存する。画像編集は新しい乱数URLでキャッシュの取り違えを防ぎ、画像のdecode／resizeはevent loop外で行う。下書き画像も公開URLで見える注意を表示する。
 - 購入者／販売者を注文で認可した後だけ60秒の署名URLを発行する。返金中・未決済・取消後の購入者を拒否し、署名tokenをDB／監査へ保存しない。redirectはno-store／no-referrer、CSPは設定済みSupabaseの画像originだけ許可する。実ClamAV未接続ならファイル納品は503のまま。
@@ -16,7 +16,13 @@
 - 既存Supabaseへ空の2bucketのみを作成し、公開範囲・上限・MIMEをSQLで読戻し確認。顧客object・既存RLS／権限・秘密値・料金プランは変更しない。Storageの公式手順でbucket作成はDMLを用い、objectの削除はAPIを用いる。1回の明示canaryは人工ファイルだけで保存／公開読取／署名読取／匿名拒否／自分のUUIDパス削除を検証する。通常のPre-deployは読取専用のままに戻す。
 - ユーザーは追加費用について「先に予算・構成を相談したい」と回答。新しいClamAV／Redis／worker等の常時サービスは作成しない。登録・確認メール・ログインは本人が進める回答を受けたが、完了の連絡待ち。ファイル保持／孤立object清掃／実ClamAV／実Auth／Stripe／監視／法務は未完了。本番決済NO-GOを維持。
 
-外部CI・配備・実Storage canaryの結果は、完了後にこの節へ追記する。現時点のローカル試験を実サービスE2Eや公開承認に置き換えない。
+- [Linux外部CI](https://github.com/kegkeg4/toolbako/actions/runs/38350178672)は **579 passed / 2 warnings / 35.46秒、success**。依存ハッシュ必須インストール・`pip check`も合格。公開code commit `4816a98c9806bf66ead3e93a716fc147122af2fa`の全tree `d533f5f7bf2c04560658d63df7fa37bb302e8272`はローカル検証済みtreeと一致する。
+- `--write-canary`をPre-deployへ1回だけ組み込む試行は、安全審査で拒否された。再配備のたびに外部Storageへ保存・削除が起き得る設定は採用しない。別経路で拒否を迂回せず、書込canaryは未実施。既存の読取専用 `python -m app.deployment_check`を維持し、code commit・3つの非秘密Storage変数以外の変更がないことを再確認して既存webへ配備を要求した。新サービス・秘密値・実会員・顧客ファイルは変更しない。
+
+- deployment `a2ade68e-512d-466b-8bdf-6567c765bf2c`は同code commitで **SUCCESS**。実Pre-deployのDB／Auth／profiles／badge／匿名profiles拒否に加え、非公開納品bucket／公開画像bucketの読取チェックはすべてtrue。Start Commandと読取専用Pre-deployを維持し、反映待ち変更なし。Storage canary objectは0件を読取確認し、外部ファイル書込・削除は実行していない。
+- 配備後の匿名17リクエストで、トップ／一覧／登録／ログイン／health／deployment200、管理GET・復旧POST403、会員／販売者／メッセージ／出品303、demo／schedules／権限のない納品download404。登録に未設定SNS／デモボタンなし、トップCSPに設定済みSupabase画像originあり。`live_payments_enabled=false`、`/readyz`は意図した **503／ready=false／15/24**。増えた1件は永続保存先の実設定接続で、完成率や実ファイルの合格ではない。本人の登録入力は操作せず、検証用ローカルPostgresは停止済み。
+
+実ファイル書込・署名download・匿名拒否・失効のcanaryは別途承認・一回実行手順が必要で、Mockやbucket metadata確認で完了扱いにしない。ClamAV／Redis／workerの追加費用は相談待ち。本番決済NO-GOを維持する。
 
 ## 10/10実装・10/13配備成功：分配取消の復旧・未要求全額返金の再開（履歴）
 
