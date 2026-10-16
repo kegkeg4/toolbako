@@ -231,6 +231,11 @@ class StripeIntegration:
     async def create_identity_session(self, user_id: str) -> dict[str, Any]:
         return await self._post("identity/verification_sessions", {"_idempotency_key":f"identity-{user_id}-{uuid4()}","type":"document","metadata[user_id]":user_id,"return_url":f"{self.base_url}/verification?returned=1","options[document][require_matching_selfie]":"true"})
 
+    async def retrieve_identity_session(self, reference: str) -> dict[str, Any]:
+        if not reference.startswith("vs_") or not reference.replace("_", "").isalnum():
+            raise RuntimeError("本人確認の受付番号を確認できませんでした")
+        return await self._get(f"identity/verification_sessions/{reference}")
+
 
 class EmailIntegration:
     def __init__(self, api_key: str, sender: str): self.api_key, self.sender = api_key, sender

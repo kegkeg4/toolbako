@@ -57,6 +57,7 @@ from .deployment_check import configuration_checks
 from .supabase_api import supabase_headers
 from .object_storage import SupabaseObjectStorage, ObjectStorageError, storage_ready, delivery_upload_available
 from .operations import operation_summary
+from .identity import verification_url
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -1638,7 +1639,8 @@ async def verification(request: Request):
     if not current_user(request): return RedirectResponse("/login?next=/verification", 303)
     user = current_user(request)
     application = store.identity_applications.get(user["id"])
-    return templates.TemplateResponse(request, "verification.html", context(request, application=application, nda_signed=user["id"] in store.nda_signatures))
+    identity_available = bool(settings.stripe_secret_key and settings.stripe_webhook_secret)
+    return templates.TemplateResponse(request, "verification.html", context(request, application=application, identity_available=identity_available, nda_signed=user["id"] in store.nda_signatures))
 
 
 @app.post("/verification/submit")
@@ -1664,13 +1666,39 @@ async def start_identity_verification(request: Request):
     user = current_user(request)
     if not user: raise HTTPException(401)
     if settings.demo_mode: return RedirectResponse("/verification",303)
-    if not settings.stripe_ready: raise HTTPException(503,"本人確認サービスが未設定です")
-    try: session = await stripe.create_identity_session(user["id"])
-    except RuntimeError as exc: raise HTTPException(502,"本人確認を開始できませんでした") from exc
+    if not settings.stripe_secret_key or not settings.stripe_webhook_secret:
+        return RedirectResponse("/verification?unavailable=1",303)
+    application = store.identity_applications.get(user["id"])
+    if application and application.get("status") == "verified":
+        return RedirectResponse("/verification",303)
+    if application and application.get("creation_review_required"):
+        return RedirectResponse("/verification?processing=1",303)
+    try:
+        reference = application and application.get("provider_reference")
+        if reference:
+            session = await stripe.retrieve_identity_session(reference)
+            if session.get("id") != reference or (session.get("metadata") or {}).get("user_id") != user["id"]:
+                raise RuntimeError("本人確認の受付情報が一致しません")
+            if session.get("status") in {"processing", "verified"}:
+                return RedirectResponse("/verification?processing=1",303)
+            if session.get("status") == "requires_input":
+                return RedirectResponse(verification_url(session, user_id=user["id"], reference=reference),303)
+            if session.get("status") != "canceled":
+                raise RuntimeError("本人確認の状態を確認できませんでした")
+        session = await stripe.create_identity_session(user["id"])
+        destination = verification_url(session, user_id=user["id"], reference=session["id"])
+    except StripeOutcomeUnknown as exc:
+        # Persist the hold with a non-error response; retrying a new UUID could
+        # create another verification (and another provider charge).
+        with store._lock:
+            store.identity_applications[user["id"]] = {"status":"pending", "provider":"stripe_identity", "creation_review_required":True, "operation_id":exc.operation_id, "submitted_at":datetime.now(timezone.utc), "rejection_reason":None}
+        return RedirectResponse("/verification?processing=1",303)
+    except (RuntimeError, ValueError, KeyError, TypeError) as exc:
+        raise HTTPException(502,"本人確認を開始できませんでした。時間をおいて再度お試しください。") from exc
     with store._lock:
         store.identity_applications[user["id"]] = {"status":"pending","provider":"stripe_identity","provider_reference":session["id"],"submitted_at":datetime.now(timezone.utc),"rejection_reason":None}
     store.audit(user["id"],"identity.provider_started",session["id"],request.headers.get("x-request-id", ""))
-    return RedirectResponse(session["url"],303)
+    return RedirectResponse(destination,303)
 
 
 @app.post("/verification/demo-review")

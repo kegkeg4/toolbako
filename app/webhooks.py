@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .identity import IDENTITY_STATES, apply_identity_event
+
 import asyncio
 import hashlib
 import hmac
@@ -191,6 +193,9 @@ class StripeWebhookService:
         elif event_type.startswith("identity.verification_session."):
             if not application or obj.get("id") != application.get("provider_reference"):
                 raise HTTPException(400, "identity session does not match application")
+            suffix = event_type.rsplit(".", 1)[-1]
+            if suffix in IDENTITY_STATES and obj.get("status") != suffix:
+                raise HTTPException(400, "identity status does not match event")
         elif event_type == "refund.updated":
             expected = extra["amount"] if extra else order and order.get("primary_payment_amount", order.get("amount"))
             reference = state.get("recovered_refund_id") or ((extra or order or {}).get("refund_reference"))
@@ -247,14 +252,10 @@ class StripeWebhookService:
             emails.extend(apply_checkout_payment(self.store, self.settings, order, None, obj, subscription))
         elif event_type == "checkout.session.expired" and order:
             apply_checkout_expiry(self.store, order, extra)
-        elif event_type == "identity.verification_session.verified" and application:
-            application["status"] = "verified"
-            application["verified_at"] = datetime.now(timezone.utc)
+        elif event_type.startswith("identity.verification_session.") and event_type.rsplit(".", 1)[-1] in IDENTITY_STATES and application:
+            apply_identity_event(application, event)
         elif event_type in {"charge.refunded", "refund.updated"} and order:
             emails.extend(apply_refund_payment(self.store, order, extra, obj, event_type))
-        elif event_type == "identity.verification_session.requires_input" and application:
-            application["status"] = "rejected"
-            application["rejection_reason"] = "本人確認書類を確認できませんでした。審査画面から再提出してください。"
         elif event_type == "invoice.paid" and subscription:
             subscription["status"] = "active"
             if order:
