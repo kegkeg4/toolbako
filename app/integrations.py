@@ -67,7 +67,11 @@ class StripeIntegration:
                 await self.journal.finish_operation(idempotency_key, "unknown")
             raise StripeOutcomeUnknown(idempotency_key) from exc
         if self.journal:
-            await self.journal.finish_operation(idempotency_key, "succeeded", result)
+            # Identity redirect URLs and client secrets grant access to a
+            # verification. Keep only reconciliation metadata in the journal.
+            stored_result = ({key: result[key] for key in ("id", "object", "livemode", "status", "metadata") if key in result}
+                             if path.startswith("identity/verification_sessions") else result)
+            await self.journal.finish_operation(idempotency_key, "succeeded", stored_result)
         return result
 
     async def create_express_account(self, user: dict[str, Any], idempotency_key: str) -> dict[str, Any]:

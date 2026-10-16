@@ -142,3 +142,22 @@ def test_provider_setup_screen_explains_automatic_results(identity_route):
     assert '外部サービスの確認結果を自動で反映' in page.text
     assert '通常1〜3営業日' not in page.text
     assert 'action="/verification/start"' in page.text
+
+
+def test_identity_journal_does_not_store_access_links_or_outputs(monkeypatch):
+    import httpx
+    from app.integrations import StripeIntegration
+    stored=[]
+    class Journal:
+        async def begin_operation(self,*args):
+            return None
+        async def finish_operation(self,key,status,response=None):
+            stored.append(response)
+    response={'id':'vs_safe','object':'identity.verification_session','livemode':False,'status':'requires_input','metadata':{'user_id':'synthetic'},'url':'https://verify.stripe.com/start/private-link','client_secret':'private-client-secret','verified_outputs':{'name':'private'}}
+    transport=httpx.MockTransport(lambda request:httpx.Response(200,json=response))
+    original=httpx.AsyncClient
+    monkeypatch.setattr(httpx,'AsyncClient',lambda **kwargs:original(transport=transport,**kwargs))
+    provider=StripeIntegration('rk_test_fake','https://site.example',journal=Journal())
+    returned=asyncio.run(provider.create_identity_session('synthetic'))
+    assert returned['url']==response['url']
+    assert stored==[{k:response[k] for k in ('id','object','livemode','status','metadata')}]
