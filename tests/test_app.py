@@ -560,9 +560,9 @@ def test_seller_connect_onboarding_demo():
 def test_signed_webhook_is_idempotent():
     from app.config import settings
     from app.data import store
-    previous = settings.stripe_webhook_secret
-    object.__setattr__(settings, 'stripe_webhook_secret', 'whsec_test_value')
-    event = {'id':'evt_test_idempotent','type':'account.updated','data':{'object':{'id':'acct_missing','charges_enabled':True}}}
+    previous = settings.stripe_connect_webhook_secret
+    object.__setattr__(settings, 'stripe_connect_webhook_secret', 'whsec_test_value')
+    event = {'id':'evt_test_idempotent','type':'account.updated','account':'acct_missing','data':{'object':{'id':'acct_missing','charges_enabled':True}}}
     payload = json.dumps(event,separators=(',',':')).encode()
     timestamp = int(time.time())
     digest = hmac.new(b'whsec_test_value',f'{timestamp}.'.encode()+payload,hashlib.sha256).hexdigest()
@@ -571,7 +571,7 @@ def test_signed_webhook_is_idempotent():
         first = client.post('/webhooks/stripe', content=payload, headers=headers)
         second = client.post('/webhooks/stripe', content=payload, headers=headers)
     finally:
-        object.__setattr__(settings, 'stripe_webhook_secret', previous)
+        object.__setattr__(settings, 'stripe_connect_webhook_secret', previous)
     assert first.status_code == 200
     assert second.json()['duplicate'] is True
     assert 'evt_test_idempotent' in store.processed_webhook_events

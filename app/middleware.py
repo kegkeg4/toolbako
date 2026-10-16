@@ -15,6 +15,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, Response
 from .request_context import request_id_context
+from .request_limits import RequestBodyLimitMiddleware
 
 logger = logging.getLogger("toolbako.requests")
 
@@ -26,7 +27,7 @@ except ImportError:  # Redis is optional in local/demo mode.
 
 class ProductionGuardMiddleware(BaseHTTPMiddleware):
     def __init__(self, app, settings):
-        super().__init__(app)
+        super().__init__(RequestBodyLimitMiddleware(app, max_bytes=settings.max_request_bytes))
         self.settings = settings
         self._hits: dict[str, deque[float]] = defaultdict(deque)
         self._lock = Lock()
@@ -58,10 +59,6 @@ class ProductionGuardMiddleware(BaseHTTPMiddleware):
         request_id_context.set(request_id)
         request.state.request_id = request_id
         request.state.csp_nonce = secrets.token_urlsafe(18)
-        length = request.headers.get("content-length")
-        if length and length.isdigit() and int(length) > self.settings.max_request_bytes:
-            return self._finish(JSONResponse({"error":"request_too_large","request_id":request_id}, status_code=413), request, request_id)
-
         if not security_path.startswith(("/static/", "/healthz", "/readyz", "/deploymentz")):
             forwarded = request.headers.get("x-forwarded-for", "").split(",")[0].strip()
             direct_ip = request.client.host if request.client else "unknown"

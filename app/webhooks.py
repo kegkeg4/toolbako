@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import re
 import time
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
@@ -15,10 +16,15 @@ from fastapi import HTTPException, Request
 from .finance import FinanceConflict
 from .payout_worker import apply_bank_status, verify_bank_payout
 from .payment_state import apply_checkout_payment, apply_checkout_expiry, apply_refund_payment
+from .request_limits import WEBHOOK_BODY_LIMIT
 
 
 EmailSender = Callable[[str | None, str, str], Awaitable[bool]]
 EmailMessage = tuple[str | None, str, str]
+CONNECT_EVENTS = frozenset({'account.updated', 'payout.paid', 'payout.failed', 'payout.canceled', 'payout.updated', 'payout.created'})
+PLATFORM_EVENTS = frozenset({'checkout.session.completed', 'checkout.session.async_payment_succeeded', 'checkout.session.expired',
+    'refund.updated', 'charge.refunded', 'charge.dispute.created', 'invoice.paid', 'invoice.payment_failed',
+    'customer.subscription.updated', 'customer.subscription.deleted'})
 
 
 class StripeWebhookService:
@@ -30,41 +36,56 @@ class StripeWebhookService:
         self.email_sender = email_sender
         self.journal = journal
 
-    def verify_signature(self, payload: bytes, signature: str) -> bool:
-        secrets = [value for value in {self.settings.stripe_webhook_secret, self.settings.stripe_connect_webhook_secret} if value]
-        if not secrets:
+    def verify_signature(self, payload: bytes, signature: str, *, connect: bool = False) -> bool:
+        secret = self.settings.stripe_connect_webhook_secret if connect else self.settings.stripe_webhook_secret
+        if not secret or len(signature) > 4096:
             return False
         parts: dict[str, list[str]] = {}
         for part in signature.split(","):
             if "=" in part:
                 key, value = part.split("=", 1)
-                parts.setdefault(key, []).append(value)
-        try:
-            timestamp = int(parts.get("t", ["0"])[0])
-        except ValueError:
+                parts.setdefault(key.strip(), []).append(value.strip())
+        timestamps = parts.get('t', [])
+        if len(timestamps) != 1 or not re.fullmatch(r'[0-9]{1,12}', timestamps[0]):
             return False
+        timestamp = int(timestamps[0])
         if abs(int(time.time()) - timestamp) > 300:
             return False
         signed = f"{timestamp}.".encode() + payload
-        expected_values = [hmac.new(secret.encode(), signed, hashlib.sha256).hexdigest() for secret in secrets]
-        return any(hmac.compare_digest(expected, supplied) for expected in expected_values for supplied in parts.get("v1", []))
+        expected = hmac.new(secret.encode(), signed, hashlib.sha256).hexdigest()
+        return any(re.fullmatch(r'[0-9a-f]{64}', supplied) and hmac.compare_digest(expected, supplied)
+                   for supplied in parts.get('v1', []))
 
     async def handle(self, request: Request) -> dict[str, bool]:
-        payload = await request.body()
-        if len(payload) > 1_000_000:
-            raise HTTPException(413, "webhook payload too large")
-        if not self.verify_signature(payload, request.headers.get("stripe-signature", "")):
-            raise HTTPException(400, "invalid signature")
+        payload = bytearray()
+        async for chunk in request.stream():
+            if len(payload) + len(chunk) > WEBHOOK_BODY_LIMIT:
+                raise HTTPException(413, "webhook payload too large")
+            payload.extend(chunk)
+        payload = bytes(payload)
         try:
             event = json.loads(payload)
-        except json.JSONDecodeError as exc:
+        except (ValueError, UnicodeError, RecursionError) as exc:
             raise HTTPException(400, "invalid payload") from exc
-        if not isinstance(event, dict) or not isinstance(event.get("data", {}), dict) or not isinstance(event.get("data", {}).get("object", {}), dict):
+        if not isinstance(event, dict) or not isinstance(event.get("data"), dict) or not isinstance(event["data"].get("object"), dict):
             raise HTTPException(400, "invalid payload")
-        event_id = str(event.get("id", ""))
-        if not event_id:
+        event_id = event.get('id')
+        event_type = event.get('type')
+        if not isinstance(event_id, str) or not 1 <= len(event_id) <= 255:
             raise HTTPException(400, "missing event id")
-        if self.journal:
+        if not isinstance(event_type, str) or not re.fullmatch(r'[a-z][a-z0-9_.]{0,119}', event_type):
+            raise HTTPException(400, 'invalid event type')
+        connected = 'account' in event
+        if connected and (not isinstance(event['account'], str) or not re.fullmatch(r'acct_[A-Za-z0-9_]+', event['account'])):
+            raise HTTPException(400, 'invalid connected account')
+        if not self.verify_signature(payload, request.headers.get('stripe-signature', ''), connect=connected):
+            raise HTTPException(400, 'invalid signature')
+        # Platform charges/Identity are never created as a connected account.
+        # Matching metadata alone must not cross that ownership boundary.
+        if ((event_type in CONNECT_EVENTS and not connected)
+                or (connected and (event_type in PLATFORM_EVENTS or event_type.startswith('identity.verification_session.')))):
+            raise HTTPException(400, 'event account scope does not match')
+        if self.journal or self.settings.is_deployed or self.settings.stripe_secret_key or 'livemode' in event:
             expected_live = self.settings.stripe_secret_key.startswith(("sk_live_", "rk_live_"))
             if type(event.get("livemode")) is not bool or event["livemode"] != expected_live:
                 raise HTTPException(400, "event environment does not match")
@@ -132,16 +153,19 @@ class StripeWebhookService:
 
     def _resolve(self, event: dict[str, Any]) -> dict[str, Any]:
         obj = event.get("data", {}).get("object", {})
-        metadata = obj.get("metadata") or {}
-        if not isinstance(metadata, dict):
+        metadata = obj.get('metadata') if obj.get('metadata') is not None else {}
+        if not isinstance(metadata, dict) or any(not isinstance(k, str) or not isinstance(v, str) for k, v in metadata.items()):
             raise HTTPException(400, "invalid metadata")
-        event_type = str(event.get("type", ""))[:120]
+        event_type = event['type']
         paid_checkout_event = event_type in {"checkout.session.completed", "checkout.session.async_payment_succeeded"}
         order = next((item for item in self.store.orders if item["id"] == metadata.get("order_id")), None) if metadata.get("order_id") else None
         payment_event = event_type in {"charge.refunded", "refund.updated", "charge.dispute.created"}
         if not order and payment_event and obj.get("payment_intent"):
             order = next((item for item in self.store.orders if item.get("payment_reference") == obj["payment_intent"] or any(x.get("payment_reference") == obj["payment_intent"] for x in item.get("pending_extras", []))), None)
-        provider_subscription_id = obj.get("subscription") or (((obj.get("parent") or {}).get("subscription_details") or {}).get("subscription"))
+        parent = obj.get('parent') or {}
+        if not isinstance(parent, dict) or not isinstance(parent.get('subscription_details') or {}, dict):
+            raise HTTPException(400, 'invalid subscription parent')
+        provider_subscription_id = obj.get('subscription') or (parent.get('subscription_details') or {}).get('subscription')
         subscription = next((item for item in self.store.subscriptions if item.get("provider_subscription_id") == provider_subscription_id), None) if provider_subscription_id else None
         if not subscription and metadata.get("order_id"):
             subscription = next((item for item in self.store.subscriptions if item.get("order_id") == metadata.get("order_id")), None)
@@ -151,7 +175,7 @@ class StripeWebhookService:
         if not extra and order and payment_event and obj.get("payment_intent"):
             extra = next((x for x in order.get("pending_extras", []) if x.get("payment_reference") == obj["payment_intent"]), None)
         application = self.store.identity_applications.get(metadata.get("user_id")) if metadata.get("user_id") else None
-        payout = next((p for p in self.store.payouts if p.get("finance_v2") and (p["id"] == metadata.get("payout_id") or p.get("provider_payout_id") == obj.get("id"))), None) if event_type.startswith("payout.") else None
+        payout = next((p for p in self.store.payouts if p.get("finance_v2") and (p["id"] == metadata.get("payout_id") or p.get("provider_payout_id") == obj.get("id"))), None) if event_type in CONNECT_EVENTS and event_type.startswith('payout.') else None
         return {"obj": obj, "metadata": metadata, "event_type": event_type, "paid_checkout_event": paid_checkout_event, "order": order, "provider_subscription_id": provider_subscription_id, "subscription": subscription, "extra": extra, "application": application, "payout": payout}
 
     def _validate(self, event_id: str, event: dict[str, Any], state: dict[str, Any], request_id: str) -> None:

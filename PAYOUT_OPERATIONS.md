@@ -45,6 +45,10 @@
 6. `python -m app.payout_worker --payout-id <申請ID>` を予定日以後に実行。1回で最大1件の分配・振込・取消を進める。`--payout-id` を省略すると、対象の最も古い申請を1段階進める。
 7. 実行結果の `transferring` → `bank_pending` → `paid` と、Stripe側の金額・アカウント・IDを照合する。資金未確定なら `awaiting_funds`。署名付きConnect Webhookでも振込結果を反映する。
 
+Connectの `account.updated` / `payout.*` は通知元「Connected accounts」の `STRIPE_CONNECT_WEBHOOK_SECRET` で検証する。運営アカウント用の `STRIPE_WEBHOOK_SECRET` への代替は行わない。top-level `account` と対象口座を照合し、明示対応した振込イベントだけを反映する。未対応の `payout.*` を受信しても振込状態は変更しない。購入・返金・Identityの通知は運営アカウント用として分離する。
+
+参考: [Stripe Connect Webhooks](https://docs.stripe.com/connect/webhooks)。既存Identity Sandboxの秘密値・送信元設定は変更しない。Connectの実接続試験は引き続き公開条件として残る。
+
 このworkerは本番環境・liveキー・destination方式では起動を拒否する。アカウントをまたぐ分配方式の切替はデータ移行と実機検証が必要。既存destination決済をseparate決済として再分配しない。
 
 ## 要対応状態

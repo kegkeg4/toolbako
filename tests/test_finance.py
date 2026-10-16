@@ -28,7 +28,7 @@ def order(**changes):
 
 async def seed(backend, dsn):
     settings = Settings(environment="staging", database_url=dsn, stripe_secret_key="sk_test_finance",
-                        stripe_charge_mode="separate", stripe_webhook_secret="whsec_local")
+                        stripe_charge_mode="separate", stripe_webhook_secret="whsec_local", stripe_connect_webhook_secret="whsec_connect_local")
     store = DemoStore(seed=False)
     async with backend.request(store):
         store.orders.append(order())
@@ -281,18 +281,18 @@ def test_signed_payout_event_checks_connected_account_amount_and_duplicate(datab
         event = {"id": "evt_bank_paid", "type": "payout.paid", "livemode": False, "account": "acct_wrong", "data": {"object": provider.bank_object()}}
         async with backend.request(store):
             service = StripeWebhookService(settings, store, no_email, journal=backend)
-            with pytest.raises(HTTPException): await service.handle(webhook_request(event, settings.stripe_webhook_secret))
+            with pytest.raises(HTTPException): await service.handle(webhook_request(event, settings.stripe_connect_webhook_secret))
             assert "evt_bank_paid" not in store.processed_webhook_events
             event["account"] = "acct_seller"
             event["data"]["object"]["amount"] = 691
-            with pytest.raises(HTTPException): await service.handle(webhook_request(event, settings.stripe_webhook_secret))
+            with pytest.raises(HTTPException): await service.handle(webhook_request(event, settings.stripe_connect_webhook_secret))
             event["data"]["object"]["amount"] = 690
-            assert await service.handle(webhook_request(event, settings.stripe_webhook_secret)) == {"received": True}
+            assert await service.handle(webhook_request(event, settings.stripe_connect_webhook_secret)) == {"received": True}
             await backend.save()
         restarted = PostgresStateStore(dsn)
         async with restarted.request(store):
             service = StripeWebhookService(settings, store, no_email, journal=restarted)
-            assert (await service.handle(webhook_request(event, settings.stripe_webhook_secret)))["duplicate"]
+            assert (await service.handle(webhook_request(event, settings.stripe_connect_webhook_secret)))["duplicate"]
             assert store.payouts[0]["status"] == "paid"
             await restarted.save()
         assert query(dsn, "select count(*) from toolbako_runtime.finance_entries where kind='bank_paid'") == [(1,)]
