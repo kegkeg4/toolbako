@@ -54,6 +54,7 @@ class Settings:
     legal_representative: str = os.getenv("LEGAL_REPRESENTATIVE", "")
     legal_address: str = os.getenv("LEGAL_ADDRESS", "")
     legal_phone: str = os.getenv("LEGAL_PHONE", "")
+    legal_contact_on_request: bool = os.getenv("LEGAL_CONTACT_ON_REQUEST", "false").lower() in {"1", "true", "yes"}
     legal_website: str = os.getenv("LEGAL_WEBSITE", "").rstrip("/")
     legal_invoice_number: str = os.getenv("LEGAL_INVOICE_NUMBER", "")
     # Platform take rate. Keep these in configuration so checkout, seller views,
