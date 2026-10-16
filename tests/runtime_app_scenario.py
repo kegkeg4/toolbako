@@ -3,7 +3,12 @@ import asyncio
 import json
 import os
 import re
+import sys
 from pathlib import Path
+
+# Psycopg async requires a selector loop on Windows, including this child process.
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 import httpx
 from fastapi.testclient import TestClient
@@ -15,6 +20,12 @@ from app.database import PostgresStateStore
 
 def main():
     assert database_store is not None
+    # The production/staging constructor must enforce TLS. This disposable
+    # loopback-only Postgres fixture has no TLS; relax only this test instance.
+    from psycopg.conninfo import conninfo_to_dict
+    assert database_store.production
+    assert conninfo_to_dict(database_store.dsn)["host"] in {"127.0.0.1", "localhost", "::1"}
+    database_store.production = False
     with TestClient(app) as seller:
         seller.headers["origin"] = settings.site_base_url
         home = seller.get("/")

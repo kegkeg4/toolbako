@@ -562,7 +562,7 @@ def test_signed_webhook_is_idempotent():
     from app.data import store
     previous = settings.stripe_connect_webhook_secret
     object.__setattr__(settings, 'stripe_connect_webhook_secret', 'whsec_test_value')
-    event = {'id':'evt_test_idempotent','type':'account.updated','account':'acct_missing','data':{'object':{'id':'acct_missing','charges_enabled':True}}}
+    event = {'id':'evt_test_idempotent','type':'account.updated','account':'acct_missing','data':{'object':{'id':'acct_missing','charges_enabled':True,'payouts_enabled':False,'details_submitted':False}}}
     payload = json.dumps(event,separators=(',',':')).encode()
     timestamp = int(time.time())
     digest = hmac.new(b'whsec_test_value',f'{timestamp}.'.encode()+payload,hashlib.sha256).hexdigest()

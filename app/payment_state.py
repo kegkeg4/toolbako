@@ -33,7 +33,11 @@ def apply_checkout_payment(store, settings, order, extra, session, subscription=
     if customer_email:
         order["buyer_email"] = customer_email
     if session.get("subscription") and subscription:
-        subscription.update(status="active", provider_subscription_id=session["subscription"])
+        subscription["provider_subscription_id"] = session["subscription"]
+        if subscription.get("status") not in {"cancelled", "expired", "past_due"}:
+            subscription["status"] = "active"
+        else:
+            order["payment_status"] = subscription["status"]
         invoice_id = session.get("invoice")
         if invoice_id and not any(item.get("provider_invoice_id") == invoice_id for item in subscription.setdefault("payments", [])):
             subscription["payments"].append({"provider_invoice_id": invoice_id, "amount": subscription["amount"], "status": "paid", "paid_at": datetime.now(timezone.utc)})

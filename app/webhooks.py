@@ -17,6 +17,7 @@ from .finance import FinanceConflict
 from .payout_worker import apply_bank_status, verify_bank_payout
 from .payment_state import apply_checkout_payment, apply_checkout_expiry, apply_refund_payment
 from .request_limits import WEBHOOK_BODY_LIMIT
+from .subscription_state import apply_invoice, TERMINAL
 
 
 EmailSender = Callable[[str | None, str, str], Awaitable[bool]]
@@ -30,11 +31,12 @@ PLATFORM_EVENTS = frozenset({'checkout.session.completed', 'checkout.session.asy
 class StripeWebhookService:
     """Validate and apply Stripe events atomically within one app process."""
 
-    def __init__(self, settings: Any, store: Any, email_sender: EmailSender, *, journal=None):
+    def __init__(self, settings: Any, store: Any, email_sender: EmailSender, *, journal=None, provider=None):
         self.settings = settings
         self.store = store
         self.email_sender = email_sender
         self.journal = journal
+        self.provider = provider
 
     def verify_signature(self, payload: bytes, signature: str, *, connect: bool = False) -> bool:
         secret = self.settings.stripe_connect_webhook_secret if connect else self.settings.stripe_webhook_secret
@@ -91,6 +93,11 @@ class StripeWebhookService:
                 raise HTTPException(400, "event environment does not match")
 
         state = self._resolve(event)
+        # Deduplicate before a provider GET; an acknowledged event must not
+        # start failing later because a key was rotated or its object removed.
+        if event_id in self.store.processed_webhook_events:
+            return {"received": True, "duplicate": True}
+        await self._refresh_provider_state(event, state)
         payout = state.get("payout")
         if self.journal and payout and not payout.get("provider_payout_id"):
             attempt = await self.journal.operation_result(f"bank-payout-{payout['id']}")
@@ -118,7 +125,7 @@ class StripeWebhookService:
             if event_id in self.store.processed_webhook_events:
                 return {"received": True, "duplicate": True}
             self._validate(event_id, event, state, request_id)
-            mutable_objects = [item for item in (state.get("order"), state.get("subscription"), state.get("extra"), state.get("application"), state.get("payout")) if isinstance(item, dict)]
+            mutable_objects = [item for item in (state.get("order"), state.get("subscription"), state.get("extra"), state.get("application"), state.get("payout"), state.get("account")) if isinstance(item, dict)]
             if state.get("order"):
                 tool = self.store.get(state["order"].get("tool_slug", ""))
                 if tool: mutable_objects.append(tool)
@@ -150,6 +157,35 @@ class StripeWebhookService:
         if messages:
             await asyncio.gather(*(self.email_sender(*message) for message in messages))
         return {"received": True}
+
+    async def _refresh_provider_state(self, event, state):
+        kind, obj = state["event_type"], state["obj"]
+        if kind == "account.updated":
+            state["account"] = next((a for a in self.store.connected_accounts.values() if a.get("account_id") == obj.get("id")), None)
+            if not state["account"]: return
+            path = "accounts"
+        elif kind in {"customer.subscription.updated", "customer.subscription.deleted"}:
+            if not any(s.get("provider_subscription_id") == obj.get("id") for s in self.store.subscriptions): return
+            path = "subscriptions"
+        else:
+            return
+        # Event.created has one-second resolution and is not an ordering key.
+        # Mutable account permissions and subscription states require a fresh
+        # provider read in any deployed/durable environment.
+        if not (self.settings.is_deployed or self.journal): return
+        reference = obj.get("id")
+        prefix = "acct" if path == "accounts" else "sub"
+        if not isinstance(reference, str) or not re.fullmatch(prefix + r"_[A-Za-z0-9_]+", reference):
+            raise HTTPException(400, "invalid provider reference")
+        if not self.provider: raise HTTPException(503, "provider reconciliation unavailable")
+        try:
+            current = await self.provider._get(f"{path}/{reference}")
+        except RuntimeError:
+            raise HTTPException(503, "provider reconciliation unavailable") from None
+        if (current.get("id") != reference or current.get("object") != ("account" if path == "accounts" else "subscription")
+                or (path == "subscriptions" and current.get("livemode") is not event.get("livemode"))):
+            raise HTTPException(503, "provider object does not match")
+        state["obj"] = current
 
     def _resolve(self, event: dict[str, Any]) -> dict[str, Any]:
         obj = event.get("data", {}).get("object", {})
@@ -233,6 +269,11 @@ class StripeWebhookService:
             if not order or obj.get("currency", "").lower() != "jpy" or type(refunded) is not int or not 0 < refunded <= expected or (reference and obj.get("payment_intent") != reference):
                 raise HTTPException(400, "refund does not match order")
         elif event_type in {"invoice.paid", "invoice.payment_failed"}:
+            if not isinstance(obj.get("id"), str) or not re.fullmatch(r"in_[A-Za-z0-9_]+", obj["id"]):
+                raise HTTPException(400, "invalid invoice reference")
+            period = obj.get("period_end", 0)
+            if type(period) is not int or not 0 <= period <= 253402214400 or (self.settings.is_deployed and not period):
+                raise HTTPException(400, "invalid invoice period")
             if not order or not subscription or not provider_subscription_id or subscription.get("provider_subscription_id") != provider_subscription_id or obj.get("currency", "").lower() != "jpy":
                 raise HTTPException(400, "invoice does not match subscription")
             if event_type == "invoice.paid" and (obj.get("status") != "paid" or obj.get("amount_paid") != subscription.get("amount")):
@@ -245,12 +286,17 @@ class StripeWebhookService:
                 raise HTTPException(400, "subscription does not match")
             state["subscription"] = subscription
             state["order"] = next((item for item in self.store.orders if item["id"] == subscription.get("order_id")), None)
+            if obj.get("status") not in {"active", "trialing", "past_due", "incomplete", "unpaid", "incomplete_expired", "canceled", "paused"}:
+                raise HTTPException(400, "unknown subscription status")
+            if obj.get("current_period_end") is not None and (type(obj["current_period_end"]) is not int or not 0 < obj["current_period_end"] <= 253402214400):
+                raise HTTPException(400, "invalid subscription period")
         elif event_type == "charge.dispute.created":
             reference = (extra or order or {}).get("payment_reference")
             if not order or (reference and obj.get("payment_intent") != reference):
                 raise HTTPException(400, "dispute does not match order")
-        elif event_type == "account.updated" and event.get("account") and event.get("account") != obj.get("id"):
-            raise HTTPException(400, "connected account does not match")
+        elif event_type == "account.updated":
+            if event.get("account") != obj.get("id") or any(type(obj.get(key)) is not bool for key in ("charges_enabled", "payouts_enabled", "details_submitted")):
+                raise HTTPException(400, "connected account does not match")
 
     def _apply(self, event: dict[str, Any], state: dict[str, Any]) -> list[EmailMessage]:
         obj = state["obj"]
@@ -280,30 +326,13 @@ class StripeWebhookService:
             apply_identity_event(application, event)
         elif event_type in {"charge.refunded", "refund.updated"} and order:
             emails.extend(apply_refund_payment(self.store, order, extra, obj, event_type))
-        elif event_type == "invoice.paid" and subscription:
-            subscription["status"] = "active"
-            if order:
-                order["payment_status"] = "paid"
-            subscription["last_paid_at"] = datetime.now(timezone.utc)
-            subscription["last_invoice_id"] = obj.get("id")
-            subscription["last_payment_intent"] = obj.get("payment_intent")
-            subscription["last_charge"] = obj.get("charge")
-            payments = subscription.setdefault("payments", [])
-            if not any(item.get("provider_invoice_id") == obj.get("id") for item in payments):
-                payments.append({"provider_invoice_id":obj.get("id"),"payment_intent":obj.get("payment_intent"),"charge":obj.get("charge"),"amount":obj.get("amount_paid"),"status":"paid","paid_at":datetime.now(timezone.utc)})
-            lines = ((obj.get("lines") or {}).get("data") or [])
-            period_end = obj.get("period_end") or (lines and (lines[0].get("period") or {}).get("end"))
-            subscription["next_billing_at"] = datetime.fromtimestamp(period_end, timezone.utc) if period_end else datetime.now(timezone.utc) + timedelta(days=30)
-        elif event_type == "invoice.payment_failed" and subscription:
-            subscription["status"] = "past_due"
-            if order:
-                order["payment_status"] = "past_due"
-            subscription.setdefault("billing_events", []).append({"provider_invoice_id":obj.get("id"),"status":"payment_failed","occurred_at":datetime.now(timezone.utc)})
-            self.store.notify(subscription["buyer_id"], "月額契約のお支払いを確認できません", subscription["tool_name"], "/subscriptions", "transactions")
-            emails.append((order and order.get("buyer_email"), f"[ツールバコ] {subscription['tool_name']} のお支払いをご確認ください", f"決済方法を確認してください。\n{self.settings.site_base_url}/subscriptions"))
+        elif event_type in {"invoice.paid", "invoice.payment_failed"} and subscription and order:
+            emails.extend(apply_invoice(self.store, self.settings, order, subscription, obj, event_type))
         elif event_type in {"customer.subscription.updated", "customer.subscription.deleted"} and subscription:
             provider_status = obj.get("status", "")
-            subscription["status"] = "cancelled" if event_type.endswith("deleted") or provider_status in {"canceled", "unpaid", "incomplete_expired"} else ("past_due" if provider_status in {"past_due", "incomplete"} else "active")
+            if subscription.get("status") in TERMINAL and provider_status not in {"canceled", "incomplete_expired"}:
+                return emails
+            subscription["status"] = "cancelled" if provider_status in {"canceled", "incomplete_expired"} else ("active" if provider_status == "active" else "past_due")
             subscription["cancel_at_period_end"] = bool(obj.get("cancel_at_period_end"))
             if order:
                 order["payment_status"] = "paid" if subscription["status"] == "active" else subscription["status"]

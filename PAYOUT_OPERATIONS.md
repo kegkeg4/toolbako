@@ -103,3 +103,11 @@ Transferに埋め込まれたreversalsは直近10件だけなので、それを�
 日本のStripe手動振込は原則90日以内の払出しが必要。従来の「120日後」案をそのまま本番採用しない。プラットフォーム残高からの送金時期も含め、Stripeと専門家にモデルを確認して規約を確定する。Stripeを「法的なエスクロー」と表示しない。
 
 参照：[手動振込・保有期限](https://docs.stripe.com/connect/manual-payouts)、[分離した支払いと送金](https://docs.stripe.com/connect/separate-charges-and-transfers)、[銀行振込API](https://docs.stripe.com/api/payouts/create)、[Transfer reversal](https://docs.stripe.com/api/transfer_reversals/create)、[Checkout一覧](https://docs.stripe.com/api/checkout/sessions/list)、[返金一覧](https://docs.stripe.com/api/refunds/list)、[PaymentIntent](https://docs.stripe.com/api/payment_intents/object)、[冪等キーの保持期限](https://docs.stripe.com/api/idempotent_requests)。
+
+## 順不同通知の処理
+
+Stripeのイベント作成時刻は秒単位で、配信順を保証しない。稼働環境のaccount.updatedとcustomer.subscription.updated/deletedは、署名・接続口座の範囲を確認してから対象IDをGETし、現在の口座・契約状態を採用する。GET不可・対象不一致は503でイベントを未処理のままにし、無条件で成功扱いにしない。専用キーに必要な読取権限があることをSandbox通し試験で確認する。
+
+請求書の入金履歴はinvoice IDで重複を除き、失敗後の入金は反映する一方、入金済み請求書への古い失敗通知では利用を停止しない。古い請求期間で新しい契約状態を上書きせず、解約済み契約を遅延入金・遅延Checkoutで再開しない。これは定期課金の金融分配台帳や本番可否の完成を意味しない。
+
+参照：[Stripeの配信順・重複・再配信](https://docs.stripe.com/webhooks#event-ordering)。

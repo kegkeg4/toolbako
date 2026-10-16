@@ -16,6 +16,8 @@ class CanaryProvider(Provider):
         self.objects = {}
         self.deletes = []
         self.failure = None
+        self.expired = False
+        self.signed_reads = 0
 
     def __call__(self, request):
         path = request.url.path.removeprefix("/storage/v1/")
@@ -43,6 +45,9 @@ class CanaryProvider(Provider):
         elif path.startswith("object/sign/"):
             assert "token=test.private.signature" in str(request.url)
             key = path.removeprefix("object/sign/")
+            self.signed_reads += 1
+            if self.expired and self.signed_reads == 2:
+                return httpx.Response(400, json={"message": "token expired"})
         else:
             assert request.headers["apikey"] == "anon-fixture"
             return httpx.Response(200 if self.failure == "anonymous_allowed" else 403)
@@ -111,3 +116,32 @@ def test_cli_failure_contains_no_provider_details_or_signed_urls(monkeypatch, ca
     result = capsys.readouterr().out
     assert "sb_secret_fixture" not in result and "test.private.signature" not in result
     assert json.loads(result)["storage_probe_passed"] is False
+
+
+def test_prepared_canary_survives_new_process_and_verify_never_uploads(canary):
+    settings = configured(supabase_anon_key="anon-fixture")
+    identifier = "a" * 32
+    prepared = asyncio.run(storage_probe.probe(settings, write_canary=True, phase="prepare", canary_id=identifier))
+    assert all(prepared.values()) and len(canary.objects) == 2 and not canary.deletes
+    canary.requests.clear()
+    verified = asyncio.run(storage_probe.probe(settings, write_canary=True, phase="verify", canary_id=identifier))
+    assert all(verified.values()) and not canary.objects and len(canary.deletes) == 2
+    assert all(r.method != "POST" or "/object/sign/" in r.url.path for r in canary.requests)
+
+
+@pytest.mark.parametrize("expired", [True, False])
+def test_expiry_requires_old_url_denial_and_fresh_url_success(canary, monkeypatch, expired):
+    canary.expired = expired
+    async def advance(seconds): assert seconds == 65
+    monkeypatch.setattr(storage_probe.asyncio, "sleep", advance)
+    checks = asyncio.run(storage_probe.probe(configured(supabase_anon_key="anon-fixture"), write_canary=True, check_expiry=True))
+    assert checks["expired_signature_denied"] is expired
+    assert checks["object_read_after_expiry"] and checks["canary_cleanup"]
+    assert canary.signed_reads == 3 and not canary.objects
+
+
+@pytest.mark.parametrize("options", [{"phase": "verify"}, {"phase": "wrong"}, {"canary_id": "../customer"}])
+def test_invalid_redeployment_probe_never_contacts_provider(canary, options):
+    with pytest.raises(ValueError):
+        asyncio.run(storage_probe.probe(configured(), write_canary=True, **options))
+    assert not canary.requests

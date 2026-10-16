@@ -79,6 +79,9 @@ class Settings:
     supabase_image_bucket: str = os.getenv("SUPABASE_IMAGE_BUCKET", "").strip()
     clamav_host: str = os.getenv("CLAMAV_HOST", "")
     clamav_port: int = int(os.getenv("CLAMAV_PORT", "3310"))
+    # Set only after the operator approves retention/erasure policy. Empty
+    # keeps the destructive worker disabled even if --apply is supplied.
+    account_erasure_policy_revision: str = os.getenv("ACCOUNT_ERASURE_POLICY_REVISION", "").strip()
 
     def __post_init__(self) -> None:
         configured_providers = self.oauth_providers if isinstance(self.oauth_providers, tuple) else ()

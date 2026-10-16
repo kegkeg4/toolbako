@@ -58,6 +58,7 @@ from .supabase_api import supabase_headers
 from .object_storage import SupabaseObjectStorage, ObjectStorageError, storage_ready, delivery_upload_available
 from .operations import operation_summary
 from .identity import verification_url
+from .account_lifecycle import deletion_hold
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -73,7 +74,7 @@ async def require_privileged_mfa(request: Request):
         raise HTTPException(303, "重要操作の前に2段階認証をお願いします", headers={"Location": f"/security/mfa?{urlencode({'next': destination})}"})
 
 
-database_store = PostgresStateStore(settings.database_url, production=settings.is_production) if settings.database_url else None
+database_store = PostgresStateStore(settings.database_url, production=settings.is_deployed) if settings.database_url else None
 app = FastAPI(title="ツールバコ", description="AIツールの共有・発見プラットフォーム", version="0.1.0", dependencies=[Depends(require_privileged_mfa)])
 app.add_middleware(SessionMiddleware, secret_key=settings.session_secret, session_cookie="toolbako_session", same_site="lax", https_only=settings.site_base_url.startswith("https"), max_age=settings.session_max_age)
 app.add_middleware(GZipMiddleware, minimum_size=500, compresslevel=6)
@@ -104,7 +105,7 @@ for restored_username, restored_account in store.registered_users.items():
     restored_account.setdefault("founding_member_since", restored_account.get("created_at") if demo_credential else None)
     restored_account.setdefault("is_certified_creator", demo_credential)
     restored_account.setdefault("certified_creator_since", restored_account.get("created_at") if demo_credential else None)
-session_service = SessionService(store, settings.session_max_age)
+session_service = SessionService(store, settings.session_max_age, demo_erasure=settings.demo_mode)
 mfa = SupabaseMFA(settings, session_service)
 
 
@@ -2341,7 +2342,7 @@ async def account_delete_request(request: Request, confirmation: str = Form(...)
     active = any(user["id"] in {x["buyer_id"],x["seller_id"]} and x["status"] not in {"completed","cancelled"} for x in store.orders)
     active_transfer = any(user["id"] in {x["buyer_id"],x["seller_id"]} and x["status"] not in {"declined","closed"} for x in store.transfer_inquiries)
     unsettled_payout = any(p["seller_id"] == user["id"] and p.get("status") not in {"paid", "completed", "cancelled"} for p in store.payouts)
-    if active or active_transfer or unsettled_payout or available_balance(user["id"]) > 0: raise HTTPException(409, "未完了の取引・譲渡相談、または未振込・照合中の売上があります")
+    if active or active_transfer or unsettled_payout or available_balance(user["id"]) > 0 or deletion_hold(store, user["id"]): raise HTTPException(409, "未完了の取引・契約・お問い合わせ、または未振込・照合中の売上があります")
     with store._lock:
         existing = next((item for item in store.account_deletions if item["user_id"] == user["id"] and item["status"] == "scheduled"), None)
         if existing: raise HTTPException(409, "退会申請はすでに受け付けています")
@@ -2708,7 +2709,7 @@ async def deployment_health():
                         status_code=200 if connected else 503, headers={"Cache-Control": "no-store"})
 
 
-stripe_webhook_service = StripeWebhookService(settings, store, send_email_safely, journal=database_store)
+stripe_webhook_service = StripeWebhookService(settings, store, send_email_safely, journal=database_store, provider=stripe)
 
 
 @app.post("/webhooks/stripe")

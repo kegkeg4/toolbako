@@ -7,6 +7,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from starlette.requests import Request
+from starlette.exceptions import HTTPException
+from .account_lifecycle import account_erased_or_erasing
 
 
 PASSWORD_SCRYPT_N = 2**14
@@ -51,11 +53,15 @@ def verify_password(password: str, salt_hex: str | None, expected_hash: str | No
 class SessionService:
     """Keep signed-cookie contents opaque while storing revocable sessions server-side."""
 
-    def __init__(self, store: Any, max_age_seconds: int):
+    def __init__(self, store: Any, max_age_seconds: int, *, demo_erasure=False):
         self.store = store
         self.max_age_seconds = max_age_seconds
+        self.demo_erasure = demo_erasure
 
     def establish(self, request: Request, user: dict[str, Any]) -> dict[str, Any]:
+        if account_erased_or_erasing(self.store, user["id"]):
+            request.session.clear()
+            raise HTTPException(403, "退会処理中または退会済みのアカウントです")
         sid = secrets.token_urlsafe(32)
         now_utc = datetime.now(timezone.utc)
         with self.store._lock:
@@ -101,7 +107,8 @@ class SessionService:
 
     def current(self, request: Request) -> dict[str, Any] | None:
         now_utc = datetime.now(timezone.utc)
-        self.store.execute_due_account_deletions(now_utc)
+        if self.demo_erasure:
+            self.store.execute_due_account_deletions(now_utc)
         with self.store._lock:
             expired = [
                 sid
@@ -115,7 +122,7 @@ class SessionService:
             user = dict(record["user"]) if record else None
             if user:
                 account = self.store.registered_users.get(user.get("username", ""))
-                if not account or account.get("is_banned"):
+                if not account or account.get("id") != user.get("id") or account.get("is_banned") or account_erased_or_erasing(self.store, user["id"]):
                     self.store.account_sessions.pop(sid, None)
                     request.session.clear()
                     user = None

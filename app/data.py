@@ -768,18 +768,22 @@ class DemoStore:
             self.support_cases.insert(0,item)
             return item
 
-    def execute_due_account_deletions(self, now: datetime | None = None) -> int:
+    def execute_due_account_deletions(self, now: datetime | None = None, *, only_user_id=None) -> int:
         """Pseudonymize retained transaction records and erase account data after grace."""
         now = now or datetime.now(timezone.utc)
         completed = 0
         with self._lock:
-            due = [item for item in self.account_deletions if item.get("status") == "scheduled" and item.get("delete_after") and item["delete_after"] <= now]
+            from .account_lifecycle import deletion_hold
+            due = [item for item in self.account_deletions if item.get("status") in {"scheduled", "erasing"}
+                   and item.get("delete_after") and item["delete_after"] <= now
+                   and (only_user_id is None or item["user_id"] == only_user_id)]
             for deletion in due:
                 user_id = deletion["user_id"]
-                if any(p["seller_id"] == user_id and p.get("status") not in {"paid", "completed", "cancelled"} for p in self.payouts):
+                reason = deletion_hold(self, user_id)
+                if reason:
                     # Do not erase the Connect account while funds are reserved
                     # or a bank failure/unknown provider outcome is unresolved.
-                    deletion["hold_reason"] = "振込の結果確認が完了するまで退会処理を保留しています"
+                    deletion["hold_reason"] = reason
                     continue
                 usernames = [name for name, account in self.registered_users.items() if account.get("id") == user_id]
                 for username in usernames:
@@ -810,7 +814,7 @@ class DemoStore:
                         coupon.update({"seller_username":"deleted", "active":False})
                 for tool in self.tools:
                     if tool.get("author_id") == user_id:
-                        tool.update({"author_name":"退会済みユーザー","status":"paused","is_published":False})
+                        tool.update({"author_name":"退会済みユーザー","author_username":"deleted","status":"paused","is_published":False})
                 for order in self.orders:
                     if order.get("buyer_id") == user_id:
                         order["buyer_name"] = "退会済みユーザー"; order["buyer_email"] = None; order["buyer_username"] = "deleted"
@@ -845,6 +849,7 @@ class DemoStore:
                         if application.get("applicant_id") == user_id:
                             application["applicant_name"] = "退会済みユーザー"; application["applicant_username"] = "deleted"; application["message"] = ""
                 deletion.update({"status":"completed","completed_at":now,"mode":"pseudonymized_financial_records"})
+                deletion.pop("hold_reason", None)
                 completed += 1
         return completed
 
