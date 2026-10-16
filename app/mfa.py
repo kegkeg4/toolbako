@@ -18,7 +18,10 @@ from fastapi import HTTPException
 
 def totp_qr_image(svg: object) -> str:
     """Keep provider SVG in an image context, including its XML declaration."""
-    if not isinstance(svg, str) or not svg or len(svg) > 100_000:
+    # Supabase's renderer emits a rectangle for every QR module, including
+    # white modules. Real enrollment SVGs exceed 100 KB. Allow the full grid
+    # while retaining a bounded input and rejecting entity declarations.
+    if not isinstance(svg, str) or not svg or len(svg) > 4 * 1024 * 1024:
         return ""
     if "<!DOCTYPE" in svg.upper() or "<!ENTITY" in svg.upper():
         return ""
