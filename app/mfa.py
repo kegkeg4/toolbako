@@ -10,9 +10,25 @@ import json
 import re
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
+from xml.etree import ElementTree
 
 import httpx
 from fastapi import HTTPException
+
+
+def totp_qr_image(svg: object) -> str:
+    """Keep provider SVG in an image context, including its XML declaration."""
+    if not isinstance(svg, str) or not svg or len(svg) > 100_000:
+        return ""
+    if "<!DOCTYPE" in svg.upper() or "<!ENTITY" in svg.upper():
+        return ""
+    try:
+        root = ElementTree.fromstring(svg)
+    except ElementTree.ParseError:
+        return ""
+    if root.tag not in {"svg", "{http://www.w3.org/2000/svg}svg"}:
+        return ""
+    return "data:image/svg+xml;base64," + base64.b64encode(svg.encode()).decode()
 
 
 class SupabaseMFA:

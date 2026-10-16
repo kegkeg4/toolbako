@@ -46,7 +46,7 @@ from .files import clamav_scan, validate_delivery_file, encode_thumbnail
 from .security import SessionService, hash_password, verify_password
 from .web import clean_visible_text, safe_http_url, safe_next, slugify
 from .webhooks import StripeWebhookService
-from .mfa import SupabaseMFA, is_privileged_path
+from .mfa import SupabaseMFA, is_privileged_path, totp_qr_image
 from .finance import FinanceConflict, PAYOUT_LABELS, balance as ledger_balance, request_payout
 from .payout_worker import sandbox_payouts_ready
 from .refunds import request_order_refunds
@@ -1746,9 +1746,8 @@ async def mfa_page(request: Request, next: str = "/security"):
 async def mfa_enroll(request: Request, next: str = Form("/security")):
     data = await mfa.enroll(request)
     # Use an image data URL, not raw provider SVG markup in the document.
-    qr = str(data.get("totp", {}).get("qr_code", ""))
     enrollment = {"id": data["id"], "secret": data.get("totp", {}).get("secret", ""),
-                  "qr": "data:image/svg+xml;base64," + base64.b64encode(qr.encode()).decode() if qr.startswith("<svg") else ""}
+                  "qr": totp_qr_image(data.get("totp", {}).get("qr_code", ""))}
     store.audit(current_user(request)["id"], "security.mfa_enrollment_started", "totp")
     return templates.TemplateResponse(request, "mfa.html", context(request, factors=[], next=safe_next(next), enrollment=enrollment, mfa_error=None))
 
