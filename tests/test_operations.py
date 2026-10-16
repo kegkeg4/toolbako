@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 
 from app.config import Settings
 from app.data import DemoStore
-from app.operations import operation_summary
+from app.operations import inspect_operations, operation_summary
 from test_database import database, query
 
 
@@ -47,3 +47,53 @@ def test_expired_mail_lease_and_review_are_visible_without_automatic_retry(datab
             assert result["counts"]["mail_expired_lease"] == result["counts"]["mail_review"] == 1
         assert set(query(dsn, "select status from toolbako_runtime.email_outbox")) == {("sending",), ("review",)}
     asyncio.run(run())
+
+
+def test_independent_inspection_does_not_initialize_state_or_wait_for_request_lock(database):
+    from app.database import LOCK_ID
+    import psycopg
+    backend, dsn = database
+    assert query(dsn, 'select count(*) from toolbako_runtime.marketplace_state') == [(0,)]
+    with psycopg.connect(dsn, autocommit=True) as locked:
+        locked.execute('select pg_advisory_lock(%s)', (LOCK_ID,))
+        result = asyncio.run(inspect_operations(backend, Settings()))
+        assert result['counts']['mail_pending'] == 0
+    assert query(dsn, 'select count(*) from toolbako_runtime.marketplace_state') == [(0,)]
+
+
+def test_independent_inspection_enforces_database_read_only(database, monkeypatch):
+    import psycopg
+    import pytest
+    backend, _ = database
+    async def attempt_write(conn):
+        await conn.execute('delete from toolbako_runtime.schema_version')
+    monkeypatch.setattr(backend, '_check_schema', attempt_write)
+    with pytest.raises(psycopg.errors.ReadOnlySqlTransaction):
+        asyncio.run(inspect_operations(backend, Settings()))
+
+
+def test_missing_mail_lease_is_reported_without_changing_or_exposing_message(database):
+    backend, dsn = database
+    query(dsn, "insert into toolbako_runtime.email_outbox(id,recipient,sender,subject,body,status) values (gen_random_uuid(),'private@example.invalid','sender@example.invalid','private subject','private body','sending') returning id")
+    result = asyncio.run(inspect_operations(backend, Settings()))
+    assert result['counts']['mail_missing_lease'] == result['counts']['mail_sending'] == 1
+    assert any('処理期限が記録されていない' in alert for alert in result['alerts'])
+    assert 'private@example' not in str(result) and 'private body' not in str(result)
+    assert query(dsn, 'select status,attempts from toolbako_runtime.email_outbox') == [('sending', 0)]
+
+
+def test_mail_worker_dry_run_needs_no_key_never_sends_and_keeps_outbox_unchanged(database, monkeypatch, capsys):
+    import json
+    from app import config, mail_worker
+    backend, dsn = database
+    query(dsn, "insert into toolbako_runtime.email_outbox(id,recipient,sender,subject,body,created_at) values (gen_random_uuid(),'private@example.invalid','sender@example.invalid','private subject','private body',now()-interval '1 hour') returning id")
+    before = query(dsn, 'select row_to_json(t)::text from toolbako_runtime.email_outbox t')
+    monkeypatch.setattr(config, 'settings', replace(Settings(), database_url=dsn, environment='development', email_api_key=''))
+    async def forbidden(*args, **kwargs):
+        raise AssertionError('Dry run must never claim or send mail')
+    monkeypatch.setattr(mail_worker, 'deliver_pending', forbidden)
+    assert mail_worker.main(['--dry-run']) == 2
+    output = capsys.readouterr().out
+    assert json.loads(output)['counts']['mail_overdue'] == 1
+    assert 'private@example' not in output and 'private body' not in output
+    assert query(dsn, 'select row_to_json(t)::text from toolbako_runtime.email_outbox t') == before

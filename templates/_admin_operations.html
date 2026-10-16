@@ -4,7 +4,7 @@
   <p role="note">{{ ops_health.notice }}</p>
   <div class="finance-kpis">
     <article><small>未送信メール</small><b>{{ ops_health.counts.mail_pending }}件</b><span>15分超の滞留 {{ ops_health.counts.mail_overdue }}件</span></article>
-    <article><small>送信結果の確認待ち</small><b>{{ ops_health.counts.mail_review }}件</b><span>処理期限超過 {{ ops_health.counts.mail_expired_lease }}件</span></article>
+    <article><small>送信結果の確認待ち</small><b>{{ ops_health.counts.mail_review }}件</b><span>送信中 {{ ops_health.counts.mail_sending }}件 ／ 処理期限超過 {{ ops_health.counts.mail_expired_lease }}件 ／ 期限未記録 {{ ops_health.counts.mail_missing_lease }}件</span></article>
     <article><small>結果不明のAPI要求</small><b>{{ ops_health.counts.payment_unknown }}件</b><span>5分超の未記録 {{ ops_health.counts.payment_stale }}件</span></article>
     <article><small>振込の確認・失敗</small><b>{{ ops_health.counts.payout_review + ops_health.counts.payout_failed }}件</b><span>確認 {{ ops_health.counts.payout_review }}件 ／ 銀行失敗 {{ ops_health.counts.payout_failed }}件</span></article>
   </div>

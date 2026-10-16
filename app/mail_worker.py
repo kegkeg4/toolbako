@@ -6,6 +6,7 @@ after that a potentially delivered email needs review, not a blind resend.
 """
 import argparse
 import asyncio
+import json
 from uuid import uuid4
 
 from .database import PostgresStateStore
@@ -57,23 +58,32 @@ async def deliver_pending(backend, api_key: str, *, limit: int = 20, sender_fact
     return result
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(description="Send committed notification emails (not payouts)")
     parser.add_argument("--limit", type=int, default=20)
-    args = parser.parse_args()
+    parser.add_argument("--dry-run", action="store_true", help="Inspect queue counts only; never claim or send mail")
+    args = parser.parse_args(argv)
     from .config import settings
     try:
+        backend = PostgresStateStore(settings.database_url, production=settings.is_deployed)
+        if args.dry_run:
+            from .operations import inspect_operations
+            result = asyncio.run(inspect_operations(backend, settings))
+            counts = {key: value for key, value in result['counts'].items() if key.startswith('mail_')}
+            print(json.dumps({'dry_run': True, 'counts': counts, 'notice': result['notice']}, ensure_ascii=False))
+            return 2 if any(counts[key] for key in ('mail_overdue', 'mail_expired_lease', 'mail_review', 'mail_missing_lease')) else 0
         result = asyncio.run(deliver_pending(
-            PostgresStateStore(settings.database_url, production=settings.is_production),
+            backend,
             settings.email_api_key, limit=args.limit,
         ))
     except Exception:
         print("Email worker failed. Check database, migration and email configuration. No credentials were printed.")
-        raise SystemExit(1) from None
+        return 1
     print(f"Email outbox: sent={result['sent']} retry={result['retry']} review={result['review']}")
     if result["retry"] or result["review"]:
-        raise SystemExit(1)
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

@@ -5,15 +5,30 @@ from datetime import datetime, timedelta, timezone
 
 
 async def operation_summary(backend, settings, *, at=None):
-    at = at or datetime.now(timezone.utc)
     conn = backend._connection
     if conn is None:
         raise RuntimeError("運用状況の確認にはDB接続が必要です")
+    return await connection_summary(conn, settings, at=at)
+
+
+async def inspect_operations(backend, settings, *, at=None):
+    """Independent snapshot: no marketplace initialization or request lock."""
+    async with await backend.connect() as conn:
+        async with conn.transaction():
+            await conn.execute('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
+            await backend._check_schema(conn)
+            return await connection_summary(conn, settings, at=at)
+
+
+async def connection_summary(conn, settings, *, at=None):
+    at = at or datetime.now(timezone.utc)
     mail = await (await conn.execute(
         "select count(*) filter(where status='pending'),"
         "count(*) filter(where status='pending' and available_at<=%s and created_at<%s),"
         "count(*) filter(where status='sending' and lease_until<%s),"
-        "count(*) filter(where status='review') from toolbako_runtime.email_outbox",
+        "count(*) filter(where status='review'),"
+        "count(*) filter(where status='sending'),"
+        "count(*) filter(where status='sending' and lease_until is null) from toolbako_runtime.email_outbox",
         (at, at - timedelta(minutes=15), at),
     )).fetchone()
     payments = await (await conn.execute(
@@ -26,7 +41,7 @@ async def operation_summary(backend, settings, *, at=None):
         "select count(*) filter(where status='review'),count(*) filter(where status='bank_failed') "
         "from toolbako_runtime.finance_payouts"
     )).fetchone()
-    counts = dict(zip(("mail_pending", "mail_overdue", "mail_expired_lease", "mail_review",
+    counts = dict(zip(("mail_pending", "mail_overdue", "mail_expired_lease", "mail_review", "mail_sending", "mail_missing_lease",
                        "payment_unknown", "payment_stale", "payment_rejected", "payout_review", "payout_failed"),
                       (*mail, *payments, *payouts)))
     alerts = []
@@ -36,6 +51,7 @@ async def operation_summary(backend, settings, *, at=None):
     if not settings.sentry_dsn: alerts.append("外部エラー監視と通知先が未接続です。")
     if counts["mail_overdue"] or counts["mail_expired_lease"]: alerts.append("メールの滞留・処理期限超過があります。workerとプロバイダーを確認してください。")
     if counts["mail_review"]: alerts.append("送信結果を運営で確認するメールがあります。無条件に再送しないでください。")
+    if counts["mail_missing_lease"]: alerts.append("処理期限が記録されていない送信中メールがあります。送信結果を確認し、無条件に再送しないでください。")
     if counts["payment_unknown"] or counts["payout_review"]: alerts.append("結果不明の決済・振込があります。二者照合が必要です。再送しないでください。")
     if counts["payment_rejected"] or counts["payout_failed"]: alerts.append("拒否・失敗した決済・振込があります。元の要求と資金を確認してください。")
     return {"counts": counts, "alerts": alerts, "checked_at": at,
@@ -45,11 +61,9 @@ async def operation_summary(backend, settings, *, at=None):
 def main():
     from .config import settings
     from .database import PostgresStateStore
-    from .data import DemoStore
     async def inspect():
         backend = PostgresStateStore(settings.database_url, production=settings.is_deployed)
-        async with backend.request(DemoStore(seed=False)):
-            return await operation_summary(backend, settings)
+        return await inspect_operations(backend, settings)
     try:
         result = asyncio.run(inspect())
         print(json.dumps({"counts": result["counts"], "alerts": result["alerts"], "notice": result["notice"]}, ensure_ascii=False))
