@@ -182,7 +182,7 @@ def main():
     from .config import settings
     from .data import DemoStore
     from .database import PostgresStateStore
-    backend = PostgresStateStore(settings.database_url, production=settings.is_production)
+    backend = PostgresStateStore(settings.database_url, production=settings.is_deployed)
     stripe = StripeIntegration(settings.stripe_secret_key, settings.site_base_url, api_version=settings.stripe_api_version,
                                charge_mode=settings.stripe_charge_mode, journal=backend)
     try:

@@ -427,7 +427,7 @@ def main():
     parser.add_argument("command", choices=("migrate", "check"))
     args = parser.parse_args()
     from .config import settings
-    backend = PostgresStateStore(settings.database_url, production=settings.is_production)
+    backend = PostgresStateStore(settings.database_url, production=settings.is_deployed)
     try:
         if args.command == "migrate":
             asyncio.run(migrate(backend))
