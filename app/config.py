@@ -59,7 +59,7 @@ class Settings:
     legal_invoice_number: str = os.getenv("LEGAL_INVOICE_NUMBER", "")
     # Platform take rate. Keep these in configuration so checkout, seller views,
     # finance admin and Connect application fees cannot drift apart.
-    platform_fee_rate: float = float(os.getenv("PLATFORM_FEE_RATE", "0.15"))
+    platform_fee_rate: float = float(os.getenv("PLATFORM_FEE_RATE", "0.20"))
     custom_fee_rate: float = float(os.getenv("CUSTOM_FEE_RATE", "0.18"))
     payout_schedule_label: str = os.getenv("PAYOUT_SCHEDULE_LABEL", "申請した週の翌週木曜日（金融機関・Stripeの処理状況により前後）")
     # Demo payout rules mirror the familiar Coconala flow. Production payouts
@@ -101,7 +101,7 @@ class Settings:
         if self.stripe_charge_mode not in {"destination", "separate"}:
             object.__setattr__(self, "stripe_charge_mode", "destination")
         if not 0 <= self.platform_fee_rate <= 1:
-            object.__setattr__(self, "platform_fee_rate", 0.15)
+            object.__setattr__(self, "platform_fee_rate", 0.20)
         if not 0 <= self.custom_fee_rate <= 1:
             object.__setattr__(self, "custom_fee_rate", 0.18)
 

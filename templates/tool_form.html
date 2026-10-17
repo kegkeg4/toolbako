@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}ツールを販売する — ツールバコ{% endblock %}
 {% block content %}
-<section class="form-page"><div class="form-intro"><span class="section-kicker">SELL YOUR TOOL</span><h1>ツールを販売する</h1><p>価格はあなたが決められます。<br>詳細は購入希望者とDMで相談できます。</p><div class="fee-note"><b>通常販売手数料 {{ platform_fee_percent }}%</b><span>売れたときだけ発生します。カスタマイズ依頼は {{ custom_fee_percent }}% です。</span></div></div>
+<section class="form-page"><div class="form-intro"><span class="section-kicker">SELL YOUR TOOL</span><h1>ツールを販売する</h1><p>価格はあなたが決められます。<br>詳細は購入希望者とDMで相談できます。</p><div class="fee-note"><b>通常販売手数料 {{ platform_fee_percent }}%</b><span>税込・通常のカード決済費込み。売れたときだけ発生します。カスタマイズ依頼は {{ custom_fee_percent }}% です。銀行振込の手数料は別途定めます。</span></div></div>
 <form class="editor-form" action="/tools/new" method="post" enctype="multipart/form-data" data-tool-form>
   <fieldset class="form-section"><legend>1. 基本情報</legend>
     <div class="field"><label for="tool-name">ツール名 <b>必須</b></label><input id="tool-name" name="name" maxlength="60" required placeholder="例：議事録マジック"><small>60字以内</small></div>
