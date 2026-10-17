@@ -152,7 +152,7 @@ def test_disk_spool_is_closed_on_all_exits(monkeypatch, ending):
     else:
         output, calls, _ = exercise(messages, limit=1_000_010)
         if ending == 'disconnect':
-            assert not output and not calls
+            assert output[0]['status'] == 400 and not calls
         else:
             assert output[0]['status'] == (413 if ending == 'overflow' else 200)
     assert len(handles) == 1 and handles[0]._rolled and handles[0].closed

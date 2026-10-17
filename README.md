@@ -46,6 +46,12 @@ Twitter OAuthのSupabase provider名は `twitter` です。X Developer Portal側
 
 Storage bucketの公開範囲・容量・MIMEはPre-deployで読取検証します。非公開納品のURLは参加者の認可後に60秒だけ発行し、署名をDB／監査へ保存しません。画像は公開URLなので下書きでも秘密情報を含めないでください。検査未設定時はファイル納品を停止します。運営の滞留確認は管理画面または`python -m app.operations`で読取だけ行います。実Storage書込・署名download・匿名拒否、ClamAV／EICAR、保持・孤立ファイル清掃・復元の合格は別途必要です。詳細は[本番公開チェックリスト](PRODUCTION_CHECKLIST.md)を参照してください。
 
+## 途中で止まったアップロードの制限
+
+リクエスト本文はDB処理・フォーム解析より前に容量と受信時間を制限します。無通信30秒または全体300秒（Webhookは全体30秒）で408・no-storeを返し、HTTP/1接続を閉じます。少量ずつの送信で総時間は延長せず、空のデータでは無通信時間も延長しません。一時ファイルは終了時に閉じ、受信完了後の注文・決済処理をこのタイマーで中断しません。接続が切れた場合も業務処理へ進まず、通常の切断をサーバー障害として記録しません。
+
+`tests/test_request_timeouts.py` は時間制限・一時ファイルの解放に加え、127.0.0.1の一時Uvicornサーバーで途中停止・chunked送信・切断後の応答回復を検証します。実環境への低速送信試験や負荷試験は行いません。フロントのproxyが先に打ち切る場合もあるため、この受信制限だけで同時接続数・ディスク容量・本番負荷の合格とは扱いません。
+
 ## 秘密情報を送らないエラー監視
 
 `SENTRY_DSN`設定時は`app.monitoring`で明示的に初期化します。通常ログ／Sentryには例外本文を送らず、サーバー生成の問い合わせ番号・例外種別・app内のファイル名と行番号だけを使います。[Sentryの送信前フック](https://getsentry.github.io/sentry-python/api.html)を使い、未知の将来フィールドを含め、URL、Query、Cookie、Header、ユーザー情報、DM、納品ファイル、ローカル変数、ソース行、添付、breadcrumb、scope extrasを送信イベントから除外します。自動integration・trace・profiling・ログ・metrics・session報告も停止しています。実SDKの送信envelopeを偽transportで検査し、外部サービスへはテストデータを送りません。
