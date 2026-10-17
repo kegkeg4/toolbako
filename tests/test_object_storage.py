@@ -181,7 +181,7 @@ def test_nondemo_delivery_upload_is_scanned_private_and_persists_only_reference(
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("failure,status", [("unconfigured", 503), ("malware", 422), ("unavailable", 503), ("unpaid", 409), ("stranger", 403)])
+@pytest.mark.parametrize("failure,status", [("unconfigured", 503), ("malware", 422), ("unavailable", 503), ("timeout", 503), ("unpaid", 409), ("stranger", 403)])
 def test_delivery_safety_or_authorization_failure_never_uploads(provider, monkeypatch, failure, status):
     import app.main as main
     store = DemoStore(seed=False)
@@ -192,6 +192,7 @@ def test_delivery_safety_or_authorization_failure_never_uploads(provider, monkey
     monkeypatch.setattr(main, "current_user", lambda request: {"id": "stranger" if failure == "stranger" else "seller"})
     def scan(*args):
         if failure == "unavailable": raise OSError("private provider detail")
+        if failure == "timeout": raise TimeoutError("Safety scanner exceeded its time limit")
         return failure != "malware", "clamav"
     monkeypatch.setattr(main, "clamav_scan", scan)
     upload = UploadFile(io.BytesIO(b"private fixture"), filename="guide.txt")
@@ -281,6 +282,7 @@ def test_clamav_reads_complete_framed_reply_and_returns_only_safe_engine(fragmen
     class Socket:
         def __enter__(self): return self
         def __exit__(self, *args): pass
+        def settimeout(self, timeout): pass
         def sendall(self, data): sent.append(data)
         def recv(self, size): return fragments.pop(0) if fragments else b""
     monkeypatch.setattr(files.socket, "create_connection", lambda *args, **kwargs: Socket())
@@ -297,6 +299,7 @@ def test_clamav_unconfirmed_or_malformed_reply_is_service_failure_not_clean(repl
     class Socket:
         def __enter__(self): return self
         def __exit__(self, *args): pass
+        def settimeout(self, timeout): pass
         def sendall(self, data): pass
         def recv(self, size): return parts.pop(0) if parts else b""
     monkeypatch.setattr(files.socket, "create_connection", lambda *args, **kwargs: Socket())

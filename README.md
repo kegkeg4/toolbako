@@ -99,3 +99,16 @@ Railway／Procfileの起動には`--no-access-log`が必要です。標準access
 この方式は全状態JSONB＋リクエスト排他制御の互換層です。単発購入の金融台帳は別の4テーブルに正規化し、業務状態と同時に保存します。staging実接続は確認済みですが、実負荷試験・本番決済運用は未完了で、本番決済ガードは維持しています。Supabaseのdirect接続またはsession poolerを使い、transaction poolerは使わないでください。DBモードのメールは `python -m app.mail_worker --limit 20` で送信します。分配／振込workerの手順と制限は [売上・振込運用](PAYOUT_OPERATIONS.md)、保存方式・検証結果は [2026-09-22の実装記録](RELEASE_PROGRESS_2026-09-22.md) を参照してください。service role keyやprovider tokenはサーバー内だけで扱い、ログ・公開バックアップへ出さないでください。
 
 stagingのDB／Auth実接続と新版配備は確認済みです（最新の証拠は[配備記録](RELEASE_PROGRESS_2026-10-09.md)）。DB境界は全リクエストで最新状態をロック下で読み、不変の状態・空のoutbox・検証済み金融状態の場合だけ保存を省きます。GETの期限処理・認証・監査等の変更や決済予約の保存は省略しません。[SupabaseのSession pooler指針](https://supabase.com/docs/guides/database/connecting-to-postgres)に従い、session lockに必要な接続モードを維持します。これは直列化の解消や本番負荷の合格ではありません。
+
+## 実ClamAVを使ったローカル納品検査
+
+`tests/test_clamav_integration.py` は `TEST_CLAMAV_PORT` を指定した場合だけ、127.0.0.1のClamAVへ接続します。通常CIでは実エンジンが必要な8件をskipします。クラウド認証・保管・業務DBは使いません。正常な50MB、無害なEICAR標準サンプル、ZIP・二重ZIP、過剰な再帰、納品処理での保存前拒否を検証します。サンプル自体はメモリー上で扱い、実行しません。接続不能時の503と納品状態維持も試験します。
+
+公式のClamAV配布物を検証用フォルダーへ展開し、FreshClamで公式定義を更新・検証してから、TCPAddrを127.0.0.1に限定して起動します。サービス登録・自動起動・公開ポートは不要です。検証構成は `StreamMaxLength 50000000`、`MaxScanSize 200M`、`MaxFileSize 50M`、`MaxRecursion 16`、`MaxFiles 500`、`MaxScanTime 15000`、`AlertExceedsMax yes`、`AlertEncrypted yes`、`ScanArchive yes`。検査上限超過を正常と扱わせないことが必要です。アプリ側にも送受信を通した20秒の待ち時間制限があります。
+
+```powershell
+$env:TEST_CLAMAV_PORT = '<起動したローカルclamdのポート>'
+python -m pytest -q tests/test_clamav_integration.py tests/test_scanner_deadline.py
+```
+
+検証後は自分が起動したclamdを停止し、待受ポートが閉じたことを確認します。クラウド側での常時稼働・定義更新の監視・同時負荷試験は別途必要です。ClamAVのTCPには認証がないため、実配備でも外部公開せず、webから到達可能な非公開ネットワークに限定します。[公式の運用・接続仕様](https://docs.clamav.net/manual/Usage/Scanning.html)、[EICAR標準テストの説明](https://www.eicar.org/download-anti-malware-testfile/)。

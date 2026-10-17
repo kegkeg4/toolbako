@@ -5,11 +5,13 @@ import socket
 import struct
 import zipfile
 import re
+from time import monotonic
 from pathlib import Path
 from PIL import Image
 
 
 MAX_DELIVERY_BYTES = 50_000_000
+SCAN_TIMEOUT_SECONDS = 20
 ALLOWED_SUFFIXES = {".zip",".pdf",".txt",".md",".json",".csv",".py",".js",".ts",".html",".css",".png",".jpg",".jpeg",".webp"}
 
 
@@ -59,14 +61,26 @@ def validate_delivery_file(filename: str, content: bytes) -> str:
 
 
 def clamav_scan(content: bytes, host: str, port: int) -> tuple[bool, str]:
-    with socket.create_connection((host, port), timeout=20) as client:
+    deadline = monotonic() + SCAN_TIMEOUT_SECONDS
+
+    def remaining():
+        seconds = deadline - monotonic()
+        if seconds <= 0:
+            raise TimeoutError("Safety scanner exceeded its time limit")
+        return seconds
+
+    with socket.create_connection((host, port), timeout=remaining()) as client:
+        client.settimeout(remaining())
         client.sendall(b"zINSTREAM\0")
         for offset in range(0,len(content),65536):
             chunk = content[offset:offset+65536]
+            client.settimeout(remaining())
             client.sendall(struct.pack(">I",len(chunk)) + chunk)
+        client.settimeout(remaining())
         client.sendall(struct.pack(">I",0))
         result = bytearray()
         while b"\0" not in result:
+            client.settimeout(remaining())
             fragment = client.recv(1024)
             if not fragment or len(result) + len(fragment) > 4096:
                 raise OSError("Safety scanner returned an incomplete response")
