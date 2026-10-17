@@ -1,0 +1,20 @@
+name: Private infrastructure image checks
+on:
+  push:
+    paths:
+      - 'deploy/clamav/**'
+      - 'deploy/redis/**'
+      - 'tests/infrastructure_containers.py'
+      - '.github/workflows/infrastructure.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  containers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - run: docker build -t toolbako-clamav-check deploy/clamav
+      - run: docker build -t toolbako-redis-check deploy/redis
+      - run: python3 tests/infrastructure_containers.py
