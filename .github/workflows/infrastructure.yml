@@ -4,6 +4,10 @@ on:
     paths:
       - 'deploy/clamav/**'
       - 'deploy/redis/**'
+      - 'deploy/mail-worker/**'
+      - 'app/mail_worker.py'
+      - 'app/operations.py'
+      - 'requirements.txt'
       - 'tests/infrastructure_containers.py'
       - '.github/workflows/infrastructure.yml'
   workflow_dispatch:
@@ -18,3 +22,14 @@ jobs:
       - run: docker build -t toolbako-clamav-check deploy/clamav
       - run: docker build -t toolbako-redis-check deploy/redis
       - run: python3 tests/infrastructure_containers.py
+      - run: docker build -f deploy/mail-worker/Dockerfile -t toolbako-mail-worker-check .
+      - name: Check isolated mail worker entry point
+        run: |
+          docker run --rm --network none toolbako-mail-worker-check --help
+          test "$(docker image inspect toolbako-mail-worker-check --format '{{.Config.User}}')" = '10001:10001'
+          set +e
+          output=$(docker run --rm --network none toolbako-mail-worker-check 2>&1)
+          result=$?
+          set -e
+          test "$result" -eq 1
+          printf '%s\n' "$output" | grep -F 'Email worker failed.'

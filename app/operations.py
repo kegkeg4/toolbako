@@ -20,7 +20,17 @@ async def inspect_operations(backend, settings, *, at=None):
             return await connection_summary(conn, settings, at=at)
 
 
-async def connection_summary(conn, settings, *, at=None):
+async def inspect_mail(backend, *, at=None):
+    """Mail-only snapshot; a worker needs no marketplace or financial access."""
+    async with await backend.connect() as conn:
+        async with conn.transaction():
+            await conn.execute('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
+            await backend._check_schema(conn)
+            return {"counts": await mail_counts(conn, at=at),
+                    "notice": "Read-only mail counts; no claim or send. Zero does not prove delivery or worker health."}
+
+
+async def mail_counts(conn, *, at=None):
     at = at or datetime.now(timezone.utc)
     mail = await (await conn.execute(
         "select count(*) filter(where status='pending'),"
@@ -31,6 +41,12 @@ async def connection_summary(conn, settings, *, at=None):
         "count(*) filter(where status='sending' and lease_until is null) from toolbako_runtime.email_outbox",
         (at, at - timedelta(minutes=15), at),
     )).fetchone()
+    return dict(zip(("mail_pending", "mail_overdue", "mail_expired_lease", "mail_review", "mail_sending", "mail_missing_lease"), mail))
+
+
+async def connection_summary(conn, settings, *, at=None):
+    at = at or datetime.now(timezone.utc)
+    counts = await mail_counts(conn, at=at)
     payments = await (await conn.execute(
         "select count(*) filter(where status in ('pending','unknown')),"
         "count(*) filter(where status='pending' and created_at<%s),"
@@ -41,9 +57,7 @@ async def connection_summary(conn, settings, *, at=None):
         "select count(*) filter(where status='review'),count(*) filter(where status='bank_failed') "
         "from toolbako_runtime.finance_payouts"
     )).fetchone()
-    counts = dict(zip(("mail_pending", "mail_overdue", "mail_expired_lease", "mail_review", "mail_sending", "mail_missing_lease",
-                       "payment_unknown", "payment_stale", "payment_rejected", "payout_review", "payout_failed"),
-                      (*mail, *payments, *payouts)))
+    counts.update(zip(("payment_unknown", "payment_stale", "payment_rejected", "payout_review", "payout_failed"), (*payments, *payouts)))
     alerts = []
     if not settings.email_ready: alerts.append("取引メールが未接続です。通知workerの配備と送信確認が必要です。")
     if not settings.redis_url: alerts.append("複数台共通のアクセス制限が未接続です。")
