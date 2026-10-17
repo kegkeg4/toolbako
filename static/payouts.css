@@ -1,0 +1,18 @@
+.payout-page .payout-rules { display: flex; flex-wrap: wrap; gap: 8px; margin: 18px 0 22px; }
+.payout-page .payout-rules span { padding: 6px 10px; border: 1px solid #ffffff30; border-radius: 7px; background: #ffffff0a; font-size: 12px; line-height: 1.6; }
+.payout-page .balance-card form { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px 14px; align-items: center; }
+.payout-page .balance-card form label { grid-column: 1 / -1; font-size: 13px; font-weight: 700; }
+.payout-page .balance-card form input[type=number] { grid-column: 1; width: 100%; font-size: 16px; }
+.payout-page .balance-card form small { grid-column: 1 / -1; font-size: 12px; line-height: 1.8; color: #e2e3f3; }
+.payout-page .balance-card form button { grid-column: 2; grid-row: 2; }
+.payout-policy { padding: 20px 22px; margin: 24px 0 36px; border: 1px solid var(--line); border-radius: 12px; background: #fff; }
+.payout-policy b { display: block; font-size: 14px; }
+.payout-policy p { margin: 10px 0 0; color: var(--muted); line-height: 1.9; font-size: 13px; }
+.payout-page .payout-list > div { display: grid; grid-template-columns: 1fr auto; gap: 8px 16px; padding: 18px; }
+.payout-page .payout-list small { grid-column: 1 / -1; font-size: 12px; line-height: 1.7; color: var(--muted); overflow-wrap: anywhere; }
+@media (max-width: 520px) {
+  .payout-page .balance-card { padding: 22px; }
+  .payout-page .balance-card form { grid-template-columns: 1fr; }
+  .payout-page .balance-card form button { grid-column: 1; grid-row: auto; }
+  .payout-page .payout-list > div { grid-template-columns: 1fr; }
+}

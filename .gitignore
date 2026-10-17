@@ -1,9 +1,12 @@
 .env
+.env.*
+!.env.example
 private_uploads/
 *.db
 *.sqlite
 *.sqlite3
 .venv/
+.venv-release/
 __pycache__/
 *.py[cod]
 .pytest_cache/

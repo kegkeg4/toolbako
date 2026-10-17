@@ -5,11 +5,34 @@ import socket
 import struct
 import zipfile
 import re
+from time import monotonic
 from pathlib import Path
+from PIL import Image
 
 
 MAX_DELIVERY_BYTES = 50_000_000
+SCAN_TIMEOUT_SECONDS = 20
 ALLOWED_SUFFIXES = {".zip",".pdf",".txt",".md",".json",".csv",".py",".js",".ts",".html",".css",".png",".jpg",".jpeg",".webp"}
+
+
+def encode_thumbnail(content: bytes) -> bytes:
+    """Bounded decode/resize; caller runs this CPU work outside the event loop."""
+    try:
+        with Image.open(io.BytesIO(content)) as image:
+            if image.format not in {"JPEG", "PNG", "WEBP"} or image.width * image.height > 25_000_000:
+                raise ValueError("invalid image")
+            image.verify()
+        with Image.open(io.BytesIO(content)) as image:
+            converted = image.convert("RGB")
+            try:
+                converted.thumbnail((1200, 900))
+                output = io.BytesIO()
+                converted.save(output, "WEBP", quality=88, method=6)
+                return output.getvalue()
+            finally:
+                converted.close()
+    except Exception:
+        raise ValueError("商品画像を読み込めませんでした") from None
 
 
 def validate_delivery_file(filename: str, content: bytes) -> str:
@@ -38,11 +61,38 @@ def validate_delivery_file(filename: str, content: bytes) -> str:
 
 
 def clamav_scan(content: bytes, host: str, port: int) -> tuple[bool, str]:
-    with socket.create_connection((host, port), timeout=20) as client:
+    deadline = monotonic() + SCAN_TIMEOUT_SECONDS
+
+    def remaining():
+        seconds = deadline - monotonic()
+        if seconds <= 0:
+            raise TimeoutError("Safety scanner exceeded its time limit")
+        return seconds
+
+    with socket.create_connection((host, port), timeout=remaining()) as client:
+        client.settimeout(remaining())
         client.sendall(b"zINSTREAM\0")
         for offset in range(0,len(content),65536):
             chunk = content[offset:offset+65536]
+            client.settimeout(remaining())
             client.sendall(struct.pack(">I",len(chunk)) + chunk)
+        client.settimeout(remaining())
         client.sendall(struct.pack(">I",0))
-        result = client.recv(4096).decode("utf-8","replace")
-    return result.rstrip("\0").endswith("OK"), result.rstrip("\0")
+        result = bytearray()
+        while b"\0" not in result:
+            client.settimeout(remaining())
+            fragment = client.recv(1024)
+            if not fragment or len(result) + len(fragment) > 4096:
+                raise OSError("Safety scanner returned an incomplete response")
+            result.extend(fragment)
+    if not result.endswith(b"\0") or result.count(b"\0") != 1:
+        raise OSError("Safety scanner returned an invalid response")
+    try:
+        response = result[:-1].decode("utf-8", "strict")
+    except UnicodeError:
+        raise OSError("Safety scanner returned an invalid encoding") from None
+    if response == "stream: OK":
+        return True, "clamav"
+    if re.fullmatch(r"stream: [^\r\n\x00]+ FOUND", response):
+        return False, "clamav:malware_detected"
+    raise OSError("Safety scanner did not confirm a scan result")

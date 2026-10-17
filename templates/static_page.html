@@ -37,16 +37,20 @@
   <dl class="legal-definition">
     <dt>事業者名</dt><dd>{{ legal_operator.name or '正式公開前に確定が必要です' }}</dd>
     <dt>運営責任者</dt><dd>{{ legal_operator.representative or '正式公開前に確定が必要です' }}</dd>
+    {% if legal_operator.contact_on_request and legal_operator.email %}
+    <dt>所在地・電話番号</dt><dd>請求があった場合は、所在地および電話番号を記載した書面または電子メールを遅滞なく提供します。開示のご請求は <a href="mailto:{{ legal_operator.email }}">{{ legal_operator.email }}</a> へご連絡ください。</dd>
+    {% else %}
     <dt>所在地</dt><dd>{{ legal_operator.address or '正式公開前に確定が必要です' }}</dd>
     <dt>電話番号</dt><dd>{{ legal_operator.phone or '正式公開前に確定が必要です' }}</dd>
+    {% endif %}
     <dt>ウェブサイト</dt><dd>{% if legal_operator.website %}<a href="{{ legal_operator.website }}" target="_blank" rel="noopener noreferrer">{{ legal_operator.website }}/</a>{% else %}正式公開前に確定が必要です{% endif %}</dd>
     <dt>問い合わせ</dt><dd>{% if legal_operator.email %}<a href="mailto:{{ legal_operator.email }}">{{ legal_operator.email }}</a>{% else %}正式公開前に確定が必要です{% endif %}</dd>
   </dl>
-  <h2>販売価格と手数料</h2><p>各商品ページに税込価格を表示します。出品者には取引成立時に表示された販売手数料が発生します。インターネット接続に必要な通信費は利用者の負担です。</p>
-  <h2>支払方法・支払時期</h2><p>クレジットカードその他購入画面に表示する方法で、購入または定期更新時に支払います。</p>
+  <h2>販売価格と手数料</h2><p>各商品ページに税込価格を表示します。通常販売の販売者手数料は{{ platform_fee_percent }}%（税込・通常のカード決済費込み）、カスタマイズ依頼は{{ custom_fee_percent }}%（税込・通常のカード決済費込み）です。手数料は販売価格から差し引き、納品承諾・取引完了後に出品者の売上を確定します。銀行振込の手数料は別途定めます。インターネット接続に必要な通信費は利用者の負担です。</p>
+  <h2>支払方法・支払時期（公開前の予定）</h2><p>現在は公開準備中で、このサイトから本番の請求・銀行振込は行いません。予定している振込ルールは、{{ payout_minimum|default(161) }}円以上から申請、申請した週の翌週木曜日を目安とし、{{ payout_fee_free_threshold|default(3000) }}円未満は手数料{{ payout_fee|default(160) }}円、同額以上は無料です。{{ payout_auto_days|default(120) }}日経過した未申請売上の取扱い、保留・返金・異議申立てへの対応は、決済事業者の条件および法務確認を経て、正式公開前に確定・掲載します。</p>
   <h2>提供時期</h2><p>完成済みデジタル商品は決済確認後、カスタマイズ商品は商品ページまたは見積もりに示した時期に提供します。</p>
   <h2>返品・キャンセル</h2><p>商品の性質上、提供後の購入者都合による返品は原則受け付けません。不具合、未納品、説明との重大な相違がある場合は取引ルームから申し出てください。月額契約は次回更新前に解約できます。</p>
   {% endif %}
-  <p class="updated">最終更新日：2026年7月22日</p>
+  <p class="updated">最終更新日：{% if page == 'tokushoho' %}2026年10月17日{% else %}2026年7月22日{% endif %}</p>
 </article>
 {% endblock %}

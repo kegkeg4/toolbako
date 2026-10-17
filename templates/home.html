@@ -37,7 +37,7 @@
       <div class="market-popular"><span>人気の検索ワード</span><a href="/tools?q=議事録">議事録</a><a href="/tools?q=SNS">SNS投稿</a><a href="/tools?q=デザイン">デザイン</a><a href="/tools?q=レビュー">コードレビュー</a></div>
       <div class="hero-assurance"><span>✓ 購入前に相談</span><span>✓ 安全チェック表示</span><span>✓ 取引を運営がサポート</span></div>
       <div class="hero-actions">
-        <a class="hero-primary-cta" href="/signup">無料で登録して探す <b>→</b></a>
+        <a class="hero-primary-cta" href="/signup">無料で探し始める <b>→</b></a>
         <a class="hero-secondary-cta" href="/match">3問でおすすめ診断</a>
       </div>
       <p class="hero-signup-note"><span>登録無料</span>　見るだけでもOK。気になるツールはお気に入りに保存できます。</p>
@@ -54,17 +54,28 @@
             <span><b>{{ tool.name }}</b><small>{{ tool.tagline }}</small><em>★ {{ tool.rating }}　{{ tool.sales_count }}件販売</em></span>
             <strong>{% if tool.price_type == 'paid' %}¥{{ '{:,}'.format(tool.price) }}{% else %}{{ price_labels[tool.price_type] }}{% endif %}</strong>
           </a>
+          {% else %}
+          <div class="empty-state"><b>最初のクリエイターを募集中</b><p>あなたがつくったAIツールを、必要な人に届けませんか。</p><a class="button small" href="/tools/new">ツールを出品する</a></div>
           {% endfor %}
         </div>
         <footer><span><b>AI TOOL CONCIERGE</b> — 用途と予算から3分で絞り込み</span><a href="/match">診断する →</a></footer>
       </div>
       <div class="showcase-signal"><span>✓</span><div><b>TOOL PASSPORT</b><small>利用条件・データ取扱いを見える化</small></div></div>
-      <div class="showcase-live"><i></i><span><b>38</b><small>今週の新しい取引</small></span></div>
+      <div class="showcase-live"><i></i><span><b>つくる × 使う</b><small>個人のアイデアを、次の誰かへ</small></span></div>
     </div>
   </section>
 
   <section class="market-proofbar" aria-label="ツールバコの特徴">
-    <div><strong>0円</strong><span>登録・出品の初期費用</span></div><div><strong>10%</strong><span>売れたときだけの手数料</span></div><div><strong>直接相談</strong><span>購入前に作者と話せる</span></div><div><strong>安心表示</strong><span>安全性と利用条件を確認</span></div>
+    <div><strong>0円</strong><span>登録・出品の初期費用</span></div><div><strong>{{ platform_fee_percent }}%</strong><span>販売成立時の販売者手数料</span></div><div><strong>直接相談</strong><span>購入前に作者と話せる</span></div><div><strong>安心表示</strong><span>安全性と利用条件を確認</span></div>
+  </section>
+
+  <section class="market-usage-map" aria-labelledby="usage-map-title">
+    <div class="usage-map-heading"><span>HOW TOOLBAKO WORKS</span><h2 id="usage-map-title">使い方マップ</h2><p>買う人も、つくる人も、3ステップで始められます。</p></div>
+    <div class="usage-map-track">
+      <article class="usage-map-side"><div class="usage-map-icon">買</div><div><b>ツールを買いたい方</b><ol><li>困りごと・カテゴリから探す</li><li>詳細を比較して作者に相談</li><li>納得したら購入・利用開始</li></ol><a href="/tools">ツールを探す →</a></div></article>
+      <div class="usage-map-bridge" aria-hidden="true">つながる</div>
+      <article class="usage-map-side"><div class="usage-map-icon creator">創</div><div><b>ツールを売りたい方</b><ol><li>無料登録してツールを出品</li><li>購入者の相談に返信</li><li>取引完了後に売上を受け取る</li></ol><a href="/tools/new">ツールを出品する →</a></div></article>
+    </div>
   </section>
 
   <section class="market-newcomer" aria-labelledby="newcomer-title">
@@ -78,7 +89,7 @@
       <div class="newcomer-step"><i>02</i><div><b>中身を比べて相談</b><small>価格・使い方・安全性を確認して作者に質問。</small></div></div>
       <div class="newcomer-step"><i>03</i><div><b>納得したら購入</b><small>購入後はライブラリで利用権とサポートを管理。</small></div></div>
     </div>
-    <a class="newcomer-cta" href="/signup">無料会員登録をはじめる <b>→</b></a>
+    <a class="newcomer-cta" href="/signup">無料で探し始める <b>→</b></a>
   </section>
 
   <section class="market-sale-models"><div class="sale-model-copy"><span>ONE TOOL, THREE WAYS</span><h2>買う。自分向けに変える。<br>事業ごと受け継ぐ。</h2><p>同じAIツールでも、必要な深さは人それぞれ。少額の完成品から独占譲渡まで、取引の重さを分けました。</p></div><div class="sale-model-grid"><a href="/tools"><em>01</em><b>完成品を通常購入</b><small>すぐ使えるツールやプロンプトを、表示価格で購入。</small><span>ツールを探す →</span></a><a href="/requests"><em>02</em><b>自社向けにカスタマイズ</b><small>作者と要件を整理し、見積もり・納期・修正範囲を合意。</small><span>依頼・相談を見る →</span></a><a href="/transfers"><em>03</em><b>ソース・独占権を譲り受ける</b><small>NDA後に詳細を確認し、事業資産として条件交渉。</small><span>独占譲渡を見る →</span></a></div></section>
@@ -92,7 +103,7 @@
 
   <section class="market-section product-market-section">
     <div class="market-section-head"><div><span>RECOMMENDED</span><h2>いま選ばれているAIツール</h2><p>評価・販売実績・注目度から、いま使われているものを厳選。</p></div><a href="/tools?sort=trending">もっと見る <b>→</b></a></div>
-    <div class="market-card-grid">{% for tool in trending %}{% set market_rank = loop.index %}{% include "_market_card.html" %}{% endfor %}</div>
+    <div class="market-card-grid">{% for tool in trending %}{% set market_rank = loop.index %}{% include "_market_card.html" %}{% else %}<div class="empty-state"><h3>新しいツールの出品をお待ちしています</h3><p>気になるツールがまだない場合は、欲しいツールを募集できます。</p><a href="/requests/new">欲しいツールを募集する →</a></div>{% endfor %}</div>
   </section>
 
   <section class="market-route-section">
@@ -102,7 +113,7 @@
 
   <section class="market-section product-market-section newest-market-section">
     <div class="market-section-head"><div><span>JUST ARRIVED</span><h2>新着のAIツール</h2><p>個人の新しい工夫が、今日も市場に届いています。</p></div><a href="/tools?sort=new">もっと見る <b>→</b></a></div>
-    <div class="market-card-grid">{% for tool in newest[:5] %}{% set market_rank = loop.index %}{% include "_market_card.html" %}{% endfor %}</div>
+    <div class="market-card-grid">{% for tool in newest[:5] %}{% set market_rank = loop.index %}{% include "_market_card.html" %}{% else %}<div class="empty-state"><p>公開されたツールはここに表示されます。</p><a href="/tools/new">最初のツールを出品する →</a></div>{% endfor %}</div>
   </section>
 
   <section class="market-trust">
