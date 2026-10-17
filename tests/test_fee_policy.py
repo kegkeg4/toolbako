@@ -14,7 +14,7 @@ from app.payment_state import apply_checkout_payment
 
 @pytest.fixture
 def purchase(monkeypatch):
-    config = Settings(platform_fee_rate=0.20, custom_fee_rate=0.18)
+    config = Settings(platform_fee_rate=0.20, custom_fee_rate=0.20)
     monkeypatch.setattr(data, "settings", config)
     store = DemoStore()
     store.orders.clear()
@@ -27,6 +27,8 @@ def purchase(monkeypatch):
 def test_default_standard_fee_is_twenty_percent():
     assert Settings().platform_fee_rate == 0.20
     assert Settings(platform_fee_rate=-1).platform_fee_rate == 0.20
+    assert Settings().custom_fee_rate == 0.20
+    assert Settings(custom_fee_rate=-1).custom_fee_rate == 0.20
 
 
 def test_new_purchase_quotes_twenty_percent_and_only_releases_after_completion(purchase):
@@ -47,6 +49,7 @@ def test_new_purchase_quotes_twenty_percent_and_only_releases_after_completion(p
 
 @pytest.mark.parametrize("quoted_rate,primary_fee,extra_fee,net", [
     (0.15, 150, 75, 1275),
+    (0.18, 180, 90, 1230),
     (0.20, 200, 100, 1200),
 ])
 def test_existing_quotes_and_extra_payments_keep_the_recorded_rate(
@@ -78,11 +81,39 @@ def test_existing_quotes_and_extra_payments_keep_the_recorded_rate(
     assert balance(store, order["seller_id"]) == net
 
 
+@pytest.mark.parametrize("flow", ["proposal", "request"])
+@pytest.mark.parametrize("quoted_rate", [0.18, 0.20])
+def test_custom_orders_and_their_extras_keep_the_agreed_rate(purchase, monkeypatch, flow, quoted_rate):
+    config, store, buyer = purchase
+    monkeypatch.setattr(data, "settings", replace(config, custom_fee_rate=quoted_rate))
+    if flow == "proposal":
+        conversation = store.conversation_for(buyer, "minutes-magic", "customization")
+        proposal = store.create_proposal(conversation["id"], "Custom work", "Test", 1000, 3)
+        order = store.buy_proposal(buyer, conversation["id"], proposal["id"])
+    else:
+        request = store.create_request(buyer, {"title": "Custom work"})
+        seller = {"id": "fee-test-seller", "username": "fee_seller", "display_name": "Seller"}
+        store.submit_application(request["id"], seller, "Test", 1000, 3)
+        _, _, order = store.contract_request(buyer, request["id"], request["application_list"][0]["id"], payment_pending=True)
+    assert order["is_custom"]
+    assert (order["platform_fee_rate"], order["platform_fee"]) == (quoted_rate, round(1000 * quoted_rate))
+    monkeypatch.setattr(data, "settings", config)
+    apply_checkout_payment(store, config, order, None, {"payment_intent": "pi_custom_fee_test"})
+    extra, _ = store.reserve_extra_payment(order, 500, "Additional custom work")
+    stripe = StripeIntegration("sk_test_fee", "https://example.test", charge_mode="destination")
+    assert stripe.extra_checkout_data(order, extra, "acct_fee_test")["payment_intent_data[application_fee_amount]"] == str(round(500 * quoted_rate))
+    apply_checkout_payment(store, config, order, extra, {"payment_intent": "pi_custom_extra_test"})
+    store.deliver(order, "Test delivery")
+    store.transition(order, "accept", actor_id=buyer["id"])
+    assert balance(store, order["seller_id"]) == 1500 - round(1500 * quoted_rate)
+
+
 def test_public_standard_fee_disclosure_matches_new_order_rate():
     from app.main import app
     client = TestClient(app)
     page = client.get("/tokushoho")
     assert page.status_code == 200
     assert "通常販売の販売者手数料は20.0%（税込・通常のカード決済費込み）" in page.text
+    assert "カスタマイズ依頼は20.0%（税込・通常のカード決済費込み）" in page.text
     assert "銀行振込の手数料は別途定めます" in page.text
     assert "納品承諾・取引完了後" in page.text
