@@ -94,6 +94,8 @@ def main():
                 assert len(store.tools) == 1
                 assert len(store.orders) == 1
                 assert store.orders[0]["checkout_session_id"] == "cs_runtime"
+                assert store.orders[0]["platform_fee_rate"] == 0.20
+                assert store.orders[0]["platform_fee"] == 200
                 assert len(store.account_sessions) == 2
         asyncio.run(verify())
 
@@ -116,7 +118,8 @@ def main():
             submitted = seller.post("/payouts", data=data, follow_redirects=False)
             assert submitted.status_code == 303, submitted.text
         page = seller.get("/payouts")
-        assert "申請受付" in page.text and "¥650" in page.text
+        # 1,000 gross - 200 sales fee - 200 reserved payout = 600 available.
+        assert "申請受付" in page.text and "¥600" in page.text
         async def verify_payout():
             async with restarted.request(store):
                 assert len(store.payouts) == 1
