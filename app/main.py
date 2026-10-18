@@ -8,6 +8,7 @@ import io
 import re
 import secrets
 import time
+from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import quote, urlencode, urlparse
@@ -38,6 +39,7 @@ from .data import AI_OPTIONS, CATEGORIES, DIST_LABELS, PRICE_LABELS, TRANSFER_AS
 from .ogp import generate_og, generate_site_og
 from .middleware import ProductionGuardMiddleware
 from .monitoring import initialize_monitoring
+from .security_services import SecurityServiceMonitor, unchecked_snapshot
 from .production import readiness_summary
 from .persistence import SQLiteStateStore
 from .database import DatabaseBoundaryMiddleware, PostgresStateStore
@@ -74,8 +76,32 @@ async def require_privileged_mfa(request: Request):
         raise HTTPException(303, "重要操作の前に2段階認証をお願いします", headers={"Location": f"/security/mfa?{urlencode({'next': destination})}"})
 
 
+@asynccontextmanager
+async def lifespan(application):
+    monitor = SecurityServiceMonitor(settings)
+    application.state.security_services = monitor
+    task = asyncio.create_task(monitor.run()) if settings.is_deployed and not settings.demo_mode else None
+    try:
+        yield
+    finally:
+        if task is not None:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+        application.state.security_services = None
+
+
+def security_service_snapshot():
+    monitor = getattr(app.state, "security_services", None)
+    return monitor.snapshot() if monitor is not None and monitor.matches(settings) else unchecked_snapshot()
+
+
+def security_service_readiness():
+    return {name: status["ready"] for name, status in security_service_snapshot()["services"].items()}
+
+
 database_store = PostgresStateStore(settings.database_url, production=settings.is_deployed) if settings.database_url else None
-app = FastAPI(title="ツールバコ", description="AIツールの共有・発見プラットフォーム", version="0.1.0", dependencies=[Depends(require_privileged_mfa)])
+app = FastAPI(title="ツールバコ", description="AIツールの共有・発見プラットフォーム", version="0.1.0", dependencies=[Depends(require_privileged_mfa)], lifespan=lifespan)
 app.add_middleware(SessionMiddleware, secret_key=settings.session_secret, session_cookie="toolbako_session", same_site="lax", https_only=settings.site_base_url.startswith("https"), max_age=settings.session_max_age)
 app.add_middleware(GZipMiddleware, minimum_size=500, compresslevel=6)
 if database_store or settings.is_production:
@@ -2457,7 +2483,7 @@ async def admin(request: Request):
     users = sorted([{"username":username, **account} for username,account in store.registered_users.items()], key=lambda item:item.get("display_name") or item["username"])
     recoveries = await payment_recovery_inventory(database_store, store) if database_store else {"items": [], "truncated": False}
     health = await operation_summary(database_store, settings) if database_store else None
-    return templates.TemplateResponse(request, "admin.html", context(request, tools=store.tools, users=users, reports=store.reports, cases=store.support_cases, audit_logs=store.audit_logs[:50], ops_health=health, readiness=readiness_summary(settings, runtime_database_ready=bool(database_store and await database_store.probe()), runtime_storage_ready=await storage_ready(settings)), finance=store.finance_snapshot(ledger=bool(database_store)), finance_controls_ready=settings.demo_mode or sandbox_payouts_ready(settings), payout_labels=PAYOUT_LABELS, payment_recoveries=recoveries, refund_resumptions=refund_resumption_inventory(store), payment_recovery_ready=bool(database_store and sandbox_payouts_ready(settings) and len(set(settings.admin_user_ids)) >= 2)))
+    return templates.TemplateResponse(request, "admin.html", context(request, tools=store.tools, users=users, reports=store.reports, cases=store.support_cases, audit_logs=store.audit_logs[:50], ops_health=health, readiness=readiness_summary(settings, runtime_database_ready=bool(database_store and await database_store.probe()), runtime_storage_ready=await storage_ready(settings), runtime_security_ready=security_service_readiness()), finance=store.finance_snapshot(ledger=bool(database_store)), finance_controls_ready=settings.demo_mode or sandbox_payouts_ready(settings), payout_labels=PAYOUT_LABELS, payment_recoveries=recoveries, refund_resumptions=refund_resumption_inventory(store), payment_recovery_ready=bool(database_store and sandbox_payouts_ready(settings) and len(set(settings.admin_user_ids)) >= 2)))
 
 
 @app.post("/admin/orders/{order_id}/refund-resumption/{action}")
@@ -2741,7 +2767,8 @@ async def health(): return {"status":"ok", "mode":"supabase" if settings.supabas
 
 @app.get("/readyz")
 async def readiness():
-    result = readiness_summary(settings, runtime_database_ready=bool(database_store and await database_store.probe()), runtime_storage_ready=await storage_ready(settings))
+    result = readiness_summary(settings, runtime_database_ready=bool(database_store and await database_store.probe()), runtime_storage_ready=await storage_ready(settings), runtime_security_ready=security_service_readiness())
+    result["security_services"] = security_service_snapshot()
     return JSONResponse(result, status_code=200 if result["ready"] or settings.demo_mode else 503)
 
 

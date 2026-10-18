@@ -1,0 +1,40 @@
+Private security service connectivity monitor
+
+The existing web process starts app.security_services.SecurityServiceMonitor
+through FastAPI lifespan in staging/production when DEMO_MODE=false. No new
+service, environment variable, credential, permission or public port is needed.
+
+Every 60 seconds after completion, it sends only framed ClamAV PING and an
+authenticated Redis PING. It never uploads files or reads/modifies Redis keys.
+Each probe has a 3-second total timeout and bounded connection cleanup. An
+unexpected probe failure also cancels its sibling. Shutdown cancels the task.
+No monitoring connection or task is started in local demo mode.
+
+Logs contain only security_service_probe, level, checked_at, fresh, read_only,
+and the fixed per-service ready/status fields. URLs, credentials, IPs, raw
+responses, exception messages and customer content are never included.
+
+/readyz and the admin readiness panel use this process's last result. They do
+not launch more probes on requests. Unchecked, failed, stopped, differently
+configured or older-than-120-second observations cannot pass these two checks.
+The existing /healthz and /deploymentz semantics and the live-payment lock stay
+unchanged. This is connectivity monitoring, not approval to launch payments.
+
+One-shot diagnostic in the existing web environment:
+    python -m app.security_services
+Exit 0 means both PING responses passed; exit 1 means otherwise. Use the service
+logs for the recurring observer. Do not export sealed credentials locally.
+
+If a dependency fails, confirm its service, private DNS/network and existing
+credential injection, then rerun the read-only diagnostic. Do not disable the
+scanner or rate limiter, expose internal ports, or broaden Redis ACLs to make a
+health result green. Application uploads/rate limiting keep their existing
+fail-closed behavior independent of this observation.
+
+Not covered: malware-detection correctness, signature freshness, shared-counter
+correctness, load/capacity, freshclam health, or notification to a human. Their
+separate checks and the external alert destination remain launch requirements.
+
+Sources:
+https://docs.clamav.net/manual/Usage/ClamdProtocol.html
+https://redis.io/docs/latest/commands/ping/
