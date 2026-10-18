@@ -66,7 +66,9 @@ def test_existing_quotes_and_extra_payments_keep_the_recorded_rate(
     stripe = StripeIntegration("sk_test_fee", "https://example.test", charge_mode="destination")
     assert stripe.checkout_data(order, "acct_fee_test")["payment_intent_data[application_fee_amount]"] == str(primary_fee)
     subscription = {**order, "billing_type": "subscription"}
-    assert stripe.checkout_data(subscription, "acct_fee_test")["subscription_data[application_fee_percent]"] == str(quoted_rate * 100)
+    # Initial release accepts one-time purchases only, including older quotes.
+    with pytest.raises(RuntimeError, match="月額契約"):
+        stripe.checkout_data(subscription, "acct_fee_test")
     apply_checkout_payment(store, config, order, None, {"payment_intent": "pi_primary_fee_test"})
     extra, _ = store.reserve_extra_payment(order, 500, "Additional work")
     assert stripe.extra_checkout_data(order, extra, "acct_fee_test")["payment_intent_data[application_fee_amount]"] == str(extra_fee)
