@@ -27,6 +27,14 @@ def verify_bank_payout(payout, remote):
 def apply_bank_status(payout, remote):
     verify_bank_payout(payout, remote)
     status = remote.get("status")
+    # A fresh, two-person GET reconciliation and complete transfer reversals
+    # already closed this reservation. Delayed signed events must not reopen it
+    # or mark an old failed bank payout paid after the seller reapplies.
+    if (payout["status"] == "cancelled"
+            and (payout.get("failed_payout_recovery") or {}).get("status") == "released"):
+        if status not in {"pending", "in_transit", "paid", "failed", "canceled"}:
+            raise FinanceConflict("銀行振込の状態を確認できません")
+        return
     if status in {"failed", "canceled"}:
         payout["status"] = "bank_failed"
         payout["failure_code"] = str(remote.get("failure_code") or status)[:80]

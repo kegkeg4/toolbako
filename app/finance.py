@@ -215,7 +215,8 @@ async def sync_finance(conn, store):
         if payout["status"] == "cancelled":
             bank_attempt = await (await conn.execute("select status from toolbako_runtime.stripe_operations where operation_id=%s", (f"bank-payout-{payout['id']}",))).fetchone()
             if payout.get("provider_payout_id") or bank_attempt:
-                raise FinanceConflict("Bank payout requires reconciliation before cancellation")
+                from .payout_recovery import validate_failed_release
+                await validate_failed_release(conn, payout)
         await conn.execute("update toolbako_runtime.finance_payouts set status=%s,provider_reference=%s,updated_at=now() where id=%s",
                            (payout["status"], payout.get("provider_payout_id"), payout["id"]))
         for allocation in allocations:

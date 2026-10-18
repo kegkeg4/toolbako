@@ -98,6 +98,33 @@
   </details>
   {% endif %}
 
+  <details id="failed-payout-recovery" class="finance-details">
+    <summary>失敗した銀行振込の資金を回収する（テスト環境）</summary>
+    <p>銀行振込の失敗とStripe残高への全額返却を照合します。別々の管理者2名が2段階認証後に30分以内に確認し、1回の承認で分配を1件回収します。全額回収を再確認するまで残高の予約を維持します。取消後は販売者が振込先を確認して再申請してください。着金履歴のある振込は個別の会計確認が必要です。</p>
+    {% if not payment_recovery_ready %}<p class="control-unavailable">操作にはテスト用Stripe・永続DB・別々の管理者2名が必要です。</p>{% endif %}
+    {% for payout in finance.payouts if payout.finance_v2 and payout.status == 'bank_failed' %}
+    <article class="finance-flow-note">
+      <b>申請 {{ payout.id[:8] }} · ¥{{ '{:,}'.format(payout.net_amount) }}</b>
+      <small>{{ payout.hold_reason|default('振込先と資金の戻りを確認してください') }}</small>
+      {% set recovery = payout.failed_payout_recovery|default({}) %}
+      {% if payout.paid_at %}<p>着金履歴があります。個別の会計確認が必要です。</p>
+      {% elif payment_recovery_ready %}
+      {% if recovery.status == 'proposed' %}
+      {% set action_labels = {'reverse':'分配を1件回収','reconcile':'回収結果を1件照合','release':'資金回収を確認して申請取消'} %}
+      <small>次の操作: {{ action_labels.get(recovery.action, '要確認') }} · 確認者: {{ recovery.proposed_by }}</small>
+      {% if recovery.proposed_by != user.id %}
+      <form method="post" action="/admin/payouts/{{ payout.id }}/recover-failure/approve">
+        <input type="hidden" name="proposal_id" value="{{ recovery.id }}">
+        <button data-confirm="Stripeの記録を再照合し、表示された回収・照合・申請取消を実行します。銀行への再振込は行いません。">別の管理者として{{ action_labels.get(recovery.action, '確認') }}を承認</button>
+      </form>
+      {% else %}<small>別の管理者による承認を待っています。</small>{% endif %}
+      {% endif %}
+      <form method="post" action="/admin/payouts/{{ payout.id }}/recover-failure/propose"><button>失敗・資金返却・分配を読み取り照合</button></form>
+      {% endif %}
+    </article>
+    {% else %}<p>復旧対象の振込失敗はありません。</p>{% endfor %}
+  </details>
+
   <details id="payment-recovery" class="finance-details">
     <summary>結果不明の購入・追加支払い・返金を照合する（テスト環境）</summary>
     <p>Stripeの記録を読むだけで、再請求・再返金はしません。注文・金額・元決済が一致する記録を、別々の管理者2名が2段階認証後に確認します。0件・複数件・不一致の場合は保留を継続します。</p>

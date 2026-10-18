@@ -53,6 +53,7 @@ from .finance import FinanceConflict, PAYOUT_LABELS, balance as ledger_balance, 
 from .payout_worker import sandbox_payouts_ready
 from .refunds import request_order_refunds
 from .reconciliation import propose_recovery, approve_recovery
+from .payout_recovery import propose_failed_payout, approve_failed_payout
 from .payment_reconciliation import KINDS as PAYMENT_RECOVERY_KINDS, payment_recovery_inventory, propose_payment_recovery, approve_payment_recovery
 from .refund_resumption import refund_resumption_inventory, propose_refund_resumption, approve_refund_resumption
 from .deployment_check import configuration_checks
@@ -2590,6 +2591,28 @@ async def admin_reconcile_payout(request: Request, payout_id: str, action: str, 
             await propose_recovery(database_store, store, stripe, settings, payout, user["id"])
         else:
             await approve_recovery(database_store, store, stripe, settings, payout, user["id"], proposal_id)
+    except (FinanceConflict, RuntimeError) as exc:
+        raise HTTPException(409, str(exc)) from None
+    return RedirectResponse("/admin#finance", 303)
+
+
+@app.post("/admin/payouts/{payout_id}/recover-failure/{action}")
+async def admin_recover_failed_payout(request: Request, payout_id: str, action: str, proposal_id: str = Form("")):
+    user = current_user(request)
+    if not is_admin(user) or action not in {"propose", "approve"}:
+        raise HTTPException(403)
+    if not database_store or not sandbox_payouts_ready(settings):
+        raise HTTPException(409, "振込失敗の復旧は接続済みのテスト環境のみ操作できます")
+    if not mfa.recent(request):
+        return RedirectResponse("/security/mfa?next=/admin", 303)
+    payout = next((p for p in store.payouts if p["id"] == payout_id and p.get("finance_v2")), None)
+    if not payout:
+        raise HTTPException(404)
+    try:
+        if action == "propose":
+            await propose_failed_payout(database_store, store, stripe, settings, payout, user["id"])
+        else:
+            await approve_failed_payout(database_store, store, stripe, settings, payout, user["id"], proposal_id)
     except (FinanceConflict, RuntimeError) as exc:
         raise HTTPException(409, str(exc)) from None
     return RedirectResponse("/admin#finance", 303)
