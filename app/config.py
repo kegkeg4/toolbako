@@ -23,8 +23,9 @@ class Settings:
     # Demo access must always fail closed in production, even after a bad env rollout.
     demo_mode: bool = os.getenv("APP_ENV", "development").lower() != "production" and os.getenv("DEMO_MODE", "true").lower() in {"1", "true", "yes"}
     allowed_hosts: tuple[str, ...] = tuple(x.strip() for x in os.getenv("ALLOWED_HOSTS", "127.0.0.1,localhost,testserver").split(",") if x.strip())
+    canonical_redirect_hosts: tuple[str, ...] = tuple(x.strip().lower() for x in os.getenv("CANONICAL_REDIRECT_HOSTS", "").split(",") if x.strip())
     session_max_age: int = int(os.getenv("SESSION_MAX_AGE", "604800"))
-    asset_version: str = os.getenv("ASSET_VERSION", "20261009-release30")
+    asset_version: str = os.getenv("ASSET_VERSION", "20261018-auth-domain")
     # Delivery files support 50 MB; leave room for multipart metadata.
     max_request_bytes: int = int(os.getenv("MAX_REQUEST_BYTES", "52500000"))
     rate_limit_per_minute: int = int(os.getenv("RATE_LIMIT_PER_MINUTE", "120"))

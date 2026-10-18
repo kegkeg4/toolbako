@@ -1931,12 +1931,58 @@ async def password_recovery(request: Request):
     return templates.TemplateResponse(request, "password_recovery.html", context(request, error=None))
 
 
+@app.get("/auth/confirm", response_class=HTMLResponse)
+async def email_confirmation(request: Request):
+    # Email tokens arrive in the URL fragment, never in our request URL/logs.
+    # Loading the page (including a mail scanner's prefetch) consumes no token.
+    csrf = request.session.setdefault("mail_confirm_csrf", secrets.token_urlsafe(32))
+    return templates.TemplateResponse(request, "email_confirmation.html", context(request, confirmation_csrf=csrf),
+                                      headers={"Referrer-Policy": "no-referrer"})
+
+
+@app.post("/auth/confirm", response_class=HTMLResponse)
+async def email_confirmation_submit(request: Request, token_hash: str = Form(""),
+                                    confirmation_type: str = Form(""), confirmation_csrf: str = Form("")):
+    expected_csrf = str(request.session.pop("mail_confirm_csrf", ""))
+    if not expected_csrf or not re.fullmatch(r"[A-Za-z0-9_-]{43}", confirmation_csrf) or not hmac.compare_digest(expected_csrf, confirmation_csrf):
+        raise HTTPException(403, "確認画面を開き直してください。")
+    if confirmation_type not in {"signup", "recovery"} or not re.fullmatch(r"[A-Za-z0-9_-]{32,256}", token_hash):
+        raise HTTPException(400, "確認リンクが無効です。")
+    if not settings.supabase_ready:
+        raise HTTPException(503, "認証サービスに接続できません。時間をおいてお試しください。")
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            result = await client.post(f"{settings.supabase_url}/auth/v1/verify",
+                                       headers={"apikey": settings.supabase_anon_key},
+                                       json={"token_hash": token_hash, "type": "email" if confirmation_type == "signup" else "recovery"})
+        payload = result.json() if result.status_code == 200 else {}
+        valid_user = isinstance(payload, dict) and isinstance(payload.get("user"), dict) and payload["user"].get("id")
+    except (httpx.HTTPError, ValueError):
+        payload, valid_user = {}, False
+    if not valid_user:
+        return templates.TemplateResponse(request, "email_confirmation.html",
+                                          context(request, confirmation_error="リンクが無効または期限切れです。登録・再設定の案内からやり直してください。"),
+                                          status_code=400, headers={"Referrer-Policy": "no-referrer"})
+    if confirmation_type == "signup":
+        # Confirmation alone must not create an application login/admin session.
+        return RedirectResponse("/login?email_confirmed=1", 303, headers={"Referrer-Policy": "no-referrer"})
+    access_token = payload.get("access_token")
+    if not isinstance(access_token, str) or not 20 <= len(access_token) <= 4096:
+        raise HTTPException(400, "再設定リンクが無効です。再設定メールをもう一度送信してください。")
+    # Keep recovery credentials out of redirects, cookies and persistent state.
+    return templates.TemplateResponse(request, "password_recovery.html", context(request, error=None, recovery_access_token=access_token),
+                                      headers={"Referrer-Policy": "no-referrer"})
+
+
 @app.post("/auth/recovery", response_class=HTMLResponse)
 async def password_recovery_submit(request: Request, access_token: str = Form(...), password: str = Form(...), password_confirmation: str = Form(...)):
     if not settings.supabase_ready:
         raise HTTPException(503, "パスワード再設定基盤が未設定です")
     if not 10 <= len(password) <= 128 or password != password_confirmation or not 20 <= len(access_token) <= 4096:
-        return templates.TemplateResponse(request, "password_recovery.html", context(request, error="パスワードは10文字以上で、確認欄と同じ内容を入力してください。"), status_code=422)
+        return templates.TemplateResponse(request, "password_recovery.html", context(request,
+                                          error="パスワードは10文字以上で、確認欄と同じ内容を入力してください。",
+                                          recovery_access_token=access_token if 20 <= len(access_token) <= 4096 else ""),
+                                          status_code=422, headers={"Referrer-Policy": "no-referrer"})
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             result = await client.put(

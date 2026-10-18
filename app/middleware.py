@@ -13,7 +13,7 @@ from uuid import uuid4
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse, Response
+from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from .request_context import request_id_context
 from .request_limits import RequestBodyLimitMiddleware
 
@@ -59,6 +59,19 @@ class ProductionGuardMiddleware(BaseHTTPMiddleware):
         request_id_context.set(request_id)
         request.state.request_id = request_id
         request.state.csp_nonce = secrets.token_urlsafe(18)
+        canonical = urlparse(self.settings.site_base_url)
+        if (request.method in {"GET", "HEAD"}
+                and request.url.hostname in self.settings.canonical_redirect_hosts
+                and request.url.hostname != canonical.hostname
+                and canonical.scheme == "https" and canonical.hostname
+                and not canonical.username and not canonical.password
+                and canonical.path in {"", "/"} and not canonical.query and not canonical.fragment
+                and security_path not in {"/healthz", "/readyz", "/deploymentz"}
+                and not security_path.startswith("/webhooks/")):
+            # Only explicitly configured legacy hosts move. Never forward a
+            # submitted password/body or trust a caller-provided destination.
+            destination = str(request.url.replace(scheme="https", netloc=canonical.netloc))
+            return self._finish(RedirectResponse(destination, 307, headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"}), request, request_id)
         if not security_path.startswith(("/static/", "/healthz", "/readyz", "/deploymentz")):
             forwarded = request.headers.get("x-forwarded-for", "").split(",")[0].strip()
             direct_ip = request.client.host if request.client else "unknown"

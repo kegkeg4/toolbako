@@ -6,6 +6,8 @@
   {% if 'google' in oauth_providers %}<a class="oauth" href="/auth/oauth/google?next={{ next|urlencode }}"><b>G</b> Google でログイン</a>{% endif %}
   {% if oauth_providers %}<div class="auth-divider"><span>またはメールでログイン</span></div>{% endif %}
   {% if error %}<div class="form-error" role="alert">{{ error }}</div>{% endif %}
+  {% if request.query_params.get('registered') == '1' %}<div class="success-panel" role="status"><b>確認メールをご確認ください</b><p>メール内のリンクから確認した後、ログインしてください。届かない場合は迷惑メールフォルダーもご確認ください。</p></div>{% endif %}
+  {% if request.query_params.get('email_confirmed') == '1' %}<div class="success-panel" role="status"><b>メールの確認が完了しました</b><p>登録したメールアドレスとパスワードでログインしてください。</p></div>{% endif %}
   <form method="post"><input type="hidden" name="next" value="{{ next }}">
     <div class="field"><label for="login-email">メールアドレス</label><input id="login-email" type="email" name="email" value="{{ email or '' }}" maxlength="254" required autocomplete="email"></div>
     <div class="field"><label for="login-password">パスワード</label><input id="login-password" type="password" name="password" minlength="10" maxlength="128" required autocomplete="current-password"></div>

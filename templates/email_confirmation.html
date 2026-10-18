@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}メールの確認 — ツールバコ{% endblock %}
+{% block content %}
+<section class="auth-page"><div class="auth-card"><img class="auth-brand-icon" src="/static/brand/toolbako-icon.png?v={{ asset_version }}" width="192" height="192" alt="ツールバコ">
+<h1 data-confirmation-title>メールアドレスの確認</h1>
+{% if confirmation_error %}
+<div class="form-error" role="alert">{{ confirmation_error }}</div>
+<p><a href="/signup">会員登録へ</a> · <a href="/forgot-password">パスワード再設定へ</a></p>
+{% else %}
+<p data-confirmation-description>ご自身で申し込んだ内容であることを確認し、下のボタンを押してください。</p>
+<form method="post" action="/auth/confirm" data-email-confirmation-form hidden>
+<input type="hidden" name="confirmation_csrf" value="{{ confirmation_csrf }}">
+<input type="hidden" name="token_hash" data-confirmation-token>
+<input type="hidden" name="confirmation_type" data-confirmation-type>
+<button class="button large full" data-confirmation-submit>メールアドレスを確認する</button>
+</form>
+<div class="form-error" role="alert" data-confirmation-error hidden>確認リンクが無効です。メールにあるリンクから、もう一度開いてください。</div>
+<noscript><p>確認するにはブラウザーのJavaScriptを有効にして、メールのリンクを開き直してください。</p></noscript>
+<p>心当たりがない場合は、操作せずにこの画面を閉じてください。</p>
+{% endif %}
+<small><a href="/login">ログインへ戻る</a></small>
+</div></section>
+{% endblock %}

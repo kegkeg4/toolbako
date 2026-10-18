@@ -146,13 +146,43 @@ document.addEventListener('click', async (event) => {
   }
 });
 
+const confirmationForm = document.querySelector('[data-email-confirmation-form]');
+if (confirmationForm) {
+  const loadConfirmationLink = () => {
+    const fragment = new URLSearchParams(location.hash.slice(1));
+    const token = fragment.get('token_hash') || '';
+    const type = fragment.get('type');
+    history.replaceState(null, '', location.pathname);
+    confirmationForm.hidden = true;
+    confirmationForm.querySelector('[data-confirmation-token]').value = '';
+    confirmationForm.querySelector('[data-confirmation-type]').value = '';
+    document.querySelector('[data-confirmation-error]').hidden = true;
+    if (/^[A-Za-z0-9_-]{32,256}$/.test(token) && ['signup', 'recovery'].includes(type)
+        && fragment.getAll('token_hash').length === 1 && fragment.getAll('type').length === 1) {
+      confirmationForm.querySelector('[data-confirmation-token]').value = token;
+      confirmationForm.querySelector('[data-confirmation-type]').value = type;
+      confirmationForm.hidden = false;
+      document.querySelector('[data-confirmation-title]').textContent = type === 'recovery' ? 'パスワードの再設定' : 'メールアドレスの確認';
+      document.querySelector('[data-confirmation-submit]').textContent = type === 'recovery' ? '新しいパスワードの入力へ' : 'メールアドレスを確認する';
+    } else {
+      document.querySelector('[data-confirmation-error]').hidden = false;
+    }
+  };
+  loadConfirmationLink();
+  window.addEventListener('hashchange', () => {
+    const fragment = new URLSearchParams(location.hash.slice(1));
+    if (fragment.has('token_hash') || fragment.has('type')) loadConfirmationLink();
+  });
+}
+
 const recoveryForm = document.querySelector('[data-recovery-form]');
 if (recoveryForm) {
   const hash = new URLSearchParams(location.hash.slice(1));
-  const token = hash.get('access_token');
+  const suppliedToken = recoveryForm.querySelector('[data-recovery-token]').value;
+  const token = suppliedToken || hash.get('access_token');
   const recoveryType = hash.get('type');
   const error = document.querySelector('[data-recovery-error]');
-  if (token && recoveryType === 'recovery') {
+  if (token && (suppliedToken || recoveryType === 'recovery')) {
     recoveryForm.querySelector('[data-recovery-token]').value = token;
     history.replaceState(null, '', location.pathname);
   } else {
