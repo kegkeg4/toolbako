@@ -33,7 +33,10 @@ document.addEventListener('keydown', (event) => {
   header.classList.remove('nav-open');
   const button = header.querySelector('[data-nav-toggle]');
   button?.setAttribute('aria-expanded', 'false');
-  if (button) button.textContent = '☰';
+  if (button) {
+    button.textContent = '☰';
+    button.focus();
+  }
 });
 
 document.addEventListener('submit', (event) => {
