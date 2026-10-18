@@ -149,16 +149,15 @@ def test_live_stripe_writes_are_blocked_until_ledger_is_ready(key):
         asyncio.run(stripe._post("transfers", {"amount": "1000"}))
 
 
-def test_subscription_does_not_send_payment_intent_parameters(monkeypatch):
-    stripe = StripeIntegration("sk_test_example", "https://example.com", charge_mode="destination")
-    async def capture(path, data):
-        return data
-    monkeypatch.setattr(stripe, "_post", capture)
-    order = {"id": "one", "tool_slug": "tool", "amount": 1000, "platform_fee": 180, "platform_fee_rate": .18, "tool_name": "test", "billing_type": "subscription"}
-    data = asyncio.run(stripe.create_checkout(order, "acct_test"))
-    assert not any(key.startswith("payment_intent_data") for key in data)
-    assert data["subscription_data[application_fee_percent]"] == "18.0"
-    stripe.charge_mode = "separate"
+@pytest.mark.parametrize("mode", ["destination", "separate"])
+@pytest.mark.parametrize("billing_type", ["subscription", "unexpected", None])
+def test_subscription_checkout_cannot_reach_stripe(monkeypatch, mode, billing_type):
+    stripe = StripeIntegration("sk_test_example", "https://example.com", charge_mode=mode)
+    async def forbidden(*args, **kwargs):
+        pytest.fail("A deferred billing type must not contact Stripe")
+    monkeypatch.setattr(stripe, "_post", forbidden)
+    order = {"id": "one", "tool_slug": "tool", "amount": 1000, "platform_fee": 200,
+             "tool_name": "test", "billing_type": billing_type}
     with pytest.raises(RuntimeError, match="月額契約"):
         asyncio.run(stripe.create_checkout(order, "acct_test"))
 

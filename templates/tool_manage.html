@@ -26,7 +26,9 @@
       </section>
       <label>購入にあたってのお願い<textarea name="purchase_notes" maxlength="2000" rows="5">{{ tool.purchase_notes|default('') }}</textarea></label>
       <div class="faq-editor"><b>よくある質問</b>{% for index in range(3) %}{% set item = tool.faq[index] if tool.faq|default([])|length > index else {} %}<div class="faq-editor-row"><label>質問 {{ index+1 }}<input name="faq_question" value="{{ item.question|default('') }}" maxlength="120"></label><label>回答 {{ index+1 }}<textarea name="faq_answer" maxlength="500" rows="2">{{ item.answer|default('') }}</textarea></label></div>{% endfor %}</div>
+      {% if subscription_checkout_ready %}
       <div class="subscription-setting"><label class="agreement"><input type="checkbox" name="supports_subscription" value="yes" {% if tool.supports_subscription %}checked{% endif %}><span>月額プランも提供する</span></label><label>月額料金<input type="number" name="subscription_price" value="{{ tool.subscription_price }}" min="0"></label></div>
+      {% else %}<p role="note">現在は買い切りのみ出品できます。月額プランは今後の対応予定です。</p>{% endif %}
       <button class="button large">変更を保存</button>
     </form>
     <section class="manage-form version-manager"><div><span class="section-kicker">CHANGELOG</span><h2>更新情報を公開</h2><p>フォロー中の利用者へ通知され、商品ページの更新履歴に追加されます。</p></div><form action="/seller/tools/{{ tool.slug }}/versions" method="post"><div class="field-grid"><label>バージョン<input name="version" maxlength="20" placeholder="例：2.1.0" required></label><label>更新内容<input name="title" minlength="3" maxlength="120" placeholder="例：CSV出力に対応" required></label></div><button class="outline-button">更新を公開</button></form><div class="version-preview">{% for version in tool.versions[:5] %}<p><b>v{{ version.version }}</b><span>{{ version.title }}</span><time>{{ version.date }}</time></p>{% else %}<p>更新情報はまだありません。</p>{% endfor %}</div></section>

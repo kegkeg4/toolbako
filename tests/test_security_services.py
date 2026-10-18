@@ -126,6 +126,7 @@ def test_failure_recovery_staleness_and_output_privacy(monkeypatch):
         return "ready"
     monkeypatch.setattr(services, "probe_clamav", clamav)
     monkeypatch.setattr(services, "probe_redis", redis)
+    monkeypatch.setattr(services, "probe_clamav_signatures", redis)
     monitor = services.SecurityServiceMonitor(configured(), clock=lambda: now[0])
     assert not monitor.snapshot()["fresh"]
     async def scenario():
@@ -168,6 +169,7 @@ def test_monitor_cancellation_invalidates_healthy_state(monkeypatch):
         return "ready"
     monkeypatch.setattr(services, "probe_clamav", ready)
     monkeypatch.setattr(services, "probe_redis", ready)
+    monkeypatch.setattr(services, "probe_clamav_signatures", ready)
     async def scenario():
         observed = asyncio.Event()
         events = []
@@ -189,7 +191,7 @@ def test_monitor_cancellation_invalidates_healthy_state(monkeypatch):
 
 def test_configured_endpoints_cannot_pass_readiness_without_current_probes():
     for values, expected in [(None, False), ({"clamav": "ready", "redis": 1}, False),
-                             ({"clamav": True, "redis": True}, True)]:
+                             ({"clamav": True, "redis": True, "clamav_signatures": True}, True)]:
         checks = {c["key"]: c["ok"] for c in readiness_summary(configured(), runtime_security_ready=values)["checks"]}
         assert checks["file_scan"] is expected
         assert checks["distributed_rate_limits"] is expected
@@ -207,6 +209,7 @@ def test_app_lifespan_observes_existing_services_and_stops_on_shutdown(monkeypat
         return True
     monkeypatch.setattr(services, "probe_clamav", ready)
     monkeypatch.setattr(services, "probe_redis", ready)
+    monkeypatch.setattr(services, "probe_clamav_signatures", ready)
     monkeypatch.setattr(main, "settings", configured())
     monkeypatch.setattr(main, "database_store", SimpleNamespace(probe=db_probe))
     with TestClient(main.app) as client:
@@ -216,10 +219,10 @@ def test_app_lifespan_observes_existing_services_and_stops_on_shutdown(monkeypat
         checks = {c["key"]: c["ok"] for c in response.json()["checks"]}
         assert checks["file_scan"] and checks["distributed_rate_limits"]
         monitor = main.app.state.security_services
-        assert len(checked) == 2
+        assert len(checked) == 3
         for _ in range(5):
             assert client.get("/readyz").json()["security_services"]["fresh"]
-        assert len(checked) == 2
+        assert len(checked) == 3
         monkeypatch.setattr(main, "settings", configured(clamav_host="different.example"))
         assert not main.security_service_snapshot()["fresh"]
     assert main.app.state.security_services is None

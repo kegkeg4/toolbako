@@ -1,6 +1,12 @@
 #!/bin/sh
 set -eu
 
+# VERSION reports a timezone-less ctime string; keep the monitoring contract
+# explicit even if the hosting environment supplies a different timezone.
+TZ=UTC0
+LC_ALL=C
+export TZ LC_ALL
+
 clam_pid=''
 update_pid=''
 cleanup() {

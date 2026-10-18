@@ -260,6 +260,7 @@ def seo_metadata(request: Request) -> dict:
 
 def context(request: Request, **values):
     values["delivery_upload_ready"] = delivery_upload_available(settings)
+    values["subscription_checkout_ready"] = settings.demo_mode
     status_labels = {"in_progress":"取引中","awaiting_acceptance":"納品確認待ち","completed":"取引完了","cancel_pending":"キャンセル確認中","cancelled":"キャンセル済み"}
     user = current_user(request)
     unread_notification_count = sum(1 for item in store.notifications if user and item.get("user_id") == user["id"] and not item.get("read"))
@@ -694,7 +695,7 @@ async def checkout(request: Request, slug: str):
     owned = next((x for x in store.orders if x["buyer_id"] == user["id"] and x["tool_slug"] == slug and x["status"] != "cancelled" and x.get("payment_status", "paid") not in {"cancelled", "expired"}), None)
     if store.blocked_between(user["id"], user["username"], tool["author_id"], tool["author_username"]): raise HTTPException(403, "この販売者の商品は購入できません")
     active_orders = store.tool_active_orders(slug)
-    return templates.TemplateResponse(request, "checkout.html", context(request, tool=tool, owned=owned, active_orders=active_orders, sold_out=active_orders >= tool.get("capacity", 5), subscription_checkout_ready=settings.demo_mode or settings.stripe_charge_mode == "destination"))
+    return templates.TemplateResponse(request, "checkout.html", context(request, tool=tool, owned=owned, active_orders=active_orders, sold_out=active_orders >= tool.get("capacity", 5)))
 
 
 @app.post("/api/coupons/preview")
@@ -704,7 +705,7 @@ async def coupon_preview(request: Request, slug: str = Form(...), code: str = Fo
     tool = store.get_public(slug)
     if not tool or tool.get("price_type") != "paid" or billing_type not in {"one_time","subscription"}:
         raise HTTPException(404)
-    if billing_type == "subscription" and not tool.get("supports_subscription"):
+    if billing_type == "subscription" and (not settings.demo_mode or not tool.get("supports_subscription")):
         raise HTTPException(422, "この月額プランは利用できません")
     selected_options = [item for item in tool.get("options", []) if item["id"] in options]
     base_amount = tool["subscription_price"] if billing_type == "subscription" else tool["price"]
@@ -721,8 +722,8 @@ async def checkout_complete(request: Request, slug: str, options: list[str] = Fo
     tool = store.get(slug)
     if tool and tool["author_id"] == user["id"]: raise HTTPException(403, "自分の商品は購入できません")
     if billing_type not in {"one_time","subscription"} or purchase_agreement != "yes": raise HTTPException(422)
-    if billing_type == "subscription" and not settings.demo_mode and settings.stripe_charge_mode == "separate":
-        raise HTTPException(409, "月額契約は売上分配の検証中です。現在は買い切りをご利用ください")
+    if billing_type == "subscription" and not settings.demo_mode:
+        raise HTTPException(409, "現在は買い切りのみご利用いただけます。月額プランは今後の対応予定です")
     try: order, created = store.buy(user, slug, options, coupon, billing_type, payment_pending=not settings.demo_mode, return_created=True)
     except ValueError as exc:
         if str(exc) == "blocked": raise HTTPException(403, "この販売者の商品は購入できません") from exc
@@ -1408,6 +1409,8 @@ async def seller_tool_save(
     purchase_notes = clean_visible_text(purchase_notes, 0, 2000, "購入にあたってのお願い", preserve_lines=True)
     minimum_price = 100 if tool.get("price_type") == "paid" else 0
     if not minimum_price <= price <= 1_000_000 or fulfillment_type not in {"instant","custom"} or not 1 <= capacity <= 50 or not 0 <= support_days <= 365 or not 1 <= estimated_delivery_days <= 120: raise HTTPException(422)
+    if supports_subscription == "yes" and not settings.demo_mode:
+        raise HTTPException(409, "現在は買い切りのみ出品できます。月額プランは今後の対応予定です")
     if supports_subscription == "yes" and not 100 <= subscription_price <= 1_000_000: raise HTTPException(422)
     if tool.get("price_type") == "consultation": fulfillment_type = "custom"
     if len(faq_question) > 5 or len(faq_answer) > 5: raise HTTPException(422, "よくある質問は5件以内で入力してください")

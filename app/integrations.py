@@ -164,28 +164,18 @@ class StripeIntegration:
 
     def checkout_data(self, order: dict[str, Any], destination: str) -> dict[str, Any]:
         """One canonical payload for submission and read-only reconciliation."""
-        if self.charge_mode == "separate" and order.get("billing_type") == "subscription":
-            raise RuntimeError("月額契約は請求ごとの売上分配を検証するまで受付を停止しています")
+        if order.get("billing_type", "one_time") != "one_time":
+            raise RuntimeError("月額契約は今後の対応予定です。初回公開は買い切りのみです")
         cancel_path = order.get("checkout_cancel_path") or f"/checkout/{order['tool_slug']}"
-        data: dict[str, Any] = {"_idempotency_key":f"checkout-{order['id']}","mode":"subscription" if order.get("billing_type")=="subscription" else "payment","success_url":f"{self.base_url}/orders/{order['id']}?payment=success","cancel_url":f"{self.base_url}{cancel_path}?payment=cancelled","line_items[0][quantity]":"1","line_items[0][price_data][currency]":"jpy","line_items[0][price_data][unit_amount]":str(order["amount"]),"line_items[0][price_data][product_data][name]":order["tool_name"],"metadata[order_id]":order["id"]}
+        data: dict[str, Any] = {"_idempotency_key":f"checkout-{order['id']}","mode":"payment","success_url":f"{self.base_url}/orders/{order['id']}?payment=success","cancel_url":f"{self.base_url}{cancel_path}?payment=cancelled","line_items[0][quantity]":"1","line_items[0][price_data][currency]":"jpy","line_items[0][price_data][unit_amount]":str(order["amount"]),"line_items[0][price_data][product_data][name]":order["tool_name"],"metadata[order_id]":order["id"]}
         if order.get("buyer_email"):
             data["customer_email"] = order["buyer_email"]
-        if order.get("billing_type") == "subscription":
-            data["line_items[0][price_data][recurring][interval]"] = "month"
-            data["subscription_data[metadata][order_id]"] = order["id"]
-            if self.charge_mode == "destination":
-                rate = order.get("platform_fee_rate", settings.platform_fee_rate)
-                data["subscription_data[application_fee_percent]"] = str(round(rate * 100, 2))
-                data["subscription_data[transfer_data][destination]"] = destination
-            # payment_intent_data is invalid in subscription mode. The eventual
-            # separate-transfer worker must allocate each paid invoice itself.
+        data["payment_intent_data[metadata][order_id]"] = order["id"]
+        if self.charge_mode == "destination":
+            data["payment_intent_data[application_fee_amount]"] = str(order["platform_fee"])
+            data["payment_intent_data[transfer_data][destination]"] = destination
         else:
-            data["payment_intent_data[metadata][order_id]"] = order["id"]
-            if self.charge_mode == "destination":
-                data["payment_intent_data[application_fee_amount]"] = str(order["platform_fee"])
-                data["payment_intent_data[transfer_data][destination]"] = destination
-            else:
-                data["payment_intent_data[transfer_group]"] = f"order-{order['id']}"
+            data["payment_intent_data[transfer_group]"] = f"order-{order['id']}"
         return data
 
     async def create_checkout(self, order: dict[str, Any], destination: str) -> dict[str, Any]:

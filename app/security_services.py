@@ -1,7 +1,7 @@
 """Bounded, read-only checks of the existing private security services.
 
-PING proves connectivity, not malware detection, signature freshness, shared
-counter correctness, or alert delivery. Never send files or change Redis keys.
+PING proves connectivity; VERSION checks the loaded daily database age, not
+malware detection, shared counters, or alert delivery. Never send files or keys.
 Only fixed status fields leave this module; no URLs, credentials or exceptions.
 """
 from __future__ import annotations
@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 import json
+import re
 from time import monotonic
 
 from redis.asyncio import Redis
@@ -17,7 +18,56 @@ INTERVAL_SECONDS = 60
 MAX_AGE_SECONDS = 120
 PROBE_TIMEOUT_SECONDS = 3
 CLOSE_TIMEOUT_SECONDS = 0.25
-SERVICES = ("clamav", "redis")
+SERVICES = ("clamav", "redis", "clamav_signatures")
+SIGNATURE_MAX_AGE_SECONDS = 72 * 3600
+SIGNATURE_FUTURE_TOLERANCE_SECONDS = 300
+
+
+def signature_status(reply: bytes, now: datetime) -> str:
+    # clamd VERSION uses ctime in the daemon's timezone. Our scanner entrypoint
+    # pins TZ=UTC0 and LC_ALL=C. Do not infer a timezone from the web process.
+    match = re.fullmatch(
+        rb"ClamAV [0-9]+\.[0-9]+\.[0-9]+/[1-9][0-9]*/"
+        rb"(Mon|Tue|Wed|Thu|Fri|Sat|Sun) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) "
+        rb"( [1-9]|[0-3][0-9]) ([0-2][0-9]):([0-5][0-9]):([0-5][0-9]) ([0-9]{4})\x00",
+        reply,
+    )
+    if not match:
+        return "unavailable"
+    weekday, month, day, hour, minute, second, year = (x.decode("ascii") for x in match.groups())
+    try:
+        stamp = datetime(int(year), "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split().index(month) + 1,
+                         int(day), int(hour), int(minute), int(second), tzinfo=timezone.utc)
+        if "Mon Tue Wed Thu Fri Sat Sun".split()[stamp.weekday()] != weekday:
+            return "unavailable"
+        age = (now - stamp).total_seconds()
+    except (ValueError, TypeError):
+        return "unavailable"
+    if age < -SIGNATURE_FUTURE_TOLERANCE_SECONDS:
+        return "clock_invalid"
+    return "definitions_stale" if age > SIGNATURE_MAX_AGE_SECONDS else "ready"
+
+
+async def probe_clamav_signatures(settings) -> str:
+    if not settings.clamav_host:
+        return "not_configured"
+    writer = None
+    try:
+        async with asyncio.timeout(PROBE_TIMEOUT_SECONDS):
+            reader, writer = await asyncio.open_connection(settings.clamav_host, settings.clamav_port, limit=128)
+            writer.write(b"zVERSION\0")
+            await writer.drain()
+            return signature_status(await reader.readuntil(b"\0"), datetime.now(timezone.utc))
+    except Exception:
+        return "unavailable"
+    finally:
+        if writer is not None:
+            writer.close()
+            try:
+                async with asyncio.timeout(CLOSE_TIMEOUT_SECONDS):
+                    await writer.wait_closed()
+            except Exception:
+                pass
 
 
 async def probe_clamav(settings) -> str:
@@ -122,9 +172,10 @@ class SecurityServiceMonitor:
                     async with asyncio.TaskGroup() as group:
                         clamav = group.create_task(probe_clamav(self.settings))
                         redis = group.create_task(probe_redis(self.settings))
-                    results = (clamav.result(), redis.result())
+                        signatures = group.create_task(probe_clamav_signatures(self.settings))
+                    results = (clamav.result(), redis.result(), signatures.result())
                 self._states = {
-                    name: status if status in {"ready", "unavailable", "not_configured"} else "unavailable"
+                    name: status if status in {"ready", "unavailable", "not_configured", "definitions_stale", "clock_invalid"} else "unavailable"
                     for name, status in zip(SERVICES, results)
                 }
             except Exception:
