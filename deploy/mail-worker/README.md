@@ -10,6 +10,12 @@
 
 Railwayでは新規変数を初回配備前に封印した際、実行環境で値が空になった。作成済みの封印欄をEditし、同じ専用値を再入力・配備して解消した。変数一覧の封印表示だけを完了判定にせず、実行環境で値の存在とDB接続・送信を確認する。秘密値は記録しない。
 
+## 現在の起動構成（2026-10-18 13時台 JST）
+
+その後、送信なしの継続監視へ更新した。稼働commitは`14856a2cc2d7507e0339dc6b8b52394af05034fd`、deploymentは`ecb88fde-1fd1-4b59-9aa5-c37e43691e48`。Start Commandは`python -m app.mail_monitor --watch --interval 60`。Railway Active、60秒待機を挟んだ3回の実DB確認、`attention`/warning、pending/overdue各2、読取専用・送信無効を確認した。主プロセスUID 10001、保留2件の試行回数0と処理状態ハッシュ不変、人工通知sent/試行1を再確認。単発監視は終了値2のまま。旧dry-run配備は現在Removed表示で、当時のCrashedは検証記録に保持する。
+
+資源上限1 CPU/0.5 GB、1 replica、非公開、Volumeなし、Cron未設定、Restart Neverを維持。release branchは接続し、別のDisable操作でAuto deploy無効を確認した。新サービス・権限・秘密値・実送信は追加していない。監視ログはRailway内だけで、担当者への外部アラートは未接続。証跡は`work/mail-monitor-verification.json`と`work/mail-monitor-live.png`。
+
 ## 初回構成
 
 - 対象：既存Railway `rare-manifestation` の専用 `toolbako-mail-worker`。
@@ -47,7 +53,7 @@ RLSは維持し、送信済み/reviewの行はworkerがpendingに戻せない。
 
 `attention`/warningは滞留等の要確認であり、サービス停止とは分けてログに残す。`unavailable`/errorが3回続いた場合は終了値1。1回の確認は15秒まで、確認後60秒待つ。各ログには確認時刻、最終成功時刻、6種類の件数、連続失敗回数、読取専用・送信無効を記録し、メール本文・宛先・例外文字列は含めない。停止信号では安全に終了する。Activeだけでは通知到達・業務正常・アラート連絡の合格にしない。詳細は[運用手順](../../MAIL_OPERATIONS.md)。
 
-単発診断の終了値2を0へ書き換えない。`python -m app.mail_monitor`（watchなし）と既存`app.mail_worker --dry-run`は滞留時に2のまま。既存の最後のdry-run配備のCrashed履歴は履歴として残す。
+単発診断の終了値2を0へ書き換えない。`python -m app.mail_monitor`（watchなし）と既存`app.mail_worker --dry-run`は滞留時に2のまま。旧dry-runの検証記録は保持する。
 
 送信処理終了、15分以上の滞留、期限切れclaim、review、起動失敗を検知する。監視からメール本文・宛先・秘密値を外部へ送らない。診断終了値2は滞留等の要確認、1は診断/送信失敗。Restartを連続再実行に使わず、原因を確認する。
 
