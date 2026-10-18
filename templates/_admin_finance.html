@@ -115,7 +115,7 @@
       {% if recovery.proposed_by != user.id %}
       <form method="post" action="/admin/payouts/{{ payout.id }}/recover-failure/approve">
         <input type="hidden" name="proposal_id" value="{{ recovery.id }}">
-        <button data-confirm="Stripeの記録を再照合し、表示された回収・照合・申請取消を実行します。銀行への再振込は行いません。">別の管理者として{{ action_labels.get(recovery.action, '確認') }}を承認</button>
+        <button data-confirm="Stripeの記録を再照合し、表示された回収・照合・申請取消を実行します。銀行への再振込は行いません。">別の管理者として承認：{{ action_labels.get(recovery.action, '確認') }}</button>
       </form>
       {% else %}<small>別の管理者による承認を待っています。</small>{% endif %}
       {% endif %}
