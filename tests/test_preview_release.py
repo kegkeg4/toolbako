@@ -57,6 +57,8 @@ def test_production_keeps_public_seo_and_filters_nonindexable(monkeypatch):
     assert metadata('/')['preview_mode'] is False
     assert metadata('/tools', b'q=AI')['robots_value'] == 'noindex, follow'
     assert metadata('/admin')['robots_value'] == 'noindex, nofollow'
+    for path in ('/forgot-password', '/favorites', '/auth/recovery', '/auth/confirm'):
+        assert metadata(path)['robots_value'] == 'noindex, nofollow'
     sitemap = asyncio.run(main.sitemap())
     assert b'<loc>' in sitemap.body
     assert b'Sitemap:' in asyncio.run(main.robots()).body

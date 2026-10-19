@@ -1,5 +1,6 @@
 {% extends "base.html" %}
-{% block title %}ツールを探す — ツールバコ{% endblock %}
+{% block title %}{% if selected_category %}{{ selected_category }}のAIツール{% else %}AIツールを探す{% endif %} — ツールバコ{% endblock %}
+{% block description %}{% if selected_category %}{{ selected_category }}に使えるAIツールを探せます。{% else %}仕事効率化、開発、画像制作など、目的に合うAIツールを探せます。{% endif %}料金や提供方法、使い方を確認し、制作者への相談・購入につなげられます。{% endblock %}
 {% block content %}
 <section class="page-hero compact"><span class="section-kicker">DISCOVER</span><h1>ツールを見つける</h1><p>誰かが作った、ちょっと便利で面白いAIツールたち。</p></section>
 <form class="filters" method="get" role="search">

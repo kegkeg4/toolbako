@@ -223,7 +223,7 @@ def seo_metadata(request: Request) -> dict:
         "/verification", "/library", "/payouts", "/purchases", "/subscriptions", "/notifications",
         "/updates", "/account/", "/checkout/", "/auth/", "/transfer-inquiries/",
     )
-    private_paths = {"/login", "/signup", "/tools/new", "/requests/new", "/nda"}
+    private_paths = {"/login", "/signup", "/forgot-password", "/favorites", "/tools/new", "/requests/new", "/nda"}
     robots_value = "noindex, nofollow" if path.startswith(private_prefixes) or path in private_paths else "index, follow, max-image-preview:large"
     canonical_path = path.rstrip("/") or "/"
     query = request.query_params

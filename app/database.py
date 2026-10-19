@@ -13,6 +13,8 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
+import time
 from uuid import uuid4
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -34,7 +36,9 @@ DATABASE_FAILURE_CODES = frozenset({
     "tls_connection_failed", "network_connection_failed", "connection_failed",
     "schema_missing", "schema_access_denied", "schema_version_mismatch",
     "query_timeout", "schema_probe_failed",
+    "local_lock_timeout", "database_busy", "request_failed", "state_conflict",
 })
+DATABASE_REQUEST_PHASES = frozenset({"local_lock", "connect", "advisory_lock", "load", "handler", "save", "cleanup"})
 
 
 def database_failure_code(exc: Exception, *, phase: str) -> str:
@@ -78,13 +82,26 @@ def database_failure_code(exc: Exception, *, phase: str) -> str:
 class StorageUnavailable(Exception):
     """Deliberately contains no connection URL, provider payload or credential."""
 
-    def __init__(self, message="Storage unavailable", *, diagnostic_code="unavailable"):
+    def __init__(self, message="Storage unavailable", *, diagnostic_code="unavailable", diagnostic_phase=""):
         super().__init__(message)
         self.diagnostic_code = diagnostic_code if isinstance(diagnostic_code, str) and diagnostic_code in DATABASE_FAILURE_CODES else "unavailable"
+        self.diagnostic_phase = diagnostic_phase if isinstance(diagnostic_phase, str) and diagnostic_phase in DATABASE_REQUEST_PHASES else ""
 
 
 class OperationConflict(Exception):
     pass
+
+
+def request_failure_code(exc: BaseException, phase: str) -> str:
+    if isinstance(exc, StorageUnavailable):
+        code = exc.diagnostic_code
+        return code if isinstance(code, str) and code in DATABASE_FAILURE_CODES else "unavailable"
+    if isinstance(exc, TimeoutError) and phase == "local_lock":
+        return "local_lock_timeout"
+    if isinstance(exc, OperationConflict):
+        return "state_conflict"
+    code = database_failure_code(exc, phase=phase)
+    return "request_failed" if code == "schema_probe_failed" else code
 
 
 def snapshot(store) -> dict:
@@ -162,17 +179,21 @@ class PostgresStateStore:
     async def request(self, store):
         acquired = False
         conn = None
+        phase = "local_lock"
         try:
             await asyncio.wait_for(self._local_lock.acquire(), timeout=5)
             acquired = True
+            phase = "connect"
             conn = await self.connect()
+            phase = "advisory_lock"
             cursor = await conn.execute("select pg_try_advisory_lock(%s)", (LOCK_ID,))
             if not (await cursor.fetchone())[0]:
-                raise StorageUnavailable("Database is busy; retry later")
+                raise StorageUnavailable("Database is busy; retry later", diagnostic_code="database_busy")
             # The advisory lock must be acquired in an earlier statement. Do
             # not put it in this SELECT: PostgreSQL may evaluate its reads
             # before the lock expression. Schema and state, however, can be
             # read together, saving a network round trip on every navigation.
+            phase = "load"
             cursor = await conn.execute(
                 "select v.version, s.revision, s.payload "
                 "from toolbako_runtime.schema_version v "
@@ -201,25 +222,36 @@ class PostgresStateStore:
             self._connection, self._store = conn, store
             self._emails = []
         except BaseException as exc:
-            if conn:
-                await conn.close()
-            if acquired:
-                self._local_lock.release()
-            if isinstance(exc, asyncio.CancelledError):
+            try:
+                if conn:
+                    await conn.close()
+            except Exception:
+                # Preserve the original failure without printing either error.
+                pass
+            finally:
+                if acquired:
+                    self._local_lock.release()
+            if not isinstance(exc, Exception):
                 raise
-            raise StorageUnavailable("Database request could not start") from None
+            raise StorageUnavailable("Database request could not start", diagnostic_code=request_failure_code(exc, phase), diagnostic_phase=phase) from None
         try:
             yield
         finally:
             # A failed request must not leave dirty objects available to another
             # request. A pre-provider checkpoint remains durable intentionally.
-            restore(store, self._checkpoint)
-            self._connection = self._store = None
-            self._emails = []
             try:
-                await conn.close()  # Releases the session advisory lock.
+                restore(store, self._checkpoint)
+            except Exception as exc:
+                raise StorageUnavailable("Database request cleanup failed", diagnostic_code=request_failure_code(exc, "cleanup"), diagnostic_phase="cleanup") from None
             finally:
-                self._local_lock.release()
+                self._connection = self._store = None
+                self._emails = []
+                try:
+                    await conn.close()  # Releases the session advisory lock.
+                except Exception as exc:
+                    raise StorageUnavailable("Database connection cleanup failed", diagnostic_code=request_failure_code(exc, "cleanup"), diagnostic_phase="cleanup") from None
+                finally:
+                    self._local_lock.release()
 
     async def _save(self, conn, *, payload=None):
         from .finance import sync_finance
@@ -289,8 +321,8 @@ class PostgresStateStore:
             async with self._connection.transaction():
                 committed = await self._save(self._connection, payload=payload)
             self._accept_commit(committed)
-        except Exception:
-            raise StorageUnavailable("Database commit failed") from None
+        except Exception as exc:
+            raise StorageUnavailable("Database commit failed", diagnostic_code=request_failure_code(exc, "save"), diagnostic_phase="save") from None
 
     async def begin_operation(self, operation_id: str, endpoint: str, data: dict):
         """Commit both the business reservation and Stripe intent BEFORE I/O.
@@ -395,16 +427,31 @@ class DatabaseBoundaryMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
         if self.backend is None:
             return self.unavailable()
+        started = time.monotonic()
+        phase = "load"
         try:
             async with self.backend.request(self.store):
+                phase = "handler"
                 response = await call_next(request)
                 if response.status_code < 500:
                     # GET also revokes expired sessions / performs due lifecycle
                     # transitions. Commit before returning response headers.
+                    phase = "save"
                     await self.backend.save()
+                phase = "cleanup"
                 return response
-        except Exception:
-            logger.warning("Database request failed; no success response was sent")
+        except Exception as exc:
+            if isinstance(exc, StorageUnavailable) and exc.diagnostic_phase in DATABASE_REQUEST_PHASES:
+                phase = exc.diagnostic_phase
+            request_id = getattr(request.state, "request_id", "")
+            # Fixed classifications only. Never log URL, query, provider text,
+            # SQL, headers, users or traceback, including caller request IDs.
+            logger.warning("Database request failed; no success response was sent %s", json.dumps({
+                "event": "database_request_failed", "phase": phase,
+                "reason": request_failure_code(exc, phase),
+                "elapsed_ms": round((time.monotonic() - started) * 1000),
+                "request_id": request_id if isinstance(request_id, str) and re.fullmatch(r"[0-9a-f]{32}", request_id) else "",
+            }))
             return self.unavailable()
 
     @staticmethod
