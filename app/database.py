@@ -39,6 +39,41 @@ DATABASE_FAILURE_CODES = frozenset({
     "local_lock_timeout", "database_busy", "request_failed", "state_conflict",
 })
 DATABASE_REQUEST_PHASES = frozenset({"local_lock", "connect", "advisory_lock", "load", "handler", "save", "cleanup"})
+_request_clock = time.monotonic
+SLOW_DATABASE_REQUEST_MS = 2000
+
+
+class RequestTiming:
+    """Per-request durations only; never retains route, SQL or business data."""
+
+    def __init__(self):
+        self.started = self.changed = _request_clock()
+        self.phase = "local_lock"
+        self.durations = {phase: 0.0 for phase in sorted(DATABASE_REQUEST_PHASES)}
+        self.finished = None
+
+    def mark(self, phase):
+        if phase not in DATABASE_REQUEST_PHASES or self.finished is not None:
+            return
+        now = _request_clock()
+        self.durations[self.phase] += max(0.0, now - self.changed)
+        self.changed, self.phase = now, phase
+
+    def finish(self):
+        if self.finished is None:
+            self.mark(self.phase)
+            self.finished = self.changed
+
+    def report(self, request_id):
+        self.finish()
+        elapsed = round((self.finished - self.started) * 1000)
+        if elapsed < SLOW_DATABASE_REQUEST_MS:
+            return
+        logger.warning("Database request slow %s", json.dumps({
+            "event": "database_request_slow", "elapsed_ms": elapsed,
+            "phase_ms": {phase: round(seconds * 1000) for phase, seconds in self.durations.items()},
+            "request_id": request_id if isinstance(request_id, str) and re.fullmatch(r"[0-9a-f]{32}", request_id) else "",
+        }))
 
 
 def database_failure_code(exc: Exception, *, phase: str) -> str:
@@ -180,12 +215,15 @@ class PostgresStateStore:
         acquired = False
         conn = None
         phase = "local_lock"
+        timing = RequestTiming()
         try:
             await asyncio.wait_for(self._local_lock.acquire(), timeout=5)
             acquired = True
             phase = "connect"
+            timing.mark(phase)
             conn = await self.connect()
             phase = "advisory_lock"
+            timing.mark(phase)
             cursor = await conn.execute("select pg_try_advisory_lock(%s)", (LOCK_ID,))
             if not (await cursor.fetchone())[0]:
                 raise StorageUnavailable("Database is busy; retry later", diagnostic_code="database_busy")
@@ -194,6 +232,7 @@ class PostgresStateStore:
             # before the lock expression. Schema and state, however, can be
             # read together, saving a network round trip on every navigation.
             phase = "load"
+            timing.mark(phase)
             cursor = await conn.execute(
                 "select v.version, s.revision, s.payload "
                 "from toolbako_runtime.schema_version v "
@@ -235,8 +274,10 @@ class PostgresStateStore:
                 raise
             raise StorageUnavailable("Database request could not start", diagnostic_code=request_failure_code(exc, phase), diagnostic_phase=phase) from None
         try:
-            yield
+            timing.mark("handler")
+            yield timing
         finally:
+            timing.mark("cleanup")
             # A failed request must not leave dirty objects available to another
             # request. A pre-provider checkpoint remains durable intentionally.
             try:
@@ -252,6 +293,7 @@ class PostgresStateStore:
                     raise StorageUnavailable("Database connection cleanup failed", diagnostic_code=request_failure_code(exc, "cleanup"), diagnostic_phase="cleanup") from None
                 finally:
                     self._local_lock.release()
+                    timing.finish()
 
     async def _save(self, conn, *, payload=None):
         from .finance import sync_finance
@@ -429,17 +471,29 @@ class DatabaseBoundaryMiddleware(BaseHTTPMiddleware):
             return self.unavailable()
         started = time.monotonic()
         phase = "load"
+        timing = None
         try:
-            async with self.backend.request(self.store):
+            async with self.backend.request(self.store) as timing:
                 phase = "handler"
                 response = await call_next(request)
                 if response.status_code < 500:
                     # GET also revokes expired sessions / performs due lifecycle
                     # transitions. Commit before returning response headers.
                     phase = "save"
+                    if isinstance(timing, RequestTiming):
+                        timing.mark(phase)
                     await self.backend.save()
                 phase = "cleanup"
-                return response
+            # Report only after connection and lock cleanup. No extra DB query,
+            # external monitoring service, or successful response before commit.
+            if isinstance(timing, RequestTiming):
+                try:
+                    timing.report(getattr(request.state, "request_id", ""))
+                except Exception:
+                    # A failed log sink must not turn an already committed
+                    # operation into a 503 that encourages a duplicate retry.
+                    pass
+            return response
         except Exception as exc:
             if isinstance(exc, StorageUnavailable) and exc.diagnostic_phase in DATABASE_REQUEST_PHASES:
                 phase = exc.diagnostic_phase
