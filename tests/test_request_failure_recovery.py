@@ -76,6 +76,7 @@ def test_failure_releases_lock_and_preserves_safe_diagnosis(monkeypatch, failure
         assert "private" not in str(error.value)
         assert not backend._local_lock.locked()
         assert backend._connection is None
+        assert backend._connection_slots._value == 2
         if failure != "connect":
             assert conn.closed
         # A failed cleanup must not leave the next request permanently blocked.
@@ -87,8 +88,20 @@ def test_failure_releases_lock_and_preserves_safe_diagnosis(monkeypatch, failure
 
 def test_lock_timeout_does_not_release_another_requests_lock(monkeypatch):
     backend = db.PostgresStateStore("unused")
+    store = DemoStore(seed=False)
+    conn = Connection(store)
+    original_wait = asyncio.wait_for
+    waits = []
+
+    async def connect():
+        return conn
+
+    monkeypatch.setattr(backend, "connect", connect)
 
     async def time_out(coro, timeout):
+        waits.append(timeout)
+        if len(waits) == 1:
+            return await original_wait(coro, timeout)
         coro.close()
         raise TimeoutError("private lock description")
 
@@ -96,11 +109,13 @@ def test_lock_timeout_does_not_release_another_requests_lock(monkeypatch):
         await backend._local_lock.acquire()
         monkeypatch.setattr(db.asyncio, "wait_for", time_out)
         with pytest.raises(db.StorageUnavailable) as error:
-            async with backend.request(DemoStore(seed=False)):
+            async with backend.request(store):
                 pytest.fail("must not enter")
         assert error.value.diagnostic_code == "local_lock_timeout"
         assert error.value.diagnostic_phase == "local_lock"
         assert backend._local_lock.locked()
+        assert conn.closed
+        assert backend._connection_slots._value == 2
         backend._local_lock.release()
 
     asyncio.run(run())
@@ -119,6 +134,7 @@ def test_cancelled_connection_attempt_releases_its_lock(monkeypatch):
             async with backend.request(DemoStore(seed=False)):
                 pytest.fail("must not enter")
         assert not backend._local_lock.locked()
+        assert backend._connection_slots._value == 2
 
     asyncio.run(run())
 

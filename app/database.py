@@ -36,9 +36,9 @@ DATABASE_FAILURE_CODES = frozenset({
     "tls_connection_failed", "network_connection_failed", "connection_failed",
     "schema_missing", "schema_access_denied", "schema_version_mismatch",
     "query_timeout", "schema_probe_failed",
-    "local_lock_timeout", "database_busy", "request_failed", "state_conflict",
+    "local_lock_timeout", "connection_capacity_timeout", "database_busy", "request_failed", "state_conflict",
 })
-DATABASE_REQUEST_PHASES = frozenset({"local_lock", "connect", "advisory_lock", "load", "handler", "save", "cleanup"})
+DATABASE_REQUEST_PHASES = frozenset({"connection_slot", "local_lock", "connect", "advisory_lock", "load", "handler", "save", "cleanup"})
 _request_clock = time.monotonic
 SLOW_DATABASE_REQUEST_MS = 2000
 
@@ -133,6 +133,8 @@ def request_failure_code(exc: BaseException, phase: str) -> str:
         return code if isinstance(code, str) and code in DATABASE_FAILURE_CODES else "unavailable"
     if isinstance(exc, TimeoutError) and phase == "local_lock":
         return "local_lock_timeout"
+    if isinstance(exc, TimeoutError) and phase == "connection_slot":
+        return "connection_capacity_timeout"
     if isinstance(exc, OperationConflict):
         return "state_conflict"
     code = database_failure_code(exc, phase=phase)
@@ -163,6 +165,9 @@ class PostgresStateStore:
         self.dsn = dsn
         self.production = production
         self._local_lock = asyncio.Lock()
+        # One active request and at most one preparing/waiting connection.
+        # Fresh sessions avoid carrying advisory locks across requests.
+        self._connection_slots = asyncio.BoundedSemaphore(2)
         self._connection = None
         self._store = None
         self._checkpoint = None
@@ -213,15 +218,27 @@ class PostgresStateStore:
     @asynccontextmanager
     async def request(self, store):
         acquired = False
+        slot_acquired = False
         conn = None
-        phase = "local_lock"
+        phase = "connection_slot"
         timing = RequestTiming()
+        timing.mark(phase)
         try:
-            await asyncio.wait_for(self._local_lock.acquire(), timeout=5)
-            acquired = True
+            queued_at = _request_clock()
+            await asyncio.wait_for(self._connection_slots.acquire(), timeout=5)
+            slot_acquired = True
+            # Both queues share the old five-second waiting allowance.
+            # Connection establishment retains its separate connect timeout.
+            remaining_wait = max(0.0, 5 - (_request_clock() - queued_at))
             phase = "connect"
             timing.mark(phase)
             conn = await self.connect()
+            phase = "local_lock"
+            timing.mark(phase)
+            await asyncio.wait_for(self._local_lock.acquire(), timeout=remaining_wait)
+            acquired = True
+            # No SQL or shared marketplace state may be accessed before this
+            # lock. Only the connection handshake is prepared concurrently.
             phase = "advisory_lock"
             timing.mark(phase)
             cursor = await conn.execute("select pg_try_advisory_lock(%s)", (LOCK_ID,))
@@ -270,6 +287,8 @@ class PostgresStateStore:
             finally:
                 if acquired:
                     self._local_lock.release()
+                if slot_acquired:
+                    self._connection_slots.release()
             if not isinstance(exc, Exception):
                 raise
             raise StorageUnavailable("Database request could not start", diagnostic_code=request_failure_code(exc, phase), diagnostic_phase=phase) from None
@@ -293,6 +312,7 @@ class PostgresStateStore:
                     raise StorageUnavailable("Database connection cleanup failed", diagnostic_code=request_failure_code(exc, "cleanup"), diagnostic_phase="cleanup") from None
                 finally:
                     self._local_lock.release()
+                    self._connection_slots.release()
                     timing.finish()
 
     async def _save(self, conn, *, payload=None):
