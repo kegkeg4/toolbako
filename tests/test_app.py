@@ -11,6 +11,12 @@ from app.main import app
 
 client = TestClient(app)
 
+
+def manual_review_data(slug):
+    from app.data import store
+    from app.listing_review import REVIEW_CHECKS, review_token
+    return {"token": review_token(store.get(slug)), "checks": list(REVIEW_CHECKS), "note": "テスト用掲載情報の内容と販売条件を確認しました。"}
+
 def test_home_and_discovery():
     home = client.get('/')
     assert home.status_code == 200
@@ -659,7 +665,7 @@ def test_new_tool_stays_private_until_safety_review():
     assert creator.post(f'/seller/tools/{slug}/status/published', follow_redirects=False).status_code == 409
     admin = TestClient(app)
     admin.get('/auth/demo?next=/admin')
-    assert admin.post(f'/admin/tools/{slug}/safety/passed', follow_redirects=False).status_code == 303
+    assert admin.post(f'/admin/tools/{slug}/safety/passed', data=manual_review_data(slug), follow_redirects=False).status_code == 303
     assert creator.post(f'/seller/tools/{slug}/status/published', follow_redirects=False).status_code == 303
     assert TestClient(app).get(path).status_code == 200
     assert admin.post(f'/admin/tools/{slug}/toggle', follow_redirects=False).status_code == 303
@@ -668,7 +674,7 @@ def test_new_tool_stays_private_until_safety_review():
     assert admin.post(f'/admin/tools/{slug}/toggle', follow_redirects=False).status_code == 303
     assert tool['status'] == 'published' and tool['is_published'] is True
     assert TestClient(app).get(path).status_code == 200
-    assert admin.post(f'/admin/tools/{slug}/safety/failed', follow_redirects=False).status_code == 303
+    assert admin.post(f'/admin/tools/{slug}/safety/failed', data=manual_review_data(slug), follow_redirects=False).status_code == 303
     assert tool['safety_scan']['status'] == 'failed' and tool['is_published'] is False
     assert TestClient(app).get(path).status_code == 404
     assert creator.get(path).status_code == 200
@@ -1108,7 +1114,7 @@ def test_admin_suspension_revokes_sessions_and_pauses_public_tools():
     admin.get('/auth/demo?next=/admin')
     try:
         assert admin.post('/admin/users/demo_creator/suspend', follow_redirects=False).status_code == 409
-        assert admin.post(f'/admin/tools/{slug}/safety/passed', follow_redirects=False).status_code == 303
+        assert admin.post(f'/admin/tools/{slug}/safety/passed', data=manual_review_data(slug), follow_redirects=False).status_code == 303
         assert member.post(f'/seller/tools/{slug}/status/published', follow_redirects=False).status_code == 303
         suspended = admin.post('/admin/users/suspension_guard/suspend', follow_redirects=False)
         assert suspended.status_code == 303
@@ -1386,7 +1392,7 @@ def test_exclusive_transfer_has_independent_review_gate():
     admin.get('/auth/demo?next=/admin')
     try:
         assert tool['transfer_review_status'] == 'pending'
-        assert admin.post(f'/admin/tools/{slug}/safety/passed', follow_redirects=False).status_code == 303
+        assert admin.post(f'/admin/tools/{slug}/safety/passed', data=manual_review_data(slug), follow_redirects=False).status_code == 303
         assert creator.post(f'/seller/tools/{slug}/status/published', follow_redirects=False).status_code == 303
         assert TestClient(app).get(f'/tools/{slug}').status_code == 200
         assert TestClient(app).get(f'/tools/{slug}/transfer').status_code == 404
@@ -1408,6 +1414,10 @@ def test_exclusive_transfer_has_independent_review_gate():
         }
         assert creator.post(f'/seller/tools/{slug}/edit', data=base_edit, follow_redirects=False).status_code == 303
         assert tool['transfer_review_status'] == 'approved'
+        assert tool['safety_scan']['status'] == 'pending'
+        assert not tool['is_published']
+        assert admin.post(f'/admin/tools/{slug}/safety/passed', data=manual_review_data(slug), follow_redirects=False).status_code == 303
+        assert creator.post(f'/seller/tools/{slug}/status/published', follow_redirects=False).status_code == 303
 
         changed_transfer = {**base_edit, 'exclusive_price_min':'540000'}
         assert creator.post(f'/seller/tools/{slug}/edit', data=changed_transfer, follow_redirects=False).status_code == 303

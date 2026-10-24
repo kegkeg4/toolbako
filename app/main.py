@@ -62,6 +62,7 @@ from .object_storage import SupabaseObjectStorage, ObjectStorageError, storage_r
 from .operations import operation_summary
 from .identity import verification_url
 from .account_lifecycle import deletion_hold
+from .listing_review import REVIEW_CHECKS, REVIEW_LABELS, content_fingerprint, review_token, reopen_review
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -261,6 +262,7 @@ def seo_metadata(request: Request) -> dict:
 
 
 def context(request: Request, **values):
+    values["review_labels"] = REVIEW_LABELS
     values["delivery_upload_ready"] = delivery_upload_available(settings)
     values["subscription_checkout_ready"] = settings.demo_mode
     status_labels = {"in_progress":"取引中","awaiting_acceptance":"納品確認待ち","completed":"取引完了","cancel_pending":"キャンセル確認中","cancelled":"キャンセル済み"}
@@ -1438,12 +1440,28 @@ async def seller_tool_save(
     if thumbnail and thumbnail.filename:
         thumbnail_url = await save_thumbnail(thumbnail, slug)
     with store._lock:
+        old_review_content = content_fingerprint(tool)
         tool.update({"name":name,"tagline":tagline,"description_md":description_md,"price":price,"capacity":capacity,"support_days":support_days,"estimated_delivery_days":estimated_delivery_days,"fulfillment_type":fulfillment_type,"purchase_notes":purchase_notes,"faq":faq,"supports_subscription":supports_subscription=="yes","subscription_price":subscription_price if supports_subscription=="yes" else 0,"customization_available":customization_available == "yes" or tool.get("price_type") == "consultation","thumbnail_url":thumbnail_url,"transfer_review_status":transfer_review_status,**transfer_settings})
+        if old_review_content != content_fingerprint(tool) and tool.get("safety_scan", {}).get("status") == "passed":
+            reopen_review(tool, datetime.now(timezone.utc), reason="掲載内容が変更されたため再審査中です。承認後に再度公開してください。")
+            store.audit(user["id"], "tool.review_reopened", slug, request.headers.get("x-request-id", ""))
     if transfer_review_status == "pending" and old_transfer != new_transfer:
         store.audit(user["id"], "transfer.review_requested", slug, request.headers.get("x-request-id", ""))
     if was_full and store.tool_active_orders(slug) < capacity and tool.get("status") == "published":
         store.notify_reopened(slug)
     return RedirectResponse(f"/seller/tools/{slug}/edit?saved=1", 303)
+
+
+@app.post("/seller/tools/{slug}/review")
+async def seller_tool_review_request(request: Request, slug: str):
+    user = current_user(request)
+    if not user: raise HTTPException(401)
+    tool = own_tool(user, slug)
+    with store._lock:
+        if tool.get("safety_scan", {}).get("status") == "failed":
+            reopen_review(tool, datetime.now(timezone.utc), reason="販売者から再審査の申請がありました。")
+            store.audit(user["id"], "tool.review_requested", slug, request.headers.get("x-request-id", ""))
+    return RedirectResponse(f"/seller/tools/{slug}/edit#listing-review", 303)
 
 
 @app.post("/seller/tools/{slug}/versions")
@@ -1471,7 +1489,7 @@ async def seller_tool_status(request: Request, slug: str, status: str):
     tool = own_tool(user, slug)
     if status not in {"published","draft","paused"}: raise HTTPException(422)
     if status == "published" and tool.get("safety_scan",{}).get("status") != "passed":
-        raise HTTPException(409, "安全チェック合格後に公開できます")
+        raise HTTPException(409, "運営の掲載審査が必要です。販売管理の「掲載審査」で状況と次の手順を確認してください")
     previous_status = tool.get("status")
     with store._lock:
         tool["status"] = status; tool["is_published"] = status == "published"
@@ -2696,19 +2714,36 @@ async def admin_case_status(request: Request, case_id: str, status: str):
     return RedirectResponse("/admin#cases",303)
 
 
+@app.get("/admin/tools/{slug}/review", response_class=HTMLResponse)
+async def admin_tool_review(request: Request, slug: str):
+    user = current_user(request)
+    if not is_admin(user): raise HTTPException(403, "管理者のみアクセスできます")
+    item = store.get(slug)
+    if not item: raise HTTPException(404)
+    return templates.TemplateResponse(request, "listing_review.html", context(request, tool=item, review_checks=REVIEW_CHECKS, review_token=review_token(item)))
+
+
 @app.post("/admin/tools/{slug}/safety/{status}")
-async def admin_tool_safety(request: Request, slug: str, status: str):
+async def admin_tool_safety(request: Request, slug: str, status: str, note: str = Form(""), checks: list[str] = Form(default=[]), token: str = Form("")):
     user = current_user(request)
     if not is_admin(user) or status not in {"passed","failed","pending"}: raise HTTPException(403)
     item = store.get(slug)
     if not item: raise HTTPException(404)
-    labels = {"passed":"安全チェック済み","failed":"要修正","pending":"再審査中"}
+    note = clean_visible_text(note, 10, 2000, "審査記録・販売者への案内", preserve_lines=True)
+    if status == "passed" and set(checks) != set(REVIEW_CHECKS):
+        raise HTTPException(422, "すべての確認項目を確認してから承認してください")
     with store._lock:
-        item["safety_scan"] = {"status":status,"label":labels[status],"checked_at":datetime.now(timezone.utc).date().isoformat() if status!="pending" else None}
+        if not re.fullmatch(r"[0-9a-f]{64}", token) or not hmac.compare_digest(token, review_token(item)):
+            raise HTTPException(409, "商品または審査状況が変更されています。審査画面を開き直して確認してください")
+        at = datetime.now(timezone.utc).isoformat()
+        item["safety_scan"] = {"status":status,"label":REVIEW_LABELS[status],"checked_at":at if status!="pending" else None,
+            "method":"manual","reviewer_id":user["id"],"reviewed_at":at,"note":note,
+            "checks":list(REVIEW_CHECKS) if status=="passed" else [], "content_fingerprint":content_fingerprint(item)}
+        item.setdefault("passport", {})["security"] = REVIEW_LABELS[status]
         if status in {"failed","pending"}:
             item["status"] = "paused" if item.get("status") == "published" else item.get("status", "draft")
             item["is_published"] = False
-    store.notify(item["author_id"], f"安全審査：{labels[status]}", item["name"], f"/seller/tools/{slug}/edit", "security")
+    store.notify(item["author_id"], f"掲載審査：{REVIEW_LABELS[status]}", f"{item['name']}：{note}", f"/seller/tools/{slug}/edit#listing-review", "security")
     store.audit(user["id"], f"admin.safety_{status}", slug, request.headers.get("x-request-id", ""))
     return RedirectResponse("/admin#tools",303)
 

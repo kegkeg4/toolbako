@@ -26,6 +26,7 @@
     <div class="field"><span class="field-label">よくある質問</span><small>最大3件まで登録できます。質問と回答はセットで入力してください。</small>{% for index in range(1,4) %}<div class="faq-editor-row"><label for="tool-faq-q-{{ index }}">質問 {{ index }}<input id="tool-faq-q-{{ index }}" name="faq_question" maxlength="120" placeholder="例：AIに詳しくなくても使えますか？"></label><label for="tool-faq-a-{{ index }}">回答 {{ index }}<textarea id="tool-faq-a-{{ index }}" name="faq_answer" maxlength="500" rows="2"></textarea></label></div>{% endfor %}</div>
   </fieldset>
   <fieldset class="form-section"><legend>4. 安全確認</legend><label class="agreement"><input type="checkbox" name="prohibited_agreement" value="yes" required><span>禁止出品物に該当せず、自分が販売する権利を持つことを確認しました。</span></label></fieldset>
+  <p>登録すると運営の手動による掲載審査を受け付けます。承認後、販売管理から公開できます。<a href="/support#guide-review">掲載審査の手順</a></p>
   <button class="button large full">この内容で出品する →</button>
 </form></section>
 {% endblock %}

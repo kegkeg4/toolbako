@@ -1,0 +1,18 @@
+{% set review = tool.safety_scan|default({}) %}
+<article id="listing-review">
+  <b>掲載審査（運営が手動で確認）</b>
+  <span class="scan-state">{{ review_labels.get(review.get('status'), '運営の掲載審査待ち') }}</span>
+  {% if review.get('status') == 'passed' %}
+  <p>掲載審査が承認されました。「公開する」から販売を開始できます。商品説明・画像・価格・納品条件などを変更すると、公開を休止して再審査になります。</p>
+  {% elif review.get('status') == 'failed' %}
+  <p>下の案内を確認して商品情報を修正・保存し、再審査を申請してください。</p>
+  <form action="/seller/tools/{{ tool.slug }}/review" method="post"><button class="outline-button">修正した内容で再審査を申請</button></form>
+  {% else %}
+  <p>審査一覧に受け付け済みです。運営担当者が掲載内容を確認します。自動検査は行っていないため、待つだけでは承認されません。結果はサイト内の通知とこの画面に表示されます。</p>
+  {% endif %}
+  {% if review.get('reason') %}<p>{{ review.reason }}</p>{% endif %}
+  {% if review.get('note') or review.get('previous_note') %}<p><b>運営からの案内</b><br>{{ review.get('note') or review.get('previous_note') }}</p>{% endif %}
+  <p>掲載審査は、プログラムの動作・コード解析・ウイルス検査の合格や、安全性の保証ではありません。取引ルームでの納品ファイル検査とは別の確認です。</p>
+  <a href="/support#guide-review">審査から公開までの手順 →</a>
+  {% if admin_access %}<p><a class="outline-button" href="/admin/tools/{{ tool.slug }}/review">運営としてこの商品を審査</a></p>{% endif %}
+</article>
