@@ -2,7 +2,9 @@
 {% block title %}会員登録 — ツールバコ{% endblock %}
 {% block content %}
 <section class="auth-page"><div class="auth-card signup-card"><img class="auth-brand-icon" src="/static/brand/toolbako-icon.png?v={{ asset_version }}" width="192" height="192" alt="ツールバコ"><h1>無料で会員登録</h1><p>ツールの購入・販売・募集ができるようになります。</p>
-  <a class="oauth x" href="/auth/oauth/twitter?next={{ next|urlencode }}"><b>𝕏</b> X で登録</a><a class="oauth" href="/auth/oauth/google?next={{ next|urlencode }}"><b>G</b> Google で登録</a><div class="auth-divider"><span>またはメールで登録</span></div>
+  {% if 'twitter' in oauth_providers %}<a class="oauth x" href="/auth/oauth/twitter?next={{ next|urlencode }}"><b>𝕏</b> X で登録</a>{% endif %}
+  {% if 'google' in oauth_providers %}<a class="oauth" href="/auth/oauth/google?next={{ next|urlencode }}"><b>G</b> Google で登録</a>{% endif %}
+  {% if oauth_providers %}<div class="auth-divider"><span>またはメールで登録</span></div>{% endif %}
   <form method="post"><input type="hidden" name="next" value="{{ next }}"><div class="field-row">
     <div class="field"><label for="signup-name">表示名</label><input id="signup-name" name="display_name" maxlength="60" required autocomplete="name"></div>
     <div class="field"><label for="signup-username">ユーザー名</label><input id="signup-username" name="username" pattern="[A-Za-z0-9_]{3,30}" maxlength="30" required autocomplete="username"></div></div>

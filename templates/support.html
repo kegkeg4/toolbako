@@ -1,12 +1,18 @@
 {% extends "base.html" %}
-{% block title %}ヘルプ・お問い合わせ — ツールバコ{% endblock %}
+{% block title %}使い方ガイド・お問い合わせ — ツールバコ{% endblock %}
+{% block description %}ツールバコの登録・認証アプリ・購入・出品・商品画像変更・納品の操作手順と、困ったときの問い合わせ窓口。{% endblock %}
+{% block page_styles %}<link rel="stylesheet" href="/static/usage-guide.css?v=20261024-1">{% endblock %}
 {% block content %}
 <section class="simple-suite support-center">
   <header>
     <span class="section-kicker">HELP &amp; SAFETY</span>
-    <h1>困ったときは、ここから。</h1>
-    <p>購入前の質問は販売者へ、取引・決済・安全性の問題は運営へご連絡ください。</p>
+    <h1>使い方ガイド・お問い合わせ</h1>
+    <p>はじめての登録から、購入・出品・納品まで。操作に迷ったら、ここから確認できます。</p>
+    <a class="guide-contact-link" href="#contact">運営へのお問い合わせへ進む →</a>
   </header>
+  {% include "_usage_guide.html" %}
+  <h2 id="contact">お問い合わせ</h2>
+  <p>購入前の質問は販売者へ、取引・決済・安全性の問題は運営へご連絡ください。パスワード・認証コード・本人確認書類は送らないでください。</p>
   <div class="support-grid">
     <div class="support-main">
       <div class="support-quick">
@@ -25,7 +31,7 @@
         <button class="button large">運営へ送信</button>
       </form>
       {% else %}
-      <div class="support-login"><b>お問い合わせにはログインが必要です</b><a class="button" href="/login?next=/support">ログインする</a></div>
+      <div class="support-login"><b>フォームでのお問い合わせにはログインが必要です</b><a class="button" href="/login?next=/support">ログインする</a>{% if support_email %}<p>ログインできない場合は、<a href="mailto:{{ support_email }}">{{ support_email }}</a> へご連絡ください。</p>{% endif %}</div>
       {% endif %}
     </div>
     <aside>

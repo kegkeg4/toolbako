@@ -8,6 +8,7 @@ import io
 import re
 import secrets
 import time
+from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import quote, urlencode, urlparse
@@ -15,7 +16,7 @@ from xml.sax.saxutils import escape as xml_escape
 
 import httpx
 import markdown
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
@@ -37,23 +38,82 @@ from .config import settings
 from .data import AI_OPTIONS, CATEGORIES, DIST_LABELS, PRICE_LABELS, TRANSFER_ASSET_LABELS, TRANSFER_STATUS_LABELS, store
 from .ogp import generate_og, generate_site_og
 from .middleware import ProductionGuardMiddleware
+from .monitoring import initialize_monitoring
+from .security_services import SecurityServiceMonitor, unchecked_snapshot
 from .production import readiness_summary
 from .persistence import SQLiteStateStore
-from .integrations import EmailIntegration, StripeIntegration
-from .files import clamav_scan, validate_delivery_file
+from .database import DatabaseBoundaryMiddleware, PostgresStateStore
+from .integrations import EmailIntegration, StripeIntegration, StripeOutcomeUnknown
+from .files import clamav_scan, validate_delivery_file, encode_thumbnail
 from .security import SessionService, hash_password, verify_password
 from .web import clean_visible_text, safe_http_url, safe_next, slugify
-from .webhooks import StripeWebhookService
+from .webhooks import StripeWebhookService, StripeWebhookGuardMiddleware
+from .mfa import SupabaseMFA, is_privileged_path, totp_qr_image
+from .finance import FinanceConflict, PAYOUT_LABELS, balance as ledger_balance, request_payout
+from .payout_worker import sandbox_payouts_ready
+from .refunds import request_order_refunds
+from .reconciliation import propose_recovery, approve_recovery
+from .payout_recovery import propose_failed_payout, approve_failed_payout
+from .payment_reconciliation import KINDS as PAYMENT_RECOVERY_KINDS, payment_recovery_inventory, propose_payment_recovery, approve_payment_recovery
+from .refund_resumption import refund_resumption_inventory, propose_refund_resumption, approve_refund_resumption
+from .deployment_check import configuration_checks
+from .supabase_api import supabase_headers
+from .object_storage import SupabaseObjectStorage, ObjectStorageError, storage_ready, delivery_upload_available
+from .operations import operation_summary
+from .identity import verification_url
+from .account_lifecycle import deletion_hold
+from .listing_review import REVIEW_CHECKS, REVIEW_LABELS, content_fingerprint, review_token, reopen_review
 
 ROOT = Path(__file__).resolve().parent.parent
-app = FastAPI(title="ツールバコ", description="AIツールの共有・発見プラットフォーム", version="0.1.0")
+
+
+async def require_privileged_mfa(request: Request):
+    if not (settings.is_production or settings.privileged_mfa_required):
+        return
+    if not is_privileged_path(request.url.path, request.method):
+        return
+    user = current_user(request)
+    if user and not mfa.recent(request):
+        destination = request.url.path if request.method == "GET" else "/security"
+        raise HTTPException(303, "重要操作の前に2段階認証をお願いします", headers={"Location": f"/security/mfa?{urlencode({'next': destination})}"})
+
+
+@asynccontextmanager
+async def lifespan(application):
+    monitor = SecurityServiceMonitor(settings)
+    application.state.security_services = monitor
+    task = asyncio.create_task(monitor.run()) if settings.is_deployed and not settings.demo_mode else None
+    try:
+        yield
+    finally:
+        if task is not None:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+        application.state.security_services = None
+
+
+def security_service_snapshot():
+    monitor = getattr(app.state, "security_services", None)
+    return monitor.snapshot() if monitor is not None and monitor.matches(settings) else unchecked_snapshot()
+
+
+def security_service_readiness():
+    return {name: status["ready"] for name, status in security_service_snapshot()["services"].items()}
+
+
+database_store = PostgresStateStore(settings.database_url, production=settings.is_deployed) if settings.database_url else None
+app = FastAPI(title="ツールバコ", description="AIツールの共有・発見プラットフォーム", version="0.1.0", dependencies=[Depends(require_privileged_mfa)], lifespan=lifespan)
 app.add_middleware(SessionMiddleware, secret_key=settings.session_secret, session_cookie="toolbako_session", same_site="lax", https_only=settings.site_base_url.startswith("https"), max_age=settings.session_max_age)
 app.add_middleware(GZipMiddleware, minimum_size=500, compresslevel=6)
+if database_store or settings.is_production:
+    app.add_middleware(DatabaseBoundaryMiddleware, backend=database_store, store=store)
+app.add_middleware(StripeWebhookGuardMiddleware, settings=settings)
 app.add_middleware(ProductionGuardMiddleware, settings=settings)
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(settings.allowed_hosts) if settings.allowed_hosts else ["*"])
 app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
 templates = Jinja2Templates(directory=ROOT / "templates")
-state_store = SQLiteStateStore(settings.state_db_path)
+state_store = SQLiteStateStore(settings.state_db_path if not database_store and not settings.is_production else "")
 state_store.restore(store)
 for restored_tool in store.tools:
     restored_tool.setdefault("customization_available", restored_tool.get("price_type") != "free")
@@ -74,17 +134,23 @@ for restored_username, restored_account in store.registered_users.items():
     restored_account.setdefault("founding_member_since", restored_account.get("created_at") if demo_credential else None)
     restored_account.setdefault("is_certified_creator", demo_credential)
     restored_account.setdefault("certified_creator_since", restored_account.get("created_at") if demo_credential else None)
-session_service = SessionService(store, settings.session_max_age)
+session_service = SessionService(store, settings.session_max_age, demo_erasure=settings.demo_mode)
+mfa = SupabaseMFA(settings, session_service)
 
 
 async def persist_state() -> None:
     # Serializing the complete compatibility snapshot can be expensive. Never do
     # this synchronous disk work on FastAPI's event loop.
-    await asyncio.to_thread(state_store.save, store)
+    if database_store:
+        await database_store.save()
+    else:
+        await asyncio.to_thread(state_store.save, store)
 
 
-app.state.persist = persist_state
-stripe = StripeIntegration(settings.stripe_secret_key, settings.site_base_url, api_version=settings.stripe_api_version, charge_mode=settings.stripe_charge_mode)
+# The database boundary commits all requests. The legacy demo middleware only
+# persists successful writes. Never commit a second time after releasing the DB.
+app.state.persist = None if database_store else persist_state
+stripe = StripeIntegration(settings.stripe_secret_key, settings.site_base_url, api_version=settings.stripe_api_version, charge_mode=settings.stripe_charge_mode, journal=database_store)
 email_service = EmailIntegration(settings.email_api_key, settings.email_from)
 DEFAULT_OG_PATH = generate_site_og()
 TRANSFER_NDA_TEXT = "当事者は独占譲渡案件で開示される非公開情報を案件評価以外に使用せず、第三者へ開示せず、交渉終了時は合理的な範囲で破棄します。法令・裁判所・行政機関により開示が必要な場合を除きます。"
@@ -92,9 +158,12 @@ TRANSFER_NDA_DOCUMENT_HASH = hashlib.sha256(TRANSFER_NDA_TEXT.encode("utf-8")).h
 
 
 async def send_email_safely(to: str | None, subject: str, text: str) -> bool:
-    """Email is best-effort; a provider outage must not roll back a payment event."""
+    """DB mode queues mail atomically with the transaction; a worker sends it."""
     if not settings.email_ready or not to:
         return False
+    if database_store:
+        database_store.enqueue_email(to, settings.email_from, subject, text)
+        return True
     try:
         return await email_service.send(to, subject, text)
     except Exception:
@@ -108,12 +177,7 @@ async def sweep_due_orders() -> int:
         await persist_state()
     return changed
 
-if settings.sentry_dsn:
-    try:
-        import sentry_sdk
-        sentry_sdk.init(dsn=settings.sentry_dsn, environment=settings.environment, send_default_pii=False, traces_sample_rate=0.1)
-    except ImportError:
-        pass
+initialize_monitoring(settings)
 
 
 establish_session = session_service.establish
@@ -161,7 +225,7 @@ def seo_metadata(request: Request) -> dict:
         "/verification", "/library", "/payouts", "/purchases", "/subscriptions", "/notifications",
         "/updates", "/account/", "/checkout/", "/auth/", "/transfer-inquiries/",
     )
-    private_paths = {"/login", "/signup", "/tools/new", "/requests/new", "/nda"}
+    private_paths = {"/login", "/signup", "/forgot-password", "/favorites", "/tools/new", "/requests/new", "/nda"}
     robots_value = "noindex, nofollow" if path.startswith(private_prefixes) or path in private_paths else "index, follow, max-image-preview:large"
     canonical_path = path.rstrip("/") or "/"
     query = request.query_params
@@ -181,7 +245,12 @@ def seo_metadata(request: Request) -> dict:
         # Operational flags, tabs and comparison combinations do not create new indexable pages.
         canonical_path = path.rstrip("/") or "/"
     canonical_url = f"{settings.site_base_url}{canonical_path}"
+    # Preview hosts must not compete with the real site in search results.
+    # Keep crawling enabled so search engines can actually read this directive.
+    if not settings.is_production:
+        robots_value = "noindex, nofollow"
     return {
+        "preview_mode": not settings.is_production,
         "canonical_url": canonical_url,
         "robots_value": robots_value,
         "og_image_url": f"{settings.site_base_url}{DEFAULT_OG_PATH}",
@@ -193,11 +262,14 @@ def seo_metadata(request: Request) -> dict:
 
 
 def context(request: Request, **values):
+    values["review_labels"] = REVIEW_LABELS
+    values["delivery_upload_ready"] = delivery_upload_available(settings)
+    values["subscription_checkout_ready"] = settings.demo_mode
     status_labels = {"in_progress":"取引中","awaiting_acceptance":"納品確認待ち","completed":"取引完了","cancel_pending":"キャンセル確認中","cancelled":"キャンセル済み"}
     user = current_user(request)
     unread_notification_count = sum(1 for item in store.notifications if user and item.get("user_id") == user["id"] and not item.get("read"))
-    legal_operator = {"name":settings.legal_business_name,"representative":settings.legal_representative,"address":settings.legal_address,"phone":settings.legal_phone,"email":settings.support_email,"website":settings.legal_website,"invoice_number":settings.legal_invoice_number}
-    return {"request": request, "user": user, "admin_access":is_admin(user), "unread_notification_count":unread_notification_count, "categories": CATEGORIES, "ai_options": AI_OPTIONS, "price_labels": PRICE_LABELS, "dist_labels": DIST_LABELS, "status_labels": status_labels, "transfer_asset_labels":TRANSFER_ASSET_LABELS, "transfer_status_labels":TRANSFER_STATUS_LABELS, "site_url": settings.site_base_url, "asset_version":settings.asset_version, "csp_nonce":getattr(request.state, "csp_nonce", ""), "demo_mode":settings.demo_mode, "email_ready":settings.email_ready, "stripe_ready":settings.stripe_ready, "legal_operator":legal_operator, **seo_metadata(request), **values}
+    legal_operator = {"name":settings.legal_business_name,"representative":settings.legal_representative,"address":settings.legal_address,"phone":settings.legal_phone,"contact_on_request":settings.legal_contact_on_request,"email":settings.support_email,"website":settings.legal_website,"invoice_number":settings.legal_invoice_number}
+    return {"request": request, "user": user, "admin_access":is_admin(user), "unread_notification_count":unread_notification_count, "categories": CATEGORIES, "ai_options": AI_OPTIONS, "price_labels": PRICE_LABELS, "dist_labels": DIST_LABELS, "status_labels": status_labels, "transfer_asset_labels":TRANSFER_ASSET_LABELS, "transfer_status_labels":TRANSFER_STATUS_LABELS, "site_url": settings.site_base_url, "asset_version":settings.asset_version, "csp_nonce":getattr(request.state, "csp_nonce", ""), "demo_mode":settings.demo_mode, "oauth_providers":settings.enabled_oauth_providers, "email_ready":settings.email_ready, "stripe_ready":settings.stripe_ready, "platform_fee_percent":round(settings.platform_fee_rate * 100, 2), "custom_fee_percent":round(settings.custom_fee_rate * 100, 2), "payout_schedule_label":settings.payout_schedule_label, "payout_minimum":settings.payout_minimum, "payout_fee":settings.payout_fee, "payout_fee_free_threshold":settings.payout_fee_free_threshold, "payout_auto_days":settings.payout_auto_days, "payout_weekday_label":settings.payout_weekday_label, "legal_operator":legal_operator, **seo_metadata(request), **values}
 
 
 def render_md(value: str) -> str:
@@ -213,7 +285,7 @@ templates.env.filters["markdown"] = render_md
 
 
 def wants_html_error(request: Request) -> bool:
-    if request.url.path.startswith(("/api/", "/webhooks/", "/healthz", "/readyz")):
+    if request.url.path.startswith(("/api/", "/webhooks/", "/healthz", "/readyz", "/deploymentz")):
         return False
     content_type = request.headers.get("content-type", "")
     return request.method == "GET" or "text/html" in request.headers.get("accept", "") or content_type.startswith(("application/x-www-form-urlencoded", "multipart/form-data"))
@@ -233,7 +305,26 @@ async def friendly_validation_error(request: Request, exc: RequestValidationErro
     return templates.TemplateResponse(request, "error.html", context(request, status_code=422, error_message="入力内容を確認してください。必須項目または形式に誤りがあります。"), status_code=422)
 
 
+@app.exception_handler(StripeOutcomeUnknown)
+async def stripe_outcome_unknown(request: Request, exc: StripeOutcomeUnknown):
+    # Preserve the existing order/extra/contract reservation. A timeout is not
+    # evidence of a failed payment and must not allow a fresh purchase ID.
+    user = current_user(request)
+    for order in store.orders:
+        keys = {f"checkout-{order['id']}", f"refund-{order['id']}"}
+        for extra in order.get("pending_extras", []):
+            keys.update((f"extra-{extra['id']}", f"refund-extra-{order['id']}-{extra['id']}"))
+        if exc.operation_id in keys:
+            order["payment_reconciliation_required"] = True
+    store.audit(user["id"] if user else None, "stripe.reconciliation_required", exc.operation_id)
+    await persist_state()
+    message = "決済・返金サービスからの応答を確認できませんでした。二重処理を防ぐため注文を保留しています。再購入せず、返金申請も繰り返さず、購入履歴を確認してサポートへお問い合わせください。"
+    return await friendly_http_error(request, HTTPException(502, message))
+
+
 def available_balance(user_id: str) -> int:
+    if database_store:
+        return ledger_balance(store, user_id)
     return store.available_balance(user_id)
 
 
@@ -289,18 +380,25 @@ async def save_thumbnail(upload: UploadFile | None, slug: str) -> str | None:
     content = await upload.read(5_000_001)
     if len(content) > 5_000_000: raise HTTPException(422, "商品画像は5MB以下にしてください")
     try:
-        image = Image.open(io.BytesIO(content))
-        if image.format not in {"JPEG", "PNG", "WEBP"}: raise ValueError("unsupported image format")
-        image.verify()
-        image = Image.open(io.BytesIO(content))
-        if image.width * image.height > 25_000_000: raise ValueError("image dimensions too large")
-        image = image.convert("RGB")
-        image.thumbnail((1200, 900))
-    except Exception as exc:
-        raise HTTPException(422, "商品画像を読み込めませんでした") from exc
+        encoded = await asyncio.to_thread(encode_thumbnail, content)
+    except ValueError:
+        raise HTTPException(422, "商品画像を読み込めませんでした") from None
+    # New names avoid stale immutable CDN/browser cache after an image edit.
+    name = secrets.token_hex(16) + ".webp"
+    if settings.storage_provider == "supabase":
+        try:
+            storage = SupabaseObjectStorage(settings)
+            key = f"images/{name}"
+            await storage.upload(key, encoded, image=True)
+            return storage.image_url(key)
+        except ObjectStorageError:
+            raise HTTPException(503, "商品画像の永続保存を確認できません。保存先を設定してください") from None
+    if not settings.demo_mode:
+        raise HTTPException(503, "商品画像の永続保存先が未設定です。再配備で消える保存先は使用できません")
     upload_dir = ROOT / "static" / "uploads"; upload_dir.mkdir(parents=True, exist_ok=True)
-    path = upload_dir / f"{slug}.webp"; image.save(path, "WEBP", quality=88, method=6)
-    return f"/static/uploads/{slug}.webp"
+    path = upload_dir / name
+    await asyncio.to_thread(path.write_bytes, encoded)
+    return f"/static/uploads/{name}"
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -611,7 +709,7 @@ async def coupon_preview(request: Request, slug: str = Form(...), code: str = Fo
     tool = store.get_public(slug)
     if not tool or tool.get("price_type") != "paid" or billing_type not in {"one_time","subscription"}:
         raise HTTPException(404)
-    if billing_type == "subscription" and not tool.get("supports_subscription"):
+    if billing_type == "subscription" and (not settings.demo_mode or not tool.get("supports_subscription")):
         raise HTTPException(422, "この月額プランは利用できません")
     selected_options = [item for item in tool.get("options", []) if item["id"] in options]
     base_amount = tool["subscription_price"] if billing_type == "subscription" else tool["price"]
@@ -628,6 +726,8 @@ async def checkout_complete(request: Request, slug: str, options: list[str] = Fo
     tool = store.get(slug)
     if tool and tool["author_id"] == user["id"]: raise HTTPException(403, "自分の商品は購入できません")
     if billing_type not in {"one_time","subscription"} or purchase_agreement != "yes": raise HTTPException(422)
+    if billing_type == "subscription" and not settings.demo_mode:
+        raise HTTPException(409, "現在は買い切りのみご利用いただけます。月額プランは今後の対応予定です")
     try: order, created = store.buy(user, slug, options, coupon, billing_type, payment_pending=not settings.demo_mode, return_created=True)
     except ValueError as exc:
         if str(exc) == "blocked": raise HTTPException(403, "この販売者の商品は購入できません") from exc
@@ -639,6 +739,17 @@ async def checkout_complete(request: Request, slug: str, options: list[str] = Fo
         if not created and order.get("payment_status") == "pending" and order.get("checkout_session_url"):
             return RedirectResponse(order["checkout_session_url"], 303)
         if not created and order.get("payment_status") == "pending":
+            if database_store:
+                attempt = await database_store.operation_result(f"checkout-{order['id']}")
+                # The process may have stopped after recording the provider's
+                # response but before copying the session ID into the order.
+                if attempt and attempt["status"] == "succeeded":
+                    recovered = attempt["response"]
+                    order["checkout_session_id"] = recovered["id"]
+                    order["checkout_session_url"] = recovered["url"]
+                    return RedirectResponse(recovered["url"], 303)
+            if order.get("payment_reconciliation_required"):
+                raise HTTPException(409, "決済結果を確認中です。再購入せず、購入履歴を確認してサポートへお問い合わせください")
             raise HTTPException(409, "決済画面を準備中です。数秒後にもう一度お試しください", headers={"Retry-After":"3"})
         if not created:
             raise HTTPException(409, "既存の契約状況を確認してください")
@@ -657,6 +768,7 @@ async def checkout_complete(request: Request, slug: str, options: list[str] = Fo
                     store.release_coupon(order)
                     if order in store.orders: store.orders.remove(order)
                     store.subscriptions[:] = [x for x in store.subscriptions if x.get("order_id") != order["id"]]
+            await persist_state()
             raise HTTPException(502, "決済画面を開始できませんでした") from exc
         order["checkout_session_id"] = session["id"]
         order["checkout_session_url"] = session["url"]
@@ -860,6 +972,7 @@ async def select_application(request: Request, request_id: str, application_id: 
         try: session = await stripe.create_checkout(order, account["account_id"])
         except RuntimeError as exc:
             store.rollback_request_contract(item, application, order)
+            await persist_state()
             raise HTTPException(502,"決済画面を開始できませんでした") from exc
         order["checkout_session_id"] = session["id"]
         order["checkout_session_url"] = session["url"]
@@ -873,18 +986,27 @@ async def select_application(request: Request, request_id: str, application_id: 
 async def payouts(request: Request):
     user=current_user(request)
     if not user: return RedirectResponse("/login?next=/payouts",303)
-    return templates.TemplateResponse(request,"payouts.html",context(request,balance=available_balance(user["id"]),payouts=[x for x in store.payouts if x["seller_id"]==user["id"]]))
+    return templates.TemplateResponse(request,"payouts.html",context(request,balance=available_balance(user["id"]),payouts=[x for x in store.payouts if x["seller_id"]==user["id"]], payout_labels=PAYOUT_LABELS, payout_requests_ready=settings.demo_mode or sandbox_payouts_ready(settings), payout_request_key=secrets.token_urlsafe(24)))
 
 
 @app.post("/payouts")
-async def payout_request(request: Request, amount: int = Form(...)):
+async def payout_request(request: Request, amount: int = Form(...), request_key: str = Form("")):
     user=current_user(request)
     if not user or not user.get("is_verified"): raise HTTPException(403,"本人確認が必要です")
-    if not settings.demo_mode: raise HTTPException(409,"本番の売上振込は決済事業者の口座設定から管理してください")
+    if not settings.demo_mode and not sandbox_payouts_ready(settings):
+        raise HTTPException(409,"本番の振込は公開前検証中です。実際の銀行振込はまだ開始されません")
     balance = available_balance(user["id"])
-    if amount < 1 or amount > balance: raise HTTPException(422, "振込可能残高の範囲で指定してください")
-    try: store.create_payout(user["id"], amount)
-    except ValueError: raise HTTPException(422, "振込可能残高の範囲で指定してください")
+    if amount < settings.payout_minimum or (not database_store and amount > balance): raise HTTPException(422, f"振込申請は{settings.payout_minimum:,}円以上、振込可能残高以下で指定してください")
+    if database_store and not re.fullmatch(r"[A-Za-z0-9_-]{32}", request_key):
+        raise HTTPException(422, "申請画面を再読み込みしてください")
+    try:
+        if database_store:
+            request_payout(store, settings, user["id"], amount, request_key=request_key)
+        else:
+            store.create_payout(user["id"], amount)
+    except FinanceConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except ValueError: raise HTTPException(422, f"振込申請は{settings.payout_minimum:,}円以上、振込可能残高以下で指定してください")
     store.audit(user["id"], "payout.requested", str(amount), request.headers.get("x-request-id", ""))
     return RedirectResponse("/payouts?requested=1",303)
 
@@ -976,18 +1098,28 @@ async def deliver_order(request: Request, order_id: str, note: str = Form(...), 
         elif not settings.demo_mode:
             raise HTTPException(503,"本番のファイル安全検査が未設定です")
         file_id = hashlib.sha256(content).hexdigest()[:24]
-        directory = Path(settings.private_storage_path) / order_id
-        directory.mkdir(parents=True,exist_ok=True)
-        directory.chmod(0o700)
-        path = directory / f"{file_id}{suffix}"
-        path.write_bytes(content)
-        path.chmod(0o600)
         safe_name = clean_visible_text(Path(delivery_file.filename).name, 1, 120, "ファイル名")
-        file_record = {"id":file_id,"name":safe_name,"path":str(path),"size":len(content),"sha256":hashlib.sha256(content).hexdigest(),"scan_status":"passed","scan_engine":scan_engine}
+        file_record = {"id":file_id,"name":safe_name,"size":len(content),"sha256":hashlib.sha256(content).hexdigest(),"scan_status":"passed","scan_engine":scan_engine}
+        if settings.storage_provider == "supabase":
+            try:
+                key = f"deliveries/{order_id}/{secrets.token_hex(16)}{suffix}"
+                file_record.update(await SupabaseObjectStorage(settings).upload(key, content))
+            except ObjectStorageError:
+                raise HTTPException(503, "納品ファイルの永続保存を確認できません。運営へお問い合わせください") from None
+        elif settings.demo_mode:
+            directory = Path(settings.private_storage_path) / order_id
+            directory.mkdir(parents=True,exist_ok=True)
+            directory.chmod(0o700)
+            path = directory / f"{file_id}{suffix}"
+            await asyncio.to_thread(path.write_bytes, content)
+            path.chmod(0o600)
+            file_record["path"] = str(path)
+        else:
+            raise HTTPException(503, "納品ファイルの永続保存先が未設定です")
     try:
         store.deliver(order, note)
     except ValueError as exc:
-        if file_record:
+        if file_record and file_record.get("path"):
             Path(file_record["path"]).unlink(missing_ok=True)
         raise HTTPException(409, "現在の状態では納品できません") from exc
     if file_record: order["delivery"].setdefault("files",[]).append(file_record)
@@ -1003,6 +1135,15 @@ async def download_delivery_file(request: Request, order_id: str, file_id: str):
     if not order or not order.get("delivery"): raise HTTPException(404)
     item = next((x for x in order["delivery"].get("files",[]) if x["id"]==file_id and x.get("scan_status")=="passed"),None)
     if not item: raise HTTPException(404)
+    if not settings.demo_mode and user["id"] == order["buyer_id"] and (order.get("payment_status") != "paid" or order.get("refund_status") or order.get("status") == "cancelled"):
+        raise HTTPException(404)
+    if item.get("storage_backend") == "supabase":
+        try:
+            url = await SupabaseObjectStorage(settings).signed_delivery_url(item, order_id)
+        except ObjectStorageError:
+            raise HTTPException(503, "納品ファイルのダウンロードを確認できません。運営へお問い合わせください") from None
+        store.audit(user["id"],"delivery.downloaded",f"{order_id}:{file_id}",request.headers.get("x-request-id", ""))
+        return RedirectResponse(url, 303, headers={"Cache-Control":"no-store, private", "Referrer-Policy":"no-referrer"})
     storage_root = Path(settings.private_storage_path).resolve()
     path = Path(item["path"]).resolve()
     if path != storage_root and storage_root not in path.parents: raise HTTPException(404)
@@ -1020,18 +1161,29 @@ async def order_transition(request: Request, order_id: str, action: str, reason:
     if action in {"accept","revise"} and user["id"] != order["buyer_id"]: raise HTTPException(403)
     if action in {"cancel_accept","cancel_reject"} and order.get("cancel_requested_by") == user["id"]: raise HTTPException(403)
     if action == "cancel_request": reason = clean_visible_text(reason, 5, 500, "キャンセル理由", preserve_lines=True)
-    if order.get("refund_status") == "processing": raise HTTPException(409, "返金処理中です")
+    if order.get("refund_status") in {"processing", "pending", "partial", "review"}:
+        raise HTTPException(409, "返金の処理・照合中です。重複操作せず運営へお問い合わせください")
     if action == "cancel_accept" and not settings.demo_mode:
         if order.get("status") != "cancel_pending" or order.get("cancel_requested_by") == user["id"]: raise HTTPException(409)
         if order.get("payment_status") != "paid" or not order.get("payment_reference"): raise HTTPException(409,"返金対象の決済を確認できません")
-        order["refund_status"] = "processing"
-        try: refund = await stripe.refund_payment(order["payment_reference"],order["id"])
+        order.update(refund_cancel_accepted_by=user["id"], refund_cancel_accepted_at=datetime.now(timezone.utc))
+        try:
+            await request_order_refunds(store, order, stripe)
+        except FinanceConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except StripeOutcomeUnknown:
+            order["refund_status"] = "review"
+            await persist_state()
+            raise
         except RuntimeError as exc:
-            order["refund_status"] = "failed"
+            order["refund_status"] = "review"
+            await persist_state()
             raise HTTPException(502,"返金処理を開始できませんでした") from exc
-        order["refund_status"] = "pending"; order["refund_reference"] = refund["id"]
-    try: store.transition(order, action, reason, user["id"])
-    except ValueError: raise HTTPException(409, "現在の状態では操作できません")
+    if not (action == "cancel_accept" and not settings.demo_mode):
+        try: store.transition(order, action, reason, user["id"])
+        except ValueError: raise HTTPException(409, "現在の状態では操作できません")
+    # Real cancellation remains pending until every payment's full refund is
+    # verified by webhook/reconciliation, not merely accepted by the API.
     store.audit(user["id"], f"order.{action}", order_id, request.headers.get("x-request-id", ""))
     recipient = order.get("seller_email") if user["id"] == order["buyer_id"] else order.get("buyer_email")
     action_label = {"accept":"納品承諾","revise":"修正依頼","cancel_request":"キャンセル申請","cancel_accept":"キャンセル合意","cancel_reject":"キャンセル却下"}[action]
@@ -1095,6 +1247,7 @@ async def extra_payment(request: Request, order_id: str, amount: int = Form(...)
         try: session = await stripe.create_extra_checkout(order,extra,account["account_id"])
         except RuntimeError as exc:
             if created: store.rollback_extra_payment(order, extra)
+            await persist_state()
             raise HTTPException(502,"追加支払いを開始できませんでした") from exc
         extra["checkout_session_id"] = session["id"]
         extra["checkout_session_url"] = session["url"]
@@ -1260,6 +1413,8 @@ async def seller_tool_save(
     purchase_notes = clean_visible_text(purchase_notes, 0, 2000, "購入にあたってのお願い", preserve_lines=True)
     minimum_price = 100 if tool.get("price_type") == "paid" else 0
     if not minimum_price <= price <= 1_000_000 or fulfillment_type not in {"instant","custom"} or not 1 <= capacity <= 50 or not 0 <= support_days <= 365 or not 1 <= estimated_delivery_days <= 120: raise HTTPException(422)
+    if supports_subscription == "yes" and not settings.demo_mode:
+        raise HTTPException(409, "現在は買い切りのみ出品できます。月額プランは今後の対応予定です")
     if supports_subscription == "yes" and not 100 <= subscription_price <= 1_000_000: raise HTTPException(422)
     if tool.get("price_type") == "consultation": fulfillment_type = "custom"
     if len(faq_question) > 5 or len(faq_answer) > 5: raise HTTPException(422, "よくある質問は5件以内で入力してください")
@@ -1285,12 +1440,28 @@ async def seller_tool_save(
     if thumbnail and thumbnail.filename:
         thumbnail_url = await save_thumbnail(thumbnail, slug)
     with store._lock:
+        old_review_content = content_fingerprint(tool)
         tool.update({"name":name,"tagline":tagline,"description_md":description_md,"price":price,"capacity":capacity,"support_days":support_days,"estimated_delivery_days":estimated_delivery_days,"fulfillment_type":fulfillment_type,"purchase_notes":purchase_notes,"faq":faq,"supports_subscription":supports_subscription=="yes","subscription_price":subscription_price if supports_subscription=="yes" else 0,"customization_available":customization_available == "yes" or tool.get("price_type") == "consultation","thumbnail_url":thumbnail_url,"transfer_review_status":transfer_review_status,**transfer_settings})
+        if old_review_content != content_fingerprint(tool) and tool.get("safety_scan", {}).get("status") == "passed":
+            reopen_review(tool, datetime.now(timezone.utc), reason="掲載内容が変更されたため再審査中です。承認後に再度公開してください。")
+            store.audit(user["id"], "tool.review_reopened", slug, request.headers.get("x-request-id", ""))
     if transfer_review_status == "pending" and old_transfer != new_transfer:
         store.audit(user["id"], "transfer.review_requested", slug, request.headers.get("x-request-id", ""))
     if was_full and store.tool_active_orders(slug) < capacity and tool.get("status") == "published":
         store.notify_reopened(slug)
     return RedirectResponse(f"/seller/tools/{slug}/edit?saved=1", 303)
+
+
+@app.post("/seller/tools/{slug}/review")
+async def seller_tool_review_request(request: Request, slug: str):
+    user = current_user(request)
+    if not user: raise HTTPException(401)
+    tool = own_tool(user, slug)
+    with store._lock:
+        if tool.get("safety_scan", {}).get("status") == "failed":
+            reopen_review(tool, datetime.now(timezone.utc), reason="販売者から再審査の申請がありました。")
+            store.audit(user["id"], "tool.review_requested", slug, request.headers.get("x-request-id", ""))
+    return RedirectResponse(f"/seller/tools/{slug}/edit#listing-review", 303)
 
 
 @app.post("/seller/tools/{slug}/versions")
@@ -1318,7 +1489,7 @@ async def seller_tool_status(request: Request, slug: str, status: str):
     tool = own_tool(user, slug)
     if status not in {"published","draft","paused"}: raise HTTPException(422)
     if status == "published" and tool.get("safety_scan",{}).get("status") != "passed":
-        raise HTTPException(409, "安全チェック合格後に公開できます")
+        raise HTTPException(409, "運営の掲載審査が必要です。販売管理の「掲載審査」で状況と次の手順を確認してください")
     previous_status = tool.get("status")
     with store._lock:
         tool["status"] = status; tool["is_published"] = status == "published"
@@ -1472,6 +1643,7 @@ async def buy_proposal(request: Request, conversation_id: str, proposal_id: str)
             with store._lock:
                 if order in store.orders: store.orders.remove(order)
                 proposal["status"] = "open"
+            await persist_state()
             raise HTTPException(502,"決済画面を開始できませんでした") from exc
         order["checkout_session_id"] = session["id"]
         order["checkout_session_url"] = session["url"]
@@ -1517,7 +1689,8 @@ async def verification(request: Request):
     if not current_user(request): return RedirectResponse("/login?next=/verification", 303)
     user = current_user(request)
     application = store.identity_applications.get(user["id"])
-    return templates.TemplateResponse(request, "verification.html", context(request, application=application, nda_signed=user["id"] in store.nda_signatures))
+    identity_available = bool(settings.stripe_secret_key and settings.stripe_webhook_secret)
+    return templates.TemplateResponse(request, "verification.html", context(request, application=application, identity_available=identity_available, nda_signed=user["id"] in store.nda_signatures))
 
 
 @app.post("/verification/submit")
@@ -1538,18 +1711,52 @@ async def submit_verification(request: Request, legal_name: str = Form(...), bir
     return RedirectResponse("/verification?submitted=1", 303)
 
 
+def identity_handoff(request: Request, destination: str):
+    # A cross-origin 303 after a form POST is blocked by Chromium's
+    # form-action 'self'. Finish the POST locally, then navigate via a link.
+    # Callers must first validate the provider URL, session and owner.
+    return templates.TemplateResponse(request, "identity_handoff.html", context(request, destination=destination),
+                                      headers={"Cache-Control": "no-store, private", "Referrer-Policy": "no-referrer"})
+
+
 @app.post("/verification/start")
 async def start_identity_verification(request: Request):
     user = current_user(request)
     if not user: raise HTTPException(401)
     if settings.demo_mode: return RedirectResponse("/verification",303)
-    if not settings.stripe_ready: raise HTTPException(503,"本人確認サービスが未設定です")
-    try: session = await stripe.create_identity_session(user["id"])
-    except RuntimeError as exc: raise HTTPException(502,"本人確認を開始できませんでした") from exc
+    if not settings.stripe_secret_key or not settings.stripe_webhook_secret:
+        return RedirectResponse("/verification?unavailable=1",303)
+    application = store.identity_applications.get(user["id"])
+    if application and application.get("status") == "verified":
+        return RedirectResponse("/verification",303)
+    if application and application.get("creation_review_required"):
+        return RedirectResponse("/verification?processing=1",303)
+    try:
+        reference = application and application.get("provider_reference")
+        if reference:
+            session = await stripe.retrieve_identity_session(reference)
+            if session.get("id") != reference or (session.get("metadata") or {}).get("user_id") != user["id"]:
+                raise RuntimeError("本人確認の受付情報が一致しません")
+            if session.get("status") in {"processing", "verified"}:
+                return RedirectResponse("/verification?processing=1",303)
+            if session.get("status") == "requires_input":
+                return identity_handoff(request, verification_url(session, user_id=user["id"], reference=reference))
+            if session.get("status") != "canceled":
+                raise RuntimeError("本人確認の状態を確認できませんでした")
+        session = await stripe.create_identity_session(user["id"])
+        destination = verification_url(session, user_id=user["id"], reference=session["id"])
+    except StripeOutcomeUnknown as exc:
+        # Persist the hold with a non-error response; retrying a new UUID could
+        # create another verification (and another provider charge).
+        with store._lock:
+            store.identity_applications[user["id"]] = {"status":"pending", "provider":"stripe_identity", "creation_review_required":True, "operation_id":exc.operation_id, "submitted_at":datetime.now(timezone.utc), "rejection_reason":None}
+        return RedirectResponse("/verification?processing=1",303)
+    except (RuntimeError, ValueError, KeyError, TypeError) as exc:
+        raise HTTPException(502,"本人確認を開始できませんでした。時間をおいて再度お試しください。") from exc
     with store._lock:
         store.identity_applications[user["id"]] = {"status":"pending","provider":"stripe_identity","provider_reference":session["id"],"submitted_at":datetime.now(timezone.utc),"rejection_reason":None}
     store.audit(user["id"],"identity.provider_started",session["id"],request.headers.get("x-request-id", ""))
-    return RedirectResponse(session["url"],303)
+    return identity_handoff(request, destination)
 
 
 @app.post("/verification/demo-review")
@@ -1607,7 +1814,63 @@ async def security(request: Request):
     settings_data = store.security_settings.setdefault(user["id"], {"two_factor":False,"login_alerts":True,"sessions":1})
     settings_data["sessions"] = sum(1 for record in store.account_sessions.values() if record.get("user",{}).get("id") == user["id"])
     deletion = next((item for item in store.account_deletions if item["user_id"] == user["id"] and item["status"] == "scheduled"), None)
-    return templates.TemplateResponse(request, "security.html", context(request, security=settings_data, deletion=deletion))
+    return templates.TemplateResponse(request, "security.html", context(request, security=settings_data, deletion=deletion, mfa_ready=settings.supabase_ready, mfa_recent=mfa.recent(request)))
+
+
+def mfa_login_redirect(next_path: str):
+    destination = "/security/mfa?" + urlencode({"next": safe_next(next_path)})
+    return RedirectResponse("/login?" + urlencode({"reauth": "1", "next": destination}), 303)
+
+
+@app.get("/security/mfa", response_class=HTMLResponse)
+async def mfa_page(request: Request, next: str = "/security"):
+    if not current_user(request):
+        return mfa_login_redirect(next)
+    if not settings.supabase_ready:
+        raise HTTPException(503, "本番の2段階認証にはSupabase Authへの接続が必要です")
+    try:
+        factors = await mfa.factors(request)
+    except HTTPException as exc:
+        if exc.status_code == 401:
+            return mfa_login_redirect(next)
+        raise
+    verified = [f for f in factors if f.get("status") == "verified"]
+    return templates.TemplateResponse(request, "mfa.html", context(request, factors=verified, next=safe_next(next), enrollment=None, mfa_error=None))
+
+
+@app.post("/security/mfa/enroll", response_class=HTMLResponse)
+async def mfa_enroll(request: Request, next: str = Form("/security")):
+    try:
+        data = await mfa.enroll(request)
+    except HTTPException as exc:
+        if exc.status_code == 401:
+            return mfa_login_redirect(next)
+        raise
+    # Use an image data URL, not raw provider SVG markup in the document.
+    enrollment = {"id": data["id"], "secret": data.get("totp", {}).get("secret", ""),
+                  "qr": totp_qr_image(data.get("totp", {}).get("qr_code", ""))}
+    store.audit(current_user(request)["id"], "security.mfa_enrollment_started", "totp")
+    return templates.TemplateResponse(request, "mfa.html", context(request, factors=[], next=safe_next(next), enrollment=enrollment, mfa_error=None))
+
+
+@app.post("/security/mfa/verify")
+async def mfa_verify(request: Request, factor_id: str = Form(...), code: str = Form(...), next: str = Form("/security")):
+    try:
+        await mfa.verify(request, factor_id, code.strip())
+    except HTTPException as exc:
+        if exc.status_code == 401:
+            return mfa_login_redirect(next)
+        if exc.status_code not in {400, 422}:
+            raise
+        try:
+            factors = await mfa.factors(request)
+        except HTTPException as factor_error:
+            if factor_error.status_code == 401:
+                return mfa_login_redirect(next)
+            raise
+        return templates.TemplateResponse(request, "mfa.html", context(request, factors=factors, next=safe_next(next), enrollment=None, mfa_error=exc.detail), status_code=exc.status_code)
+    store.audit(current_user(request)["id"], "security.mfa_verified", "totp")
+    return RedirectResponse(safe_next(next), 303)
 
 
 @app.post("/security/two-factor")
@@ -1677,7 +1940,7 @@ async def report(request: Request, target_type: str = Form(...), target_id: str 
 
 @app.get("/login", response_class=HTMLResponse)
 async def login(request: Request, next: str = "/"):
-    return templates.TemplateResponse(request, "login.html", context(request, next=safe_next(next), oauth_ready=settings.supabase_ready))
+    return templates.TemplateResponse(request, "login.html", context(request, next=safe_next(next)))
 
 
 @app.post("/login")
@@ -1690,7 +1953,7 @@ async def login_submit(request: Request, email: str = Form(...), password: str =
         try:
             async with httpx.AsyncClient(timeout=10) as client:
                 result = await client.post(f"{settings.supabase_url}/auth/v1/token?grant_type=password",headers={"apikey":settings.supabase_anon_key,"Content-Type":"application/json"},json={"email":email,"password":password})
-                if result.status_code != 200: return templates.TemplateResponse(request, "login.html", context(request, next=redirect_path, oauth_ready=settings.supabase_ready, error="メールアドレスまたはパスワードが違います", email=email), status_code=401)
+                if result.status_code != 200: return templates.TemplateResponse(request, "login.html", context(request, next=redirect_path, error="メールアドレスまたはパスワードが違います", email=email), status_code=401)
                 auth_user = result.json()["user"]
                 profile_response = await client.get(f"{settings.supabase_url}/rest/v1/profiles?id=eq.{auth_user['id']}&select=*,creator_badges(*)",headers={"apikey":settings.supabase_anon_key,"Authorization":f"Bearer {result.json()['access_token']}"})
         except (httpx.HTTPError, KeyError, ValueError) as exc:
@@ -1706,11 +1969,13 @@ async def login_submit(request: Request, email: str = Form(...), password: str =
     else:
         entry = next(({"username":username,**data} for username,data in store.registered_users.items() if data.get("email")==email),None)
         if not verify_password(password, entry and entry.get("password_salt"), entry and entry.get("password_hash")):
-            return templates.TemplateResponse(request, "login.html", context(request, next=redirect_path, oauth_ready=settings.supabase_ready, error="メールアドレスまたはパスワードが違います", email=email), status_code=401)
+            return templates.TemplateResponse(request, "login.html", context(request, next=redirect_path, error="メールアドレスまたはパスワードが違います", email=email), status_code=401)
         if entry.get("is_banned"): raise HTTPException(403, "このアカウントではログインできません")
         identity = store.identity_applications.get(entry["id"], {})
         session_user = {"id":entry["id"],"username":entry["username"],"display_name":entry["display_name"],"email":entry["email"],"avatar_url":entry.get("avatar_url"),"headline":entry.get("headline", ""),"bio":entry.get("bio", ""),"skills":entry.get("skills", []),"experience":entry.get("experience", []),"portfolio":entry.get("portfolio", []),"availability":entry.get("availability", "受付状況未設定"),"response_time":entry.get("response_time", "未設定"),"pricing_note":entry.get("pricing_note", ""),"x_url":entry.get("x_url", ""),"website_url":entry.get("website_url", ""),"is_verified":identity.get("status") == "verified","identity_status":identity.get("status", "not_started"),**creator_badges_for(entry["username"])}
     establish_session(request, session_user)
+    if settings.supabase_ready:
+        mfa.attach_tokens(request, result.json())
     store.audit(session_user["id"],"account.logged_in",session_user["username"],request.headers.get("x-request-id", ""))
     if settings.email_ready and not await send_email_safely(session_user.get("email"), "ツールバコへのログインを確認しました", "あなたのアカウントへのログインがありました。心当たりがない場合は、すぐにパスワードを再設定し、サポートへご連絡ください。"):
         store.audit(session_user["id"], "email.login_alert_failed", session_user["username"], request.headers.get("x-request-id", ""))
@@ -1719,7 +1984,7 @@ async def login_submit(request: Request, email: str = Form(...), password: str =
 
 @app.get("/signup", response_class=HTMLResponse)
 async def signup(request: Request, next: str = "/settings"):
-    return templates.TemplateResponse(request, "signup.html", context(request, oauth_ready=settings.supabase_ready, next=safe_next(next)))
+    return templates.TemplateResponse(request, "signup.html", context(request, next=safe_next(next)))
 
 
 @app.get("/forgot-password", response_class=HTMLResponse)
@@ -1745,12 +2010,58 @@ async def password_recovery(request: Request):
     return templates.TemplateResponse(request, "password_recovery.html", context(request, error=None))
 
 
+@app.get("/auth/confirm", response_class=HTMLResponse)
+async def email_confirmation(request: Request):
+    # Email tokens arrive in the URL fragment, never in our request URL/logs.
+    # Loading the page (including a mail scanner's prefetch) consumes no token.
+    csrf = request.session.setdefault("mail_confirm_csrf", secrets.token_urlsafe(32))
+    return templates.TemplateResponse(request, "email_confirmation.html", context(request, confirmation_csrf=csrf),
+                                      headers={"Referrer-Policy": "no-referrer"})
+
+
+@app.post("/auth/confirm", response_class=HTMLResponse)
+async def email_confirmation_submit(request: Request, token_hash: str = Form(""),
+                                    confirmation_type: str = Form(""), confirmation_csrf: str = Form("")):
+    expected_csrf = str(request.session.pop("mail_confirm_csrf", ""))
+    if not expected_csrf or not re.fullmatch(r"[A-Za-z0-9_-]{43}", confirmation_csrf) or not hmac.compare_digest(expected_csrf, confirmation_csrf):
+        raise HTTPException(403, "確認画面を開き直してください。")
+    if confirmation_type not in {"signup", "recovery"} or not re.fullmatch(r"[A-Za-z0-9_-]{32,256}", token_hash):
+        raise HTTPException(400, "確認リンクが無効です。")
+    if not settings.supabase_ready:
+        raise HTTPException(503, "認証サービスに接続できません。時間をおいてお試しください。")
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            result = await client.post(f"{settings.supabase_url}/auth/v1/verify",
+                                       headers={"apikey": settings.supabase_anon_key},
+                                       json={"token_hash": token_hash, "type": "email" if confirmation_type == "signup" else "recovery"})
+        payload = result.json() if result.status_code == 200 else {}
+        valid_user = isinstance(payload, dict) and isinstance(payload.get("user"), dict) and payload["user"].get("id")
+    except (httpx.HTTPError, ValueError):
+        payload, valid_user = {}, False
+    if not valid_user:
+        return templates.TemplateResponse(request, "email_confirmation.html",
+                                          context(request, confirmation_error="リンクが無効または期限切れです。登録・再設定の案内からやり直してください。"),
+                                          status_code=400, headers={"Referrer-Policy": "no-referrer"})
+    if confirmation_type == "signup":
+        # Confirmation alone must not create an application login/admin session.
+        return RedirectResponse("/login?email_confirmed=1", 303, headers={"Referrer-Policy": "no-referrer"})
+    access_token = payload.get("access_token")
+    if not isinstance(access_token, str) or not 20 <= len(access_token) <= 4096:
+        raise HTTPException(400, "再設定リンクが無効です。再設定メールをもう一度送信してください。")
+    # Keep recovery credentials out of redirects, cookies and persistent state.
+    return templates.TemplateResponse(request, "password_recovery.html", context(request, error=None, recovery_access_token=access_token),
+                                      headers={"Referrer-Policy": "no-referrer"})
+
+
 @app.post("/auth/recovery", response_class=HTMLResponse)
 async def password_recovery_submit(request: Request, access_token: str = Form(...), password: str = Form(...), password_confirmation: str = Form(...)):
     if not settings.supabase_ready:
         raise HTTPException(503, "パスワード再設定基盤が未設定です")
     if not 10 <= len(password) <= 128 or password != password_confirmation or not 20 <= len(access_token) <= 4096:
-        return templates.TemplateResponse(request, "password_recovery.html", context(request, error="パスワードは10文字以上で、確認欄と同じ内容を入力してください。"), status_code=422)
+        return templates.TemplateResponse(request, "password_recovery.html", context(request,
+                                          error="パスワードは10文字以上で、確認欄と同じ内容を入力してください。",
+                                          recovery_access_token=access_token if 20 <= len(access_token) <= 4096 else ""),
+                                          status_code=422, headers={"Referrer-Policy": "no-referrer"})
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             result = await client.put(
@@ -1803,9 +2114,8 @@ async def signup_submit(request: Request, display_name: str = Form(...), usernam
 async def oauth(request: Request, provider: str, next: str = "/"):
     if provider not in {"twitter", "google"}: raise HTTPException(404)
     next = safe_next(next)
-    if not settings.supabase_ready:
-        if settings.is_production: raise HTTPException(503, "認証基盤が未設定です")
-        return RedirectResponse(f"/auth/demo?next={quote(next)}", 303)
+    if provider not in settings.enabled_oauth_providers:
+        raise HTTPException(503, "このログイン方法は現在利用できません。メールアドレスで登録・ログインしてください。")
     oauth_state = secrets.token_urlsafe(24)
     code_verifier = secrets.token_urlsafe(64)
     code_challenge = base64.urlsafe_b64encode(hashlib.sha256(code_verifier.encode()).digest()).rstrip(b"=").decode()
@@ -1839,7 +2149,7 @@ async def auth_callback(request: Request, code: str = "", state: str = "", next:
         async with httpx.AsyncClient(timeout=10) as client:
             token_response = await client.post(
                 f"{settings.supabase_url}/auth/v1/token?grant_type=pkce",
-                headers={"apikey":settings.supabase_anon_key,"Authorization":f"Bearer {settings.supabase_anon_key}","Content-Type":"application/json"},
+                headers={**supabase_headers(settings.supabase_anon_key),"Content-Type":"application/json"},
                 json={"auth_code":code,"code_verifier":code_verifier},
             )
             token_data = token_response.json() if token_response.status_code == 200 else {}
@@ -1882,6 +2192,8 @@ async def auth_callback(request: Request, code: str = "", state: str = "", next:
         entry = store.registered_users.setdefault(session_user["username"], {})
         entry.update({key:session_user.get(key) for key in PROFILE_CACHE_FIELDS})
     store.audit(session_user["id"], "account.oauth_logged_in", session_user["username"], request.headers.get("x-request-id", ""))
+    mfa.attach_tokens(request, token_data)
+    await persist_state()
     return RedirectResponse(safe_next(next), 303)
 
 
@@ -2084,7 +2396,7 @@ async def settings_save(
             async with httpx.AsyncClient(timeout=10) as client:
                 response = await client.patch(
                     f"{settings.supabase_url}/rest/v1/profiles?id=eq.{user['id']}",
-                    headers={"apikey":settings.supabase_service_role_key,"Authorization":f"Bearer {settings.supabase_service_role_key}","Content-Type":"application/json","Prefer":"return=representation"},
+                    headers={**supabase_headers(settings.supabase_service_role_key),"Content-Type":"application/json","Prefer":"return=representation"},
                     json=profile_values,
                 )
         except httpx.HTTPError as exc:
@@ -2154,7 +2466,8 @@ async def account_delete_request(request: Request, confirmation: str = Form(...)
     if not user or confirmation != "退会する": raise HTTPException(422, "確認欄に「退会する」と入力してください")
     active = any(user["id"] in {x["buyer_id"],x["seller_id"]} and x["status"] not in {"completed","cancelled"} for x in store.orders)
     active_transfer = any(user["id"] in {x["buyer_id"],x["seller_id"]} and x["status"] not in {"declined","closed"} for x in store.transfer_inquiries)
-    if active or active_transfer or available_balance(user["id"]) > 0: raise HTTPException(409, "未完了の取引・譲渡相談、または未振込の売上があります")
+    unsettled_payout = any(p["seller_id"] == user["id"] and p.get("status") not in {"paid", "completed", "cancelled"} for p in store.payouts)
+    if active or active_transfer or unsettled_payout or available_balance(user["id"]) > 0 or deletion_hold(store, user["id"]): raise HTTPException(409, "未完了の取引・契約・お問い合わせ、または未振込・照合中の売上があります")
     with store._lock:
         existing = next((item for item in store.account_deletions if item["user_id"] == user["id"] and item["status"] == "scheduled"), None)
         if existing: raise HTTPException(409, "退会申請はすでに受け付けています")
@@ -2199,8 +2512,7 @@ async def sync_creator_badges_to_supabase(account: dict, badge_state: dict[str, 
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
     headers = {
-        "apikey": settings.supabase_service_role_key,
-        "Authorization": f"Bearer {settings.supabase_service_role_key}",
+        **supabase_headers(settings.supabase_service_role_key),
         "Content-Type": "application/json",
         "Prefer": "resolution=merge-duplicates,return=minimal",
     }
@@ -2222,19 +2534,136 @@ async def admin(request: Request):
     user = current_user(request)
     if not is_admin(user): raise HTTPException(403, "管理者のみアクセスできます")
     users = sorted([{"username":username, **account} for username,account in store.registered_users.items()], key=lambda item:item.get("display_name") or item["username"])
-    return templates.TemplateResponse(request, "admin.html", context(request, tools=store.tools, users=users, reports=store.reports, cases=store.support_cases, audit_logs=store.audit_logs[:50], readiness=readiness_summary(settings), finance=store.finance_snapshot(), finance_controls_ready=settings.demo_mode))
+    recoveries = await payment_recovery_inventory(database_store, store) if database_store else {"items": [], "truncated": False}
+    health = await operation_summary(database_store, settings) if database_store else None
+    return templates.TemplateResponse(request, "admin.html", context(request, tools=store.tools, users=users, reports=store.reports, cases=store.support_cases, audit_logs=store.audit_logs[:50], ops_health=health, readiness=readiness_summary(settings, runtime_database_ready=bool(database_store and await database_store.probe()), runtime_storage_ready=await storage_ready(settings), runtime_security_ready=security_service_readiness()), finance=store.finance_snapshot(ledger=bool(database_store)), finance_controls_ready=settings.demo_mode or sandbox_payouts_ready(settings), payout_labels=PAYOUT_LABELS, payment_recoveries=recoveries, refund_resumptions=refund_resumption_inventory(store), payment_recovery_ready=bool(database_store and sandbox_payouts_ready(settings) and len(set(settings.admin_user_ids)) >= 2)))
+
+
+@app.post("/admin/orders/{order_id}/refund-resumption/{action}")
+async def admin_resume_refund(request: Request, order_id: str, action: str, proposal_id: str = Form("")):
+    user = current_user(request)
+    if not is_admin(user) or action not in {"propose", "approve"}:
+        raise HTTPException(403)
+    if not database_store or not sandbox_payouts_ready(settings):
+        raise HTTPException(409, "返金再開は接続済みのテスト環境のみ操作できます")
+    if not mfa.recent(request):
+        return RedirectResponse("/security/mfa?next=/admin", 303)
+    order = next((o for o in store.orders if o["id"] == order_id), None)
+    if not order:
+        raise HTTPException(404)
+    try:
+        if action == "propose":
+            await propose_refund_resumption(database_store, store, stripe, settings, order, user["id"])
+        else:
+            await approve_refund_resumption(database_store, store, stripe, settings, order, user["id"], proposal_id, send_email_safely)
+    except StripeOutcomeUnknown:
+        raise
+    except (FinanceConflict, RuntimeError):
+        raise HTTPException(409, "返金明細の照合・再開を確認できません。重複操作せず運営で詳細確認してください") from None
+    return RedirectResponse("/admin#refund-resumption", 303)
+
+
+@app.post("/admin/orders/{order_id}/reconcile/{kind}/{action}")
+async def admin_reconcile_payment(request: Request, order_id: str, kind: str, action: str, proposal_id: str = Form(""), extra_id: str = Form("")):
+    user = current_user(request)
+    if not is_admin(user) or action not in {"propose", "approve"}:
+        raise HTTPException(403)
+    if kind not in PAYMENT_RECOVERY_KINDS:
+        raise HTTPException(404)
+    if not database_store or not sandbox_payouts_ready(settings):
+        raise HTTPException(409, "決済・返金の照合は接続済みのテスト環境のみ操作できます")
+    if not mfa.recent(request):
+        return RedirectResponse("/security/mfa?next=/admin", 303)
+    order = next((o for o in store.orders if o["id"] == order_id), None)
+    if not order:
+        raise HTTPException(404)
+    try:
+        if action == "propose":
+            await propose_payment_recovery(database_store, store, stripe, settings, order, kind, user["id"], extra_id=extra_id)
+        else:
+            await approve_payment_recovery(database_store, store, stripe, settings, order, kind, user["id"], proposal_id, send_email_safely, extra_id=extra_id)
+    except (FinanceConflict, RuntimeError) as exc:
+        raise HTTPException(409, str(exc)) from None
+    return RedirectResponse("/admin#payment-recovery", 303)
 
 
 @app.post("/admin/sellers/{seller_id}/payouts/{action}")
 async def admin_seller_payout_hold(request: Request, seller_id: str, action: str):
     user = current_user(request)
     if not is_admin(user) or action not in {"hold", "release"}: raise HTTPException(403)
-    if not settings.demo_mode:
+    if not settings.demo_mode and not sandbox_payouts_ready(settings):
         raise HTTPException(503, "本番の振込保留はStripe Connectと金融台帳を接続した後に有効化されます")
     if not any(order.get("seller_id") == seller_id for order in store.orders): raise HTTPException(404)
     paused = action == "hold"
     store.set_seller_payout_hold(seller_id, paused)
+    if not paused and database_store:
+        for payout in store.payouts:
+            # A refund/unknown outcome is NEVER unblocked by releasing an
+            # administrative seller hold. Only this specific hold is resumable.
+            if payout.get("finance_v2") and payout["seller_id"] == seller_id and payout["status"] == "held" and payout.get("hold_reason") == "運営による振込保留":
+                payout.update(status="requested", hold_reason="")
     store.audit(user["id"], "admin.payout_hold" if paused else "admin.payout_release", seller_id, request.headers.get("x-request-id", ""))
+    return RedirectResponse("/admin#finance", 303)
+
+
+@app.post("/admin/payouts/{payout_id}/cancel")
+async def admin_cancel_payout(request: Request, payout_id: str):
+    user = current_user(request)
+    if not is_admin(user): raise HTTPException(403)
+    if not database_store or not sandbox_payouts_ready(settings):
+        raise HTTPException(409, "分配取消は接続済みのテスト環境のみ操作できます")
+    payout = next((p for p in store.payouts if p["id"] == payout_id and p.get("finance_v2")), None)
+    if not payout: raise HTTPException(404)
+    if payout.get("provider_payout_id") or await database_store.operation_result(f"bank-payout-{payout_id}") or payout["status"] in {"bank_pending", "paid", "bank_failed"}:
+        raise HTTPException(409, "銀行振込を開始した申請は取り消せません。Stripeの結果照合が必要です")
+    if payout["status"] == "cancelled":
+        return RedirectResponse("/admin#finance", 303)
+    payout.update(status="reversing", cancellation_requested=True)
+    store.audit(user["id"], "payout.cancel_requested", payout_id, request.headers.get("x-request-id", ""))
+    return RedirectResponse("/admin#finance", 303)
+
+
+@app.post("/admin/payouts/{payout_id}/reconcile/{action}")
+async def admin_reconcile_payout(request: Request, payout_id: str, action: str, proposal_id: str = Form("")):
+    user = current_user(request)
+    if not is_admin(user) or action not in {"propose", "approve"}:
+        raise HTTPException(403)
+    if not database_store or not sandbox_payouts_ready(settings):
+        raise HTTPException(409, "振込の照合は接続済みのテスト環境のみ操作できます")
+    if not mfa.recent(request):
+        return RedirectResponse("/security/mfa?next=/admin", 303)
+    payout = next((p for p in store.payouts if p["id"] == payout_id and p.get("finance_v2")), None)
+    if not payout:
+        raise HTTPException(404)
+    try:
+        if action == "propose":
+            await propose_recovery(database_store, store, stripe, settings, payout, user["id"])
+        else:
+            await approve_recovery(database_store, store, stripe, settings, payout, user["id"], proposal_id)
+    except (FinanceConflict, RuntimeError) as exc:
+        raise HTTPException(409, str(exc)) from None
+    return RedirectResponse("/admin#finance", 303)
+
+
+@app.post("/admin/payouts/{payout_id}/recover-failure/{action}")
+async def admin_recover_failed_payout(request: Request, payout_id: str, action: str, proposal_id: str = Form("")):
+    user = current_user(request)
+    if not is_admin(user) or action not in {"propose", "approve"}:
+        raise HTTPException(403)
+    if not database_store or not sandbox_payouts_ready(settings):
+        raise HTTPException(409, "振込失敗の復旧は接続済みのテスト環境のみ操作できます")
+    if not mfa.recent(request):
+        return RedirectResponse("/security/mfa?next=/admin", 303)
+    payout = next((p for p in store.payouts if p["id"] == payout_id and p.get("finance_v2")), None)
+    if not payout:
+        raise HTTPException(404)
+    try:
+        if action == "propose":
+            await propose_failed_payout(database_store, store, stripe, settings, payout, user["id"])
+        else:
+            await approve_failed_payout(database_store, store, stripe, settings, payout, user["id"], proposal_id)
+    except (FinanceConflict, RuntimeError) as exc:
+        raise HTTPException(409, str(exc)) from None
     return RedirectResponse("/admin#finance", 303)
 
 
@@ -2285,19 +2714,36 @@ async def admin_case_status(request: Request, case_id: str, status: str):
     return RedirectResponse("/admin#cases",303)
 
 
+@app.get("/admin/tools/{slug}/review", response_class=HTMLResponse)
+async def admin_tool_review(request: Request, slug: str):
+    user = current_user(request)
+    if not is_admin(user): raise HTTPException(403, "管理者のみアクセスできます")
+    item = store.get(slug)
+    if not item: raise HTTPException(404)
+    return templates.TemplateResponse(request, "listing_review.html", context(request, tool=item, review_checks=REVIEW_CHECKS, review_token=review_token(item)))
+
+
 @app.post("/admin/tools/{slug}/safety/{status}")
-async def admin_tool_safety(request: Request, slug: str, status: str):
+async def admin_tool_safety(request: Request, slug: str, status: str, note: str = Form(""), checks: list[str] = Form(default=[]), token: str = Form("")):
     user = current_user(request)
     if not is_admin(user) or status not in {"passed","failed","pending"}: raise HTTPException(403)
     item = store.get(slug)
     if not item: raise HTTPException(404)
-    labels = {"passed":"安全チェック済み","failed":"要修正","pending":"再審査中"}
+    note = clean_visible_text(note, 10, 2000, "審査記録・販売者への案内", preserve_lines=True)
+    if status == "passed" and set(checks) != set(REVIEW_CHECKS):
+        raise HTTPException(422, "すべての確認項目を確認してから承認してください")
     with store._lock:
-        item["safety_scan"] = {"status":status,"label":labels[status],"checked_at":datetime.now(timezone.utc).date().isoformat() if status!="pending" else None}
+        if not re.fullmatch(r"[0-9a-f]{64}", token) or not hmac.compare_digest(token, review_token(item)):
+            raise HTTPException(409, "商品または審査状況が変更されています。審査画面を開き直して確認してください")
+        at = datetime.now(timezone.utc).isoformat()
+        item["safety_scan"] = {"status":status,"label":REVIEW_LABELS[status],"checked_at":at if status!="pending" else None,
+            "method":"manual","reviewer_id":user["id"],"reviewed_at":at,"note":note,
+            "checks":list(REVIEW_CHECKS) if status=="passed" else [], "content_fingerprint":content_fingerprint(item)}
+        item.setdefault("passport", {})["security"] = REVIEW_LABELS[status]
         if status in {"failed","pending"}:
             item["status"] = "paused" if item.get("status") == "published" else item.get("status", "draft")
             item["is_published"] = False
-    store.notify(item["author_id"], f"安全審査：{labels[status]}", item["name"], f"/seller/tools/{slug}/edit", "security")
+    store.notify(item["author_id"], f"掲載審査：{REVIEW_LABELS[status]}", f"{item['name']}：{note}", f"/seller/tools/{slug}/edit#listing-review", "security")
     store.audit(user["id"], f"admin.safety_{status}", slug, request.headers.get("x-request-id", ""))
     return RedirectResponse("/admin#tools",303)
 
@@ -2383,6 +2829,8 @@ async def static_page(request: Request):
 
 @app.get("/sitemap.xml")
 async def sitemap():
+    if not settings.is_production:
+        return Response('<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"/>', media_type="application/xml")
     static_urls = ["", "/tools", "/transfers", "/creators", "/requests", "/match", "/about", "/terms", "/privacy", "/tokushoho"]
     dynamic_urls = [f"/tools/{x['slug']}" for x in store.list_tools()] + [f"/requests/{x['id']}" for x in store.requests if x.get("status") == "open"]
     dynamic_urls.extend(f"/tools/{x['slug']}/transfer" for x in store.list_tools() if store.transfer_is_public(x))
@@ -2397,6 +2845,10 @@ async def sitemap():
 
 @app.get("/robots.txt")
 async def robots():
+    if not settings.is_production:
+        # Disallow: / would hide the noindex response headers from crawlers.
+        # This is indexing hygiene, not access control or privacy protection.
+        return PlainTextResponse("User-agent: *\nAllow: /\n")
     private_paths = ["/admin", "/account", "/auth", "/checkout", "/library", "/messages", "/mypage", "/notifications", "/orders", "/payouts", "/purchases", "/security", "/seller", "/settings", "/subscriptions", "/updates", "/verification"]
     return PlainTextResponse("User-agent: *\nAllow: /\n" + "".join(f"Disallow: {path}\n" for path in private_paths) + f"Sitemap: {settings.site_base_url}/sitemap.xml\n")
 
@@ -2407,11 +2859,22 @@ async def health(): return {"status":"ok", "mode":"supabase" if settings.supabas
 
 @app.get("/readyz")
 async def readiness():
-    result = readiness_summary(settings)
+    result = readiness_summary(settings, runtime_database_ready=bool(database_store and await database_store.probe()), runtime_storage_ready=await storage_ready(settings), runtime_security_ready=security_service_readiness())
+    result["security_services"] = security_service_snapshot()
     return JSONResponse(result, status_code=200 if result["ready"] or settings.demo_mode else 503)
 
 
-stripe_webhook_service = StripeWebhookService(settings, store, send_email_safely)
+@app.get("/deploymentz")
+async def deployment_health():
+    # Allows a secure DB/Auth staging build to start before money movement is
+    # approved. /readyz remains the independent, strict public launch verdict.
+    configured = all(configuration_checks(settings).values())
+    connected = configured and bool(database_store and await database_store.probe())
+    return JSONResponse({"status": "ok" if connected else "unavailable", "live_payments_enabled": False},
+                        status_code=200 if connected else 503, headers={"Cache-Control": "no-store"})
+
+
+stripe_webhook_service = StripeWebhookService(settings, store, send_email_safely, journal=database_store, provider=stripe)
 
 
 @app.post("/webhooks/stripe")

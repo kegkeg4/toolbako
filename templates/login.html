@@ -2,15 +2,19 @@
 {% block title %}ログイン — ツールバコ{% endblock %}
 {% block content %}
 <section class="auth-page"><div class="auth-card"><img class="auth-brand-icon" src="/static/brand/toolbako-icon.png?v={{ asset_version }}" width="192" height="192" alt="ツールバコ"><h1>おかえりなさい</h1><p>購入、出品、メッセージを続けましょう。</p>
-  <a class="oauth x" href="/auth/oauth/twitter?next={{ next }}"><b>𝕏</b> X でログイン</a><a class="oauth" href="/auth/oauth/google?next={{ next }}"><b>G</b> Google でログイン</a>
-  <div class="auth-divider"><span>またはメールでログイン</span></div>
+  {% if 'twitter' in oauth_providers %}<a class="oauth x" href="/auth/oauth/twitter?next={{ next|urlencode }}"><b>𝕏</b> X でログイン</a>{% endif %}
+  {% if 'google' in oauth_providers %}<a class="oauth" href="/auth/oauth/google?next={{ next|urlencode }}"><b>G</b> Google でログイン</a>{% endif %}
+  {% if oauth_providers %}<div class="auth-divider"><span>またはメールでログイン</span></div>{% endif %}
   {% if error %}<div class="form-error" role="alert">{{ error }}</div>{% endif %}
+  {% if request.query_params.get('reauth') == '1' %}<div class="success-panel" role="status"><b>安全のため、もう一度ログインしてください</b><p>ログイン情報を更新する必要があります。ログイン後は追加認証の画面へ戻ります。認証アプリの6桁コードで確認すると、元の画面へ進めます。</p></div>{% endif %}
+  {% if request.query_params.get('registered') == '1' %}<div class="success-panel" role="status"><b>確認メールをご確認ください</b><p>メール内のリンクから確認した後、ログインしてください。届かない場合は迷惑メールフォルダーもご確認ください。</p></div>{% endif %}
+  {% if request.query_params.get('email_confirmed') == '1' %}<div class="success-panel" role="status"><b>メールの確認が完了しました</b><p>登録したメールアドレスとパスワードでログインしてください。</p></div>{% endif %}
   <form method="post"><input type="hidden" name="next" value="{{ next }}">
     <div class="field"><label for="login-email">メールアドレス</label><input id="login-email" type="email" name="email" value="{{ email or '' }}" maxlength="254" required autocomplete="email"></div>
     <div class="field"><label for="login-password">パスワード</label><input id="login-password" type="password" name="password" minlength="10" maxlength="128" required autocomplete="current-password"></div>
     <p class="auth-help"><a href="/forgot-password">パスワードを忘れた方</a></p><button class="button large full">安全にログイン</button>
   </form>
-  {% if not oauth_ready %}<div class="demo-note"><b>プレビューモード</b><p>画面確認用のデモアカウントも利用できます。</p><a href="/auth/demo?next={{ next }}">デモでログイン →</a></div>{% endif %}
+  {% if demo_mode %}<div class="demo-note"><b>プレビューモード</b><p>画面確認用のデモアカウントも利用できます。</p><a href="/auth/demo?next={{ next|urlencode }}">デモでログイン →</a></div>{% endif %}
   <small>アカウントをお持ちでない方は <a href="/signup">無料会員登録</a></small>
 </div></section>
 {% endblock %}

@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}掲載審査 — {{ tool.name }} — ツールバコ{% endblock %}
+{% block page_styles %}<link rel="stylesheet" href="/static/listing-review.css?v=20261024-1">{% endblock %}
+{% block content %}
+<section class="simple-suite listing-review-page">
+  <header><a href="/admin#tools">← 運営管理へ</a><h1>商品の掲載審査</h1><p>商品説明と販売条件を手動で確認します。不足する情報は販売者に修正を依頼してください。</p></header>
+  <p class="review-scope">この承認は掲載内容の審査です。AIによるコード解析、動作検証、ウイルス検査を実施した扱いにはなりません。購入者に安全性を保証するものでもありません。</p>
+  <div class="listing-review-layout">
+    <article class="review-product">
+      <span>{{ review_labels.get(tool.safety_scan.status, '運営の掲載審査待ち') }}</span>
+      <h2>{{ tool.name }}</h2><p>{{ tool.tagline }}</p><p>販売者：{{ tool.author_name }}（@{{ tool.author_username }}）</p>
+      {% if tool.thumbnail_url %}<img src="{{ tool.thumbnail_url }}" alt="商品画像" width="480" height="360">{% endif %}
+      <dl><dt>カテゴリ・提供形態</dt><dd>{{ tool.category }} / {{ dist_labels.get(tool.distribution, tool.distribution) }}</dd><dt>価格</dt><dd>{{ price_labels.get(tool.price_type, tool.price_type) }} / ¥{{ '{:,}'.format(tool.price) }}</dd><dt>納品方法</dt><dd>{{ '購入後すぐに提供' if tool.fulfillment_type == 'instant' else '取引ルームで納品' }}</dd><dt>納品目安・サポート</dt><dd>{{ tool.estimated_delivery_days|default(1) }}日 / 購入後{{ tool.support_days }}日</dd><dt>利用AI</dt><dd>{{ tool.ai_used|join('、') }}</dd></dl>
+      <h3>商品説明</h3><div class="review-copy">{{ tool.description_md }}</div>
+      <h3>購入にあたってのお願い</h3><div class="review-copy">{{ tool.purchase_notes or '記載なし' }}</div>
+      <h3>よくある質問</h3>{% for item in tool.faq|default([]) %}<p><b>{{ item.question }}</b><br>{{ item.answer }}</p>{% else %}<p>記載なし</p>{% endfor %}
+      {% if tool.demo_url %}<p><a href="{{ tool.demo_url }}" target="_blank" rel="noopener noreferrer">販売者のデモを別タブで開く</a></p>{% else %}<p>デモURL：未登録</p>{% endif %}
+    </article>
+    <aside class="review-decision">
+      <h2>確認結果を記録</h2>
+      {% if tool.safety_scan.note or tool.safety_scan.previous_note %}<p><b>前回の案内</b></p><div class="review-copy">{{ tool.safety_scan.note or tool.safety_scan.previous_note }}</div>{% endif %}
+      <form action="/admin/tools/{{ tool.slug }}/safety/passed" method="post">
+        <input type="hidden" name="token" value="{{ review_token }}">
+        <fieldset><legend>承認する場合はすべて確認</legend>{% for key,label in review_checks.items() %}<label class="review-check"><input type="checkbox" name="checks" value="{{ key }}"><span>{{ label }}</span></label>{% endfor %}</fieldset>
+        <label for="review-note">審査記録・販売者への案内（必須）</label><textarea id="review-note" name="note" minlength="10" maxlength="2000" rows="7" required placeholder="確認した説明・デモ・利用条件、または不足している情報と修正内容を具体的に入力してください。"></textarea>
+        <small>この文章は販売者にも表示されます。秘密情報や個人情報は記載しないでください。</small>
+        <button class="button" type="submit">掲載を承認する</button>
+        <button class="outline-button" type="submit" formaction="/admin/tools/{{ tool.slug }}/safety/failed">修正を依頼する</button>
+        <button class="outline-button" type="submit" formaction="/admin/tools/{{ tool.slug }}/safety/pending">審査待ちに戻す</button>
+      </form>
+      <p>承認だけでは公開されません。承認後、販売者が販売管理の「公開する」を押します。修正依頼・審査待ちに戻す操作では、公開中の商品を休止します。</p>
+    </aside>
+  </div>
+</section>
+{% endblock %}
