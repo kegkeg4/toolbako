@@ -4,6 +4,7 @@
 {% block content %}
 <section class="account-page narrow-account mfa-page">
   <div class="account-head"><span class="section-kicker">ACCOUNT SECURITY</span><h1>認証アプリで本人確認</h1><p>管理・売上の操作を守るための追加確認です。確認はこの端末で10分間有効です。</p></div>
+  <p><strong>この確認ではメールは送信されません。</strong>スマートフォンの認証アプリに表示される6桁コードを使います。<a href="/support#guide-mfa" target="_blank" rel="noopener">認証アプリの使い方を見る（別タブ）</a></p>
   {% if mfa_error %}<p class="form-error" role="alert">{{ mfa_error }}</p>{% endif %}
   {% if enrollment %}
   <div class="balance-card"><h2>1. スマートフォンに認証アプリを用意</h2>

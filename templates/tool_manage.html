@@ -2,6 +2,7 @@
 <section class="simple-suite">
   <header class="suite-head-row"><div><span class="section-kicker">PRODUCT MANAGER</span><h1>{{ tool.name }}</h1><p>商品情報、3つの販売方法、受付枠、更新情報を管理します。</p></div><a class="outline-button" href="/tools/{{ tool.slug }}">プレビュー</a></header>
   {% if saved %}<div class="manage-save-notice" role="status">✓ 変更を保存しました</div>{% endif %}{% if version_added %}<div class="manage-save-notice" role="status">✓ 更新情報を公開しました</div>{% endif %}
+  <p><a href="/support#guide-image" target="_blank" rel="noopener">商品画像の変更・保存の手順を見る（別タブ）</a></p>
   <div class="manage-layout"><div>
     <form class="manage-form" method="post" enctype="multipart/form-data">
       <label>商品名<input name="name" value="{{ tool.name }}" maxlength="60" required></label>
