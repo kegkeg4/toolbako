@@ -354,7 +354,8 @@ def test_enrollment_cannot_remove_verified_factor(mfa_session, monkeypatch):
     assert len(calls) == 1
 
 
-def test_mfa_refreshes_expired_access_token_without_browser_exposure(mfa_session, monkeypatch):
+@pytest.mark.parametrize("status,payload", [(401, {}), (403, {"error_code": "bad_jwt"}), (403, {"code": "bad_jwt"})])
+def test_mfa_refreshes_expired_access_token_without_browser_exposure(mfa_session, monkeypatch, status, payload):
     mfa, request = mfa_session
     calls = []
     def handle(req):
@@ -363,7 +364,7 @@ def test_mfa_refreshes_expired_access_token_without_browser_exposure(mfa_session
             assert json.loads(req.content)["refresh_token"] == "refresh-token"
             return httpx.Response(200, json={"access_token": "refreshed-token", "refresh_token": "rotated-refresh", "user": {"id": "user-1"}})
         if req.headers["Authorization"] == "Bearer initial-token":
-            return httpx.Response(401, json={})
+            return httpx.Response(status, json=payload)
         assert req.headers["Authorization"] == "Bearer refreshed-token"
         return httpx.Response(200, json={"id": "user-1", "factors": []})
     cls = httpx.AsyncClient
@@ -373,6 +374,68 @@ def test_mfa_refreshes_expired_access_token_without_browser_exposure(mfa_session
     assert mfa.record(request)["provider_tokens"]["refresh_token"] == "rotated-refresh"
     assert not mfa.recent(request)
     assert list(request.session) == ["sid"]
+
+
+@pytest.mark.parametrize("failure", ["revoked", "wrong-user", "empty-token", "rejected-again", "missing-refresh"])
+def test_mfa_refresh_failure_clears_credentials_and_assurance(mfa_session, monkeypatch, failure):
+    mfa, request = mfa_session
+    record = mfa.record(request)
+    record["mfa_verified_at"] = datetime.now(timezone.utc)
+    record["mfa_token_expires_at"] = datetime.now(timezone.utc) + timedelta(hours=1)
+    if failure == "missing-refresh":
+        record["provider_tokens"].pop("refresh_token")
+    calls = []
+
+    def handle(req):
+        calls.append(req.url.path)
+        if req.url.path.endswith("/token"):
+            if failure == "revoked":
+                return httpx.Response(400, json={"error_code": "refresh_token_not_found"})
+            return httpx.Response(200, json={"access_token": "" if failure == "empty-token" else "fresh",
+                "refresh_token": "rotated", "user": {"id": "other" if failure == "wrong-user" else "user-1"}})
+        return httpx.Response(403, json={"error_code": "bad_jwt"})
+
+    cls = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: cls(transport=httpx.MockTransport(handle), **kw))
+    with pytest.raises(HTTPException) as err:
+        asyncio.run(mfa.factors(request))
+    assert err.value.status_code == 401
+    assert "provider_tokens" not in record
+    assert "mfa_verified_at" not in record and "mfa_token_expires_at" not in record
+    assert not mfa.recent(request)
+    assert len(calls) == (1 if failure == "missing-refresh" else 3 if failure == "rejected-again" else 2)
+
+
+@pytest.mark.parametrize("status,payload,expected", [(403, {"error_code": "mfa_totp_enroll_not_enabled"}, 403), (429, {}, 429), (503, {}, 503)])
+def test_mfa_noncredential_errors_do_not_refresh_or_blame_code(mfa_session, monkeypatch, status, payload, expected):
+    mfa, request = mfa_session
+    calls = []
+    def handle(req):
+        calls.append(req.url.path)
+        return httpx.Response(status, json=payload)
+    cls = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: cls(transport=httpx.MockTransport(handle), **kw))
+    with pytest.raises(HTTPException) as err:
+        asyncio.run(mfa.factors(request))
+    assert err.value.status_code == expected
+    assert "コードを確認" not in err.value.detail
+    assert len(calls) == 1
+    assert mfa.record(request)["provider_tokens"]["access_token"] == "initial-token"
+
+
+@pytest.mark.parametrize("status,expected", [(429, 429), (500, 503)])
+def test_mfa_refresh_service_failure_preserves_retryable_credentials(mfa_session, monkeypatch, status, expected):
+    mfa, request = mfa_session
+    def handle(req):
+        if req.url.path.endswith("/token"):
+            return httpx.Response(status, json={})
+        return httpx.Response(403, json={"error_code": "bad_jwt"})
+    cls = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: cls(transport=httpx.MockTransport(handle), **kw))
+    with pytest.raises(HTTPException) as err:
+        asyncio.run(mfa.factors(request))
+    assert err.value.status_code == expected
+    assert mfa.record(request)["provider_tokens"]["refresh_token"] == "refresh-token"
 
 
 @pytest.mark.parametrize("outcome", ["timeout", "malformed", "conflict", "server_error"])

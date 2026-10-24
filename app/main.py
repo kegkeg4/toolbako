@@ -1791,20 +1791,35 @@ async def security(request: Request):
     return templates.TemplateResponse(request, "security.html", context(request, security=settings_data, deletion=deletion, mfa_ready=settings.supabase_ready, mfa_recent=mfa.recent(request)))
 
 
+def mfa_login_redirect(next_path: str):
+    destination = "/security/mfa?" + urlencode({"next": safe_next(next_path)})
+    return RedirectResponse("/login?" + urlencode({"reauth": "1", "next": destination}), 303)
+
+
 @app.get("/security/mfa", response_class=HTMLResponse)
 async def mfa_page(request: Request, next: str = "/security"):
     if not current_user(request):
-        return RedirectResponse("/login?next=/security/mfa", 303)
+        return mfa_login_redirect(next)
     if not settings.supabase_ready:
         raise HTTPException(503, "本番の2段階認証にはSupabase Authへの接続が必要です")
-    factors = await mfa.factors(request)
+    try:
+        factors = await mfa.factors(request)
+    except HTTPException as exc:
+        if exc.status_code == 401:
+            return mfa_login_redirect(next)
+        raise
     verified = [f for f in factors if f.get("status") == "verified"]
     return templates.TemplateResponse(request, "mfa.html", context(request, factors=verified, next=safe_next(next), enrollment=None, mfa_error=None))
 
 
 @app.post("/security/mfa/enroll", response_class=HTMLResponse)
 async def mfa_enroll(request: Request, next: str = Form("/security")):
-    data = await mfa.enroll(request)
+    try:
+        data = await mfa.enroll(request)
+    except HTTPException as exc:
+        if exc.status_code == 401:
+            return mfa_login_redirect(next)
+        raise
     # Use an image data URL, not raw provider SVG markup in the document.
     enrollment = {"id": data["id"], "secret": data.get("totp", {}).get("secret", ""),
                   "qr": totp_qr_image(data.get("totp", {}).get("qr_code", ""))}
@@ -1817,9 +1832,16 @@ async def mfa_verify(request: Request, factor_id: str = Form(...), code: str = F
     try:
         await mfa.verify(request, factor_id, code.strip())
     except HTTPException as exc:
+        if exc.status_code == 401:
+            return mfa_login_redirect(next)
         if exc.status_code not in {400, 422}:
             raise
-        factors = await mfa.factors(request)
+        try:
+            factors = await mfa.factors(request)
+        except HTTPException as factor_error:
+            if factor_error.status_code == 401:
+                return mfa_login_redirect(next)
+            raise
         return templates.TemplateResponse(request, "mfa.html", context(request, factors=factors, next=safe_next(next), enrollment=None, mfa_error=exc.detail), status_code=exc.status_code)
     store.audit(current_user(request)["id"], "security.mfa_verified", "totp")
     return RedirectResponse(safe_next(next), 303)

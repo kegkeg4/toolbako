@@ -64,42 +64,70 @@ class SupabaseMFA:
             and now - timedelta(minutes=10) <= verified_at <= now < expires_at
         )
 
+    @staticmethod
+    def _invalid_access_token(response) -> bool:
+        # GoTrue returns 403/bad_jwt for an expired JWT. Other 403s (for
+        # example disabled MFA) are not a reason to rotate credentials.
+        if response.status_code == 401:
+            return True
+        if response.status_code != 403:
+            return False
+        try:
+            data = response.json()
+        except ValueError:
+            return False
+        return isinstance(data, dict) and data.get("error_code", data.get("code")) == "bad_jwt"
+
+    @staticmethod
+    def _require_login(record):
+        for key in ("provider_tokens", "mfa_verified_at", "mfa_token_expires_at"):
+            record.pop(key, None)
+        raise HTTPException(401, "ログインの有効期限が切れました。再度ログインしてください")
+
+    @staticmethod
+    def _check_availability(response):
+        if response.status_code == 429:
+            raise HTTPException(429, "認証回数の上限です。時間をおいて再度お試しください")
+        if response.status_code >= 500:
+            raise HTTPException(503, "認証サービスへ接続できませんでした")
+
     async def _request(self, request, method, path, body=None):
         if not self.settings.supabase_ready:
             raise HTTPException(503, "認証サービスの設定が必要です")
         record = self.record(request)
         tokens = record.get("provider_tokens", {})
         if not tokens.get("access_token"):
-            raise HTTPException(401, "2段階認証を利用するには再度ログインしてください")
+            self._require_login(record)
         try:
             async with httpx.AsyncClient(timeout=10) as client:
                 headers = {"apikey": self.settings.supabase_anon_key,
                            "Authorization": f"Bearer {tokens['access_token']}"}
                 response = await client.request(method, f"{self.settings.supabase_url}/auth/v1/{path}", headers=headers, json=body)
-                if response.status_code == 401 and tokens.get("refresh_token"):
+                if self._invalid_access_token(response) and tokens.get("refresh_token"):
                     refreshed = await client.post(
                         f"{self.settings.supabase_url}/auth/v1/token?grant_type=refresh_token",
                         headers={"apikey": self.settings.supabase_anon_key},
                         json={"refresh_token": tokens["refresh_token"]},
                     )
+                    self._check_availability(refreshed)
                     if refreshed.status_code != 200:
-                        record.pop("provider_tokens", None)
-                        record.pop("mfa_verified_at", None)
-                        raise HTTPException(401, "ログインの有効期限が切れました。再度ログインしてください")
+                        self._require_login(record)
                     data = refreshed.json()
-                    if data.get("user", {}).get("id") != record["user"]["id"]:
-                        raise HTTPException(401, "認証情報を確認できませんでした")
+                    if (not isinstance(data, dict) or not isinstance(data.get("user"), dict)
+                            or data["user"].get("id") != record["user"]["id"]
+                            or not all(isinstance(data.get(key), str) and data[key]
+                                       for key in ("access_token", "refresh_token"))):
+                        self._require_login(record)
                     self.attach_tokens(request, data)
                     headers["Authorization"] = f"Bearer {data['access_token']}"
                     response = await client.request(method, f"{self.settings.supabase_url}/auth/v1/{path}", headers=headers, json=body)
-                if response.status_code == 429:
-                    raise HTTPException(429, "認証回数の上限です。時間をおいて再度お試しください")
-                if response.status_code == 401:
-                    raise HTTPException(401, "再度ログインして2段階認証をやり直してください")
-                if response.status_code >= 500:
-                    raise HTTPException(503, "認証サービスへ接続できませんでした")
+                self._check_availability(response)
+                if self._invalid_access_token(response):
+                    self._require_login(record)
                 if response.status_code >= 400:
-                    raise HTTPException(400, "認証を確認できませんでした。コードを確認して再度お試しください")
+                    if path.endswith("/verify"):
+                        raise HTTPException(400, "認証を確認できませんでした。コードを確認して再度お試しください")
+                    raise HTTPException(403, "認証情報を取得できませんでした。時間をおいて再度お試しください。解決しない場合はお問い合わせください")
                 return response.json() if response.content else {}
         except (httpx.HTTPError, KeyError, ValueError) as exc:
             raise HTTPException(503, "認証サービスへ接続できませんでした") from exc
@@ -107,7 +135,7 @@ class SupabaseMFA:
     async def factors(self, request):
         data = await self._request(request, "GET", "user")
         if data.get("id") != self.record(request)["user"]["id"]:
-            raise HTTPException(401, "アカウントを確認できませんでした")
+            self._require_login(self.record(request))
         return [f for f in data.get("factors", []) if f.get("factor_type") == "totp"]
 
     async def enroll(self, request):
