@@ -39,6 +39,16 @@ document.addEventListener('keydown', (event) => {
   }
 });
 
+// Reveal invalid fields before the browser tries to focus them.
+document.addEventListener('invalid', (event) => {
+  if (!event.target.closest('.manage-form, [data-tool-form]')) return;
+  let details = event.target.closest('details');
+  while (details) {
+    details.open = true;
+    details = details.parentElement?.closest('details');
+  }
+}, true);
+
 document.addEventListener('submit', (event) => {
   const form = event.target;
   const actionPath = new URL(form.action || location.href, location.href).pathname;
