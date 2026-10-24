@@ -1,0 +1,26 @@
+Stripe webhook admission release - 2026-10-24
+
+The upload byte/time limiter runs before the Stripe admission guard. The guard
+validates the unmodified body, signature, account scope, and test/live mode before
+opening a database request. The route repeats validation before applying state.
+Invalid messages receive 400 (oversized bodies: 413), with no-store and existing
+security headers. Valid messages retain normal database failure/retry semantics;
+an unavailable database must not produce a successful acknowledgement.
+
+Committed event IDs are checked before resolving current business state. Replays
+after a database-backed restart acknowledge the duplicate without repeating
+notifications, audit records, or provider lookups. No schema changes are required.
+This does not implement an asynchronous webhook queue or dead-letter handling.
+
+Validation: 115 targeted tests passed on Windows with disposable local PostgreSQL.
+Coverage includes invalid signatures, expiry, scope/mode mismatch, duplicate
+headers, malformed/oversized bodies, byte-exact chunk replay, database outages,
+persisted duplicate replay, and existing financial/webhook/database regressions.
+
+Sources:
+https://docs.stripe.com/webhooks
+https://docs.stripe.com/events/manage-webhook-endpoints
+
+Release boundaries: real payments and search indexing remain disabled. No new
+credentials, customer mail, customer records, or provider transactions are used
+by the live smoke test. Only unsigned/invalid synthetic requests are submitted.

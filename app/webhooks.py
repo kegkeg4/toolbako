@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable
 
 from fastapi import HTTPException, Request
+from starlette.responses import JSONResponse
 from .finance import FinanceConflict
 from .payout_worker import apply_bank_status, verify_bank_payout
 from .payment_state import apply_checkout_payment, apply_checkout_expiry, apply_refund_payment
@@ -28,15 +29,12 @@ PLATFORM_EVENTS = frozenset({'checkout.session.completed', 'checkout.session.asy
     'customer.subscription.updated', 'customer.subscription.deleted'})
 
 
-class StripeWebhookService:
-    """Validate and apply Stripe events atomically within one app process."""
+class StripeWebhookValidator:
+    """Validate transport data without database or marketplace access."""
 
-    def __init__(self, settings: Any, store: Any, email_sender: EmailSender, *, journal=None, provider=None):
+    def __init__(self, settings, *, durable=False):
         self.settings = settings
-        self.store = store
-        self.email_sender = email_sender
-        self.journal = journal
-        self.provider = provider
+        self.durable = durable
 
     def verify_signature(self, payload: bytes, signature: str, *, connect: bool = False) -> bool:
         secret = self.settings.stripe_connect_webhook_secret if connect else self.settings.stripe_webhook_secret
@@ -58,13 +56,7 @@ class StripeWebhookService:
         return any(re.fullmatch(r'[0-9a-f]{64}', supplied) and hmac.compare_digest(expected, supplied)
                    for supplied in parts.get('v1', []))
 
-    async def handle(self, request: Request) -> dict[str, bool]:
-        payload = bytearray()
-        async for chunk in request.stream():
-            if len(payload) + len(chunk) > WEBHOOK_BODY_LIMIT:
-                raise HTTPException(413, "webhook payload too large")
-            payload.extend(chunk)
-        payload = bytes(payload)
+    def validate_event(self, payload: bytes, signature: str):
         try:
             event = json.loads(payload)
         except (ValueError, UnicodeError, RecursionError) as exc:
@@ -80,23 +72,85 @@ class StripeWebhookService:
         connected = 'account' in event
         if connected and (not isinstance(event['account'], str) or not re.fullmatch(r'acct_[A-Za-z0-9_]+', event['account'])):
             raise HTTPException(400, 'invalid connected account')
-        if not self.verify_signature(payload, request.headers.get('stripe-signature', ''), connect=connected):
+        if not self.verify_signature(payload, signature, connect=connected):
             raise HTTPException(400, 'invalid signature')
         # Platform charges/Identity are never created as a connected account.
         # Matching metadata alone must not cross that ownership boundary.
         if ((event_type in CONNECT_EVENTS and not connected)
                 or (connected and (event_type in PLATFORM_EVENTS or event_type.startswith('identity.verification_session.')))):
             raise HTTPException(400, 'event account scope does not match')
-        if self.journal or self.settings.is_deployed or self.settings.stripe_secret_key or 'livemode' in event:
+        if self.durable or self.settings.is_deployed or self.settings.stripe_secret_key or 'livemode' in event:
             expected_live = self.settings.stripe_secret_key.startswith(("sk_live_", "rk_live_"))
             if type(event.get("livemode")) is not bool or event["livemode"] != expected_live:
                 raise HTTPException(400, "event environment does not match")
 
-        state = self._resolve(event)
-        # Deduplicate before a provider GET; an acknowledged event must not
-        # start failing later because a key was rotated or its object removed.
+        return event
+
+
+class StripeWebhookGuardMiddleware:
+    """Reject invalid Stripe messages before opening a marketplace DB request.
+
+    Installed inside the upload-size/time limiter and outside the DB boundary.
+    The route revalidates the same raw bytes after acquiring the DB lock.
+    """
+
+    def __init__(self, app, *, settings):
+        self.app = app
+        self.validator = StripeWebhookValidator(settings, durable=bool(settings.database_url))
+
+    async def __call__(self, scope, receive, send):
+        if scope['type'] != 'http' or scope['path'] != '/webhooks/stripe' or scope['method'] != 'POST':
+            return await self.app(scope, receive, send)
+        try:
+            signatures = [value for key, value in scope['headers'] if key.lower() == b'stripe-signature']
+            if len(signatures) != 1:
+                raise HTTPException(400, 'invalid signature')
+            payload = bytearray()
+            async for chunk in Request(scope, receive).stream():
+                if len(payload) + len(chunk) > WEBHOOK_BODY_LIMIT:
+                    raise HTTPException(413, 'webhook payload too large')
+                payload.extend(chunk)
+            payload = bytes(payload)
+            self.validator.validate_event(payload, signatures[0].decode('latin-1'))
+        except HTTPException as exc:
+            response = JSONResponse({'detail': exc.detail}, status_code=exc.status_code,
+                                    headers={'Cache-Control': 'no-store'})
+            return await response(scope, receive, send)
+        replayed = False
+
+        async def replay():
+            nonlocal replayed
+            if replayed:
+                return await receive()
+            replayed = True
+            return {'type': 'http.request', 'body': payload, 'more_body': False}
+
+        await self.app(scope, replay, send)
+
+
+class StripeWebhookService(StripeWebhookValidator):
+    """Validate and apply Stripe events atomically within one app process."""
+
+    def __init__(self, settings: Any, store: Any, email_sender: EmailSender, *, journal=None, provider=None):
+        super().__init__(settings, durable=bool(journal))
+        self.store = store
+        self.email_sender = email_sender
+        self.journal = journal
+        self.provider = provider
+
+    async def handle(self, request: Request) -> dict[str, bool]:
+        payload = bytearray()
+        async for chunk in request.stream():
+            if len(payload) + len(chunk) > WEBHOOK_BODY_LIMIT:
+                raise HTTPException(413, "webhook payload too large")
+            payload.extend(chunk)
+        event = self.validate_event(bytes(payload), request.headers.get('stripe-signature', ''))
+        event_id = event['id']
+        # A committed event must be acknowledged even if its related state was
+        # removed or changed since processing. Signature/scope/mode still apply.
         if event_id in self.store.processed_webhook_events:
             return {"received": True, "duplicate": True}
+        state = self._resolve(event)
         await self._refresh_provider_state(event, state)
         payout = state.get("payout")
         if self.journal and payout and not payout.get("provider_payout_id"):

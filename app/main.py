@@ -47,7 +47,7 @@ from .integrations import EmailIntegration, StripeIntegration, StripeOutcomeUnkn
 from .files import clamav_scan, validate_delivery_file, encode_thumbnail
 from .security import SessionService, hash_password, verify_password
 from .web import clean_visible_text, safe_http_url, safe_next, slugify
-from .webhooks import StripeWebhookService
+from .webhooks import StripeWebhookService, StripeWebhookGuardMiddleware
 from .mfa import SupabaseMFA, is_privileged_path, totp_qr_image
 from .finance import FinanceConflict, PAYOUT_LABELS, balance as ledger_balance, request_payout
 from .payout_worker import sandbox_payouts_ready
@@ -107,6 +107,7 @@ app.add_middleware(SessionMiddleware, secret_key=settings.session_secret, sessio
 app.add_middleware(GZipMiddleware, minimum_size=500, compresslevel=6)
 if database_store or settings.is_production:
     app.add_middleware(DatabaseBoundaryMiddleware, backend=database_store, store=store)
+app.add_middleware(StripeWebhookGuardMiddleware, settings=settings)
 app.add_middleware(ProductionGuardMiddleware, settings=settings)
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(settings.allowed_hosts) if settings.allowed_hosts else ["*"])
 app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
