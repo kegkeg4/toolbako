@@ -82,7 +82,7 @@ def identity_route(monkeypatch):
         return {'id':reference,'metadata':{'user_id':'identity-owner'},'status':'requires_input','url':'https://verify.stripe.com/start/test'}
     monkeypatch.setattr(main.stripe,'create_identity_session',create)
     monkeypatch.setattr(main.stripe,'retrieve_identity_session',retrieve)
-    request=Request({'type':'http','headers':[],'session':{}})
+    request=Request({'type':'http','headers':[],'session':{},'path':'/verification/start','query_string':b'','scheme':'http','server':('testserver',80)})
     return main,request,calls
 
 
@@ -90,8 +90,42 @@ def test_resume_reuses_session_instead_of_creating_a_second_one(identity_route):
     main,request,calls=identity_route
     first=asyncio.run(main.start_identity_verification(request))
     second=asyncio.run(main.start_identity_verification(request))
-    assert first.headers['location']==second.headers['location']=='https://verify.stripe.com/start/test'
+    assert first.status_code == second.status_code == 200
+    assert 'location' not in first.headers and 'location' not in second.headers
+    for response in (first, second):
+        assert 'href="https://verify.stripe.com/start/test"' in response.body.decode()
+        assert 'data-identity-destination' in response.body.decode()
+        assert response.headers['cache-control'] == 'no-store, private'
+        assert response.headers['referrer-policy'] == 'no-referrer'
     assert calls==['create','retrieve']
+
+
+def test_identity_post_finishes_locally_without_relaxing_csp(identity_route):
+    main,request,calls=identity_route
+    response=TestClient(main.app).post('/verification/start', follow_redirects=False)
+    assert response.status_code == 200
+    assert "form-action 'self'" in response.headers['content-security-policy']
+    assert 'verify.stripe.com' not in response.headers['content-security-policy']
+    assert 'href="https://verify.stripe.com/start/test"' in response.text
+    assert '/static/identity-handoff.js?v=20261024-1' in response.text
+    assert 'no-store' in response.headers['cache-control']
+    assert response.headers['referrer-policy'] == 'no-referrer'
+    assert main.store.identity_applications['identity-owner']['provider_reference']=='vs_owned'
+    assert main.store.identity_applications['identity-owner']['status']=='pending'
+    assert 'url' not in main.store.identity_applications['identity-owner']
+    assert calls==['create']
+
+
+def test_resume_rejects_another_users_provider_session(identity_route, monkeypatch):
+    main,request,calls=identity_route
+    main.store.identity_applications['identity-owner']={'status':'pending','provider_reference':'vs_owned'}
+    async def wrong_owner(reference):
+        return {'id':reference,'metadata':{'user_id':'other-user'},'status':'requires_input','url':'https://verify.stripe.com/start/test'}
+    monkeypatch.setattr(main.stripe,'retrieve_identity_session',wrong_owner)
+    response=TestClient(main.app).post('/verification/start', follow_redirects=False)
+    assert response.status_code==502
+    assert 'https://verify.stripe.com/start/test' not in response.text
+    assert calls==[]
 
 
 def test_unknown_creation_is_held_without_automatic_retry(identity_route,monkeypatch):

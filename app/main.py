@@ -1693,6 +1693,14 @@ async def submit_verification(request: Request, legal_name: str = Form(...), bir
     return RedirectResponse("/verification?submitted=1", 303)
 
 
+def identity_handoff(request: Request, destination: str):
+    # A cross-origin 303 after a form POST is blocked by Chromium's
+    # form-action 'self'. Finish the POST locally, then navigate via a link.
+    # Callers must first validate the provider URL, session and owner.
+    return templates.TemplateResponse(request, "identity_handoff.html", context(request, destination=destination),
+                                      headers={"Cache-Control": "no-store, private", "Referrer-Policy": "no-referrer"})
+
+
 @app.post("/verification/start")
 async def start_identity_verification(request: Request):
     user = current_user(request)
@@ -1714,7 +1722,7 @@ async def start_identity_verification(request: Request):
             if session.get("status") in {"processing", "verified"}:
                 return RedirectResponse("/verification?processing=1",303)
             if session.get("status") == "requires_input":
-                return RedirectResponse(verification_url(session, user_id=user["id"], reference=reference),303)
+                return identity_handoff(request, verification_url(session, user_id=user["id"], reference=reference))
             if session.get("status") != "canceled":
                 raise RuntimeError("本人確認の状態を確認できませんでした")
         session = await stripe.create_identity_session(user["id"])
@@ -1730,7 +1738,7 @@ async def start_identity_verification(request: Request):
     with store._lock:
         store.identity_applications[user["id"]] = {"status":"pending","provider":"stripe_identity","provider_reference":session["id"],"submitted_at":datetime.now(timezone.utc),"rejection_reason":None}
     store.audit(user["id"],"identity.provider_started",session["id"],request.headers.get("x-request-id", ""))
-    return RedirectResponse(destination,303)
+    return identity_handoff(request, destination)
 
 
 @app.post("/verification/demo-review")

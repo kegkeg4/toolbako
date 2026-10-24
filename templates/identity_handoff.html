@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}本人確認画面へ移動 — ツールバコ{% endblock %}
+{% block content %}
+<section class="auth-page"><div class="auth-card">
+  <h1>本人確認画面へ移動します</h1>
+  <p role="status">Stripeの本人確認画面を開いています。自動で移動しない場合は、下のボタンを押してください。</p>
+  <a class="button large full" data-identity-destination href="{{ destination }}" rel="noreferrer">Stripeの本人確認画面を開く</a>
+  <p>書類や自撮りの提出は、移動先の画面で行います。この時点では本人確認は完了していません。</p>
+  <p><a href="/verification">本人確認の状況へ戻る</a></p>
+</div></section>
+<script defer src="/static/identity-handoff.js?v=20261024-1"></script>
+{% endblock %}
