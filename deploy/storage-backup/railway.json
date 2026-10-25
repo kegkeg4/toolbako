@@ -1,0 +1,10 @@
+{
+  "$schema": "https://railway.com/railway.schema.json",
+  "build": {"builder": "DOCKERFILE", "dockerfilePath": "deploy/storage-backup/Dockerfile"},
+  "deploy": {
+    "startCommand": "python -m tools.storage_backup run",
+    "cronSchedule": "0 18 * * *",
+    "restartPolicyType": "NEVER",
+    "numReplicas": 1
+  }
+}

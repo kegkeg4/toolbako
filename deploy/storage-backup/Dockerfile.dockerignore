@@ -1,0 +1,7 @@
+**
+!requirements.txt
+!app
+!app/object_storage.py
+!app/supabase_api.py
+!tools
+!tools/storage_backup.py

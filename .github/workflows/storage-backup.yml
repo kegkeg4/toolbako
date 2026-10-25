@@ -1,0 +1,45 @@
+name: Encrypted Storage backup verification
+on:
+  push:
+    paths:
+      - 'tools/storage_backup.py'
+      - 'tests/test_storage_backup.py'
+      - 'deploy/storage-backup/**'
+      - 'app/object_storage.py'
+      - 'app/supabase_api.py'
+      - 'requirements*.txt'
+      - '.github/workflows/storage-backup.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --require-hashes -r requirements-dev.txt
+      - name: Build isolated non-root backup image
+        run: |
+          docker build -f deploy/storage-backup/Dockerfile -t toolbako-backup-check .
+          docker run --rm --network none toolbako-backup-check --help
+          test "$(docker image inspect toolbako-backup-check --format '{{.Config.User}}')" = '10001:10001'
+          docker create --name backup-binary toolbako-backup-check
+          docker cp backup-binary:/usr/local/bin/restic ./restic
+          docker rm backup-binary
+          chmod +x ./restic
+      - name: Synthetic encryption, restore, integrity and retention tests
+        env:
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
+        run: TOOLBAKO_TEST_RESTIC="$GITHUB_WORKSPACE/restic" python -m pytest -q tests/test_storage_backup.py --junitxml=storage-backup-tests.xml
+      - name: Missing credentials must fail closed
+        run: |
+          set +e
+          output=$(docker run --rm --network none toolbako-backup-check 2>&1)
+          result=$?
+          set -e
+          test "$result" -eq 1
+          printf '%s\n' "$output" | grep -F '"status":"failed","stage":"configuration"'
