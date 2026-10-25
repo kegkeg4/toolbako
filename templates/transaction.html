@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}取引ルーム — {{ order.tool_name }}{% endblock %}
 {% block content %}
-{% set refund_in_progress = order.refund_status|default('') in ['processing','pending','partial','review'] %}
+{% set refund_in_progress = order.refund_status|default('') in ['awaiting_approval','processing','pending','partial','review'] %}
 <section class="transaction-page">
   <header class="transaction-head">
     <div><a href="{{ '/purchases' if user.id==order.buyer_id else '/seller' }}">← 取引一覧</a><span class="status-pill status-{{ order.status }}">{{ '返金確認中' if refund_in_progress else ('返金済み・キャンセル完了' if order.refund_status|default('')=='completed' else status_labels[order.status]) }}</span><h1>{{ order.tool_name }}</h1><p>販売者：{{ order.seller_name }}　注文番号：{{ order.id[:8] }}</p></div>
@@ -10,7 +10,9 @@
   <div class="transaction-layout">
     <section class="room">
       <div class="flow-stepper"><span class="done">1<small>購入</small></span><i></i><span class="{% if order.status != 'in_progress' %}done{% endif %}">2<small>制作・準備</small></span><i></i><span class="{% if order.status in ['awaiting_acceptance','completed'] %}done{% endif %}">3<small>正式な納品</small></span><i></i><span class="{% if order.status == 'completed' %}done{% endif %}">4<small>承諾・評価</small></span></div>
-      {% if refund_in_progress %}
+      {% if order.refund_status|default('') == 'awaiting_approval' %}
+      <div class="cancel-alert" role="status"><b>キャンセル合意を受け付けました</b><p>返金はまだ実行されていません。運営の担当者2名が元の決済・金額を確認してから進めます。重複申請せず、確認をお待ちください。</p></div>
+      {% elif refund_in_progress %}
       <div class="cancel-alert" role="status"><b>全額返金の確認中です</b><p>確認済み ¥{{ '{:,}'.format(order.refund_confirmed_amount|default(0)) }} ／ お支払い ¥{{ '{:,}'.format(order.amount) }}。追加支払いを含むすべての返金が確認されるまで、取引は処理中です。返金申請を繰り返さず、運営の確認をお待ちください。</p>{% if order.refund_status=='review' %}<small>通信結果などを運営が確認しています。</small>{% endif %}</div>
       {% elif order.refund_status|default('')=='completed' %}
       <div class="complete-alert"><b>✓ 全額返金を確認しました</b><p>カード会社側へ返金が反映されるまで時間がかかる場合があります。</p></div>

@@ -1,4 +1,4 @@
-"""Four-eyes resumption of an interrupted full cancellation, Sandbox only.
+"""Four-eyes initiation and resumption of full cancellation, Sandbox only.
 
 This is NOT unknown-operation recovery. A new POST is allowed only for a part
 with NO durable intent, NO local refund facts and NO provider refunds. Every
@@ -19,8 +19,10 @@ from .payment_state import apply_refund_payment
 def _parts(store, order):
     if (order.get("billing_type", "one_time") != "one_time" or order.get("payment_status") != "paid"
             or order.get("status") not in {"cancel_pending", "cancelled"}
-            or order.get("refund_status") not in {"processing", "review", "partial", "pending"}
+            or order.get("refund_status") not in {"awaiting_approval", "processing", "review", "partial", "pending"}
             or order.get("refund_cancel_accepted_by") not in {order["buyer_id"], order["seller_id"]}
+            or order.get("cancel_requested_by") not in {order["buyer_id"], order["seller_id"]}
+            or order.get("cancel_requested_by") == order.get("refund_cancel_accepted_by")
             or order.get("dispute_status")):
         raise FinanceConflict("キャンセル合意を記録した、処理中の単発全額返金だけ再開できます")
     if any(p.get("finance_v2") and p["status"] in RESERVED
@@ -94,9 +96,12 @@ async def _inspect(backend, store, stripe, order, at):
             existing.append((extra, remote))
         identity.append({"key": key, "request_hash": content_hash(data), "payment": proof,
                          "refund": {k: remote.get(k) for k in ("id", "amount", "currency", "payment_intent", "charge", "metadata", "status", "created")} if remote else None})
-    if not existing:
+    if not existing and order.get("refund_status") != "awaiting_approval":
         raise FinanceConflict("再開対象の既存返金がありません")
     fingerprint = content_hash({"parts": identity, "amount": order["amount"], "status": order["status"],
+                                "refund_status": order["refund_status"],
+                                "buyer": order["buyer_id"], "seller": order["seller_id"],
+                                "requested_by": order["cancel_requested_by"],
                                 "accepted_by": order["refund_cancel_accepted_by"]})
     return existing, missing, fingerprint
 
@@ -166,6 +171,6 @@ async def approve_refund_resumption(backend, store, stripe, settings, order, act
 
 def refund_resumption_inventory(store):
     candidates = [o for o in store.orders if o.get("refund_cancel_accepted_by")
-                  and o.get("refund_status") in {"processing", "review", "partial", "pending"}]
+                  and o.get("refund_status") in {"awaiting_approval", "processing", "review", "partial", "pending"}]
     return {"items": [{"order_id": o["id"], "tool_name": o["tool_name"], "proposal": o.get("refund_resumption")}
                       for o in candidates[:100]], "truncated": len(candidates) > 100}

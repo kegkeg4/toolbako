@@ -91,13 +91,15 @@ def test_progress_cannot_extend_absolute_or_idle_deadlines(monkeypatch, path, fr
     assert len(received) == expected_reads
 
 
-def test_finished_body_does_not_timeout_the_business_handler():
+def test_finished_body_does_not_timeout_the_business_handler(monkeypatch):
+    now = [0]
+    monkeypatch.setattr('app.request_limits.monotonic', lambda: now[0])
     output = []
     async def receive():
         return chunk(b'complete', False)
     async def handler(scope, receive, send):
         assert (await receive())['body'] == b'complete'
-        await asyncio.sleep(.06)
+        now[0] = 60  # Business work exceeds the body budget after spooling.
         await send({'status': 200})
     async def send(message):
         output.append(message)
@@ -216,7 +218,9 @@ def test_real_http_chunked_upload_does_not_reset_total_timeout(local_server):
     port, calls = local_server
     with socket.create_connection(('127.0.0.1', port), timeout=3) as connection:
         connection.sendall(b'POST /upload HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n')
-        for _ in range(7):
+        # Stop writing before the server closes at .4s. Sending again after
+        # its 408 can reset the socket on Windows and discard the response.
+        for _ in range(6):
             try:
                 connection.sendall(b'1\r\nx\r\n')
             except OSError:

@@ -61,6 +61,22 @@ async def probe(client, url):
         return False
 
 
+async def wait_for_next_check(stop, observer, *, interval=60):
+    """A dead queue observer must fail the service so Railway can restart it."""
+    stopping = asyncio.create_task(stop.wait())
+    try:
+        await asyncio.wait({stopping, observer}, timeout=interval,
+                           return_when=asyncio.FIRST_COMPLETED)
+        if not stop.is_set() and observer.done():
+            # Do not surface exception details: DB errors can contain secrets.
+            print(json.dumps({"event": "mail_observer_unavailable", "level": "error"}), flush=True)
+            return False
+        return True
+    finally:
+        stopping.cancel()
+        await asyncio.gather(stopping, return_exceptions=True)
+
+
 async def run(url, recipient, *, stop=None):
     from .config import settings
     from .database import PostgresStateStore
@@ -85,10 +101,9 @@ async def run(url, recipient, *, stop=None):
                 print(json.dumps({"event": "availability_observation", "healthy": healthy,
                                   "consecutive_failures": alert.failures,
                                   "checked_at": datetime.now(timezone.utc).isoformat()}), flush=True)
-                try:
-                    await asyncio.wait_for(stop.wait(), timeout=60)
-                except TimeoutError:
-                    pass
+                if not await wait_for_next_check(stop, observer):
+                    return 1
+        return 0
     finally:
         observer.cancel()
         await asyncio.gather(observer, return_exceptions=True)
@@ -107,8 +122,8 @@ def main():
     from .config import settings
     if not settings.email_ready:
         parser.error("Operator alert email is not configured")
-    asyncio.run(run(args.url, args.recipient))
+    return asyncio.run(run(args.url, args.recipient))
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

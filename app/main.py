@@ -51,7 +51,6 @@ from .webhooks import StripeWebhookService, StripeWebhookGuardMiddleware
 from .mfa import SupabaseMFA, is_privileged_path, totp_qr_image
 from .finance import FinanceConflict, PAYOUT_LABELS, balance as ledger_balance, request_payout
 from .payout_worker import sandbox_payouts_ready
-from .refunds import request_order_refunds
 from .reconciliation import propose_recovery, approve_recovery
 from .payout_recovery import propose_failed_payout, approve_failed_payout
 from .payment_reconciliation import KINDS as PAYMENT_RECOVERY_KINDS, payment_recovery_inventory, propose_payment_recovery, approve_payment_recovery
@@ -1179,24 +1178,16 @@ async def order_transition(request: Request, order_id: str, action: str, reason:
     if action in {"accept","revise"} and user["id"] != order["buyer_id"]: raise HTTPException(403)
     if action in {"cancel_accept","cancel_reject"} and order.get("cancel_requested_by") == user["id"]: raise HTTPException(403)
     if action == "cancel_request": reason = clean_visible_text(reason, 5, 500, "キャンセル理由", preserve_lines=True)
-    if order.get("refund_status") in {"processing", "pending", "partial", "review"}:
+    if order.get("refund_status") in {"awaiting_approval", "processing", "pending", "partial", "review"}:
         raise HTTPException(409, "返金の処理・照合中です。重複操作せず運営へお問い合わせください")
     if action == "cancel_accept" and not settings.demo_mode:
         if order.get("status") != "cancel_pending" or order.get("cancel_requested_by") == user["id"]: raise HTTPException(409)
         if order.get("payment_status") != "paid" or not order.get("payment_reference"): raise HTTPException(409,"返金対象の決済を確認できません")
-        order.update(refund_cancel_accepted_by=user["id"], refund_cancel_accepted_at=datetime.now(timezone.utc))
-        try:
-            await request_order_refunds(store, order, stripe)
-        except FinanceConflict as exc:
-            raise HTTPException(409, str(exc)) from exc
-        except StripeOutcomeUnknown:
-            order["refund_status"] = "review"
-            await persist_state()
-            raise
-        except RuntimeError as exc:
-            order["refund_status"] = "review"
-            await persist_state()
-            raise HTTPException(502,"返金処理を開始できませんでした") from exc
+        # Party consent is not authority to send money. Keep the sale held until
+        # two distinct administrators inspect and approve the original payment.
+        order.update(refund_cancel_accepted_by=user["id"], refund_cancel_accepted_at=datetime.now(timezone.utc),
+                     refund_status="awaiting_approval")
+        await persist_state()
     if not (action == "cancel_accept" and not settings.demo_mode):
         try: store.transition(order, action, reason, user["id"])
         except ValueError: raise HTTPException(409, "現在の状態では操作できません")
@@ -1279,7 +1270,7 @@ async def extra_payment(request: Request, order_id: str, amount: int = Form(...)
 async def receipt(request: Request, order_id: str):
     user = current_user(request); order = user and store.get_order(order_id, user["id"])
     if not order or user["id"] != order["buyer_id"] or order["status"] != "completed": raise HTTPException(403)
-    return templates.TemplateResponse(request, "receipt.html", context(request, order=order))
+    return templates.TemplateResponse(request, "receipt.html", context(request, order=order, test_receipt=not settings.is_production))
 
 
 @app.get("/orders/{order_id}/documents/{kind}", response_class=HTMLResponse)

@@ -61,7 +61,7 @@ def provider(monkeypatch):
     return result
 
 
-async def seed(backend, dsn, provider, *, recover=True):
+async def seed(backend, dsn, provider, *, recover=True, initial=False):
     at = datetime.now(timezone.utc)
     settings = Settings(environment="staging", database_url=dsn, stripe_secret_key="sk_test_resume",
                         stripe_charge_mode="separate", site_base_url="https://example.test",
@@ -81,10 +81,14 @@ async def seed(backend, dsn, provider, *, recover=True):
             metadata = {"order_id": order["id"]}
             if extra: metadata["extra_id"] = extra["id"]
             provider.payment(part["payment_reference"], amount, metadata)
-        with pytest.raises(StripeOutcomeUnknown): await request_order_refunds(store, order, stripe)
-        order.update(refund_status="review", payment_reconciliation_required=True)
+        if initial:
+            order.update(refund_status="awaiting_approval")
+            provider.timeouts.clear()
+        else:
+            with pytest.raises(StripeOutcomeUnknown): await request_order_refunds(store, order, stripe)
+            order.update(refund_status="review", payment_reconciliation_required=True)
         await backend.save()
-    if recover:
+    if recover and not initial:
         async with backend.request(store):
             order = store.orders[0]
             proposal = await propose_payment_recovery(backend, store, stripe, settings, order, "refund", "admin_one", at=at)
@@ -316,17 +320,20 @@ def test_cancellation_route_records_consent_but_does_not_finish_before_confirmat
         monkeypatch.setattr(main, "settings", Settings(environment="staging", demo_mode=False, site_base_url="https://example.test"))
         monkeypatch.setattr(main, "current_user", lambda request: {"id": "seller"})
         calls = []
-        async def refunds(store, order, stripe):
-            calls.append(order["refund_cancel_accepted_by"])
-            order["refund_status"] = "pending"
+        async def refunds(*args, **kwargs):
+            calls.append(True)
+            raise AssertionError("Party consent must never send a refund")
         async def email(*args): return True
-        monkeypatch.setattr(main, "request_order_refunds", refunds)
+        async def persist(): return None
+        monkeypatch.setattr(main.stripe, "refund_payment", refunds)
+        monkeypatch.setattr(main, "persist_state", persist)
         monkeypatch.setattr(main, "send_email_safely", email)
         request = Request({"type": "http", "method": "POST", "path": "/", "headers": []})
         assert (await main.order_transition(request, order["id"], "cancel_accept", "")).status_code == 303
         assert order["status"] == "cancel_pending" and order["refund_cancel_accepted_by"] == "seller"
+        assert order["refund_status"] == "awaiting_approval" and calls == []
         with pytest.raises(HTTPException) as error: await main.order_transition(request, order["id"], "cancel_accept", "")
-        assert error.value.status_code == 409 and calls == ["seller"]
+        assert error.value.status_code == 409 and calls == []
     asyncio.run(run())
 
 
@@ -345,7 +352,7 @@ def test_new_template_does_not_show_actions_when_recovery_disabled():
         assert "新たなテスト返金を1件だけ作成" in html if ready else "本番では使えません" in html
 
 
-@pytest.mark.parametrize("status", ["processing", "pending", "partial", "review", "completed"])
+@pytest.mark.parametrize("status", ["awaiting_approval", "processing", "pending", "partial", "review", "completed"])
 def test_transaction_shows_refund_facts_without_repeat_cancellation_buttons(status):
     from jinja2 import ChoiceLoader, DictLoader, Environment, FileSystemLoader
     from pathlib import Path
@@ -357,3 +364,55 @@ def test_transaction_shows_refund_facts_without_repeat_cancellation_buttons(stat
         review_open=False, demo_mode=False, status_labels={"cancel_pending": "キャンセル申請中"})
     assert "/actions/cancel_accept" not in html and "/actions/cancel_reject" not in html
     assert "全額返金を確認しました" in html if status == "completed" else "返金の結果を確認しています" in html
+
+
+def test_first_refund_requires_two_admins_and_persists_before_post(database, provider):
+    backend, dsn = database
+    async def run():
+        store, settings, stripe, at = await seed(backend, dsn, provider, initial=True)
+        async with backend.request(store):
+            order = store.orders[0]
+            assert balance(store, "seller") == 0
+            assert refund_resumption_inventory(store)["items"]
+            proposal = await propose_refund_resumption(backend, store, stripe, settings, order, "admin_one", at=at)
+            assert not any(r.method == "POST" for r in provider.requests)
+            for actor, token, when in [("admin_one", proposal["id"], at), ("outsider", proposal["id"], at),
+                                       ("admin_two", "stale", at), ("admin_two", proposal["id"], at + timedelta(minutes=31))]:
+                with pytest.raises(FinanceConflict):
+                    await approve_refund_resumption(backend, store, stripe, settings, order, actor, token, sender(backend), at=when)
+            assert not any(r.method == "POST" for r in provider.requests)
+        # Re-load from the durable database before the second administrator acts.
+        async with backend.request(store):
+            assert await approve_refund_resumption(backend, store, stripe, settings, store.orders[0], "admin_two", proposal["id"], sender(backend), at=at) == "partial"
+            with pytest.raises(FinanceConflict):
+                await approve_refund_resumption(backend, store, stripe, settings, store.orders[0], "admin_two", proposal["id"], sender(backend), at=at)
+        assert sum(r.method == "POST" for r in provider.requests) == 1
+        assert await resume(backend, store, settings, stripe, at) == "partial"
+        assert await resume(backend, store, settings, stripe, at) == "completed"
+        assert sum(r.method == "POST" for r in provider.requests) == 3
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("failure", ["same_party", "missing_requester", "manual_refund", "amount_changed", "dispute", "live", "save_failure"])
+def test_first_refund_fails_closed_before_any_send(database, provider, monkeypatch, failure):
+    backend, dsn = database
+    async def run():
+        store, settings, stripe, at = await seed(backend, dsn, provider, initial=True)
+        original_save = backend.save
+        async with backend.request(store):
+            order = store.orders[0]
+            proposal = await propose_refund_resumption(backend, store, stripe, settings, order, "admin_one", at=at)
+            if failure == "same_party": order["cancel_requested_by"] = "seller"
+            elif failure == "missing_requester": order.pop("cancel_requested_by")
+            elif failure == "manual_refund": provider.records.append({"id": "re_manual", "payment_intent": "pi_main"})
+            elif failure == "amount_changed": order["amount"] += 1
+            elif failure == "dispute": order["dispute_status"] = "opened"
+            elif failure == "live": settings = replace(settings, stripe_secret_key="sk_live_not_real")
+            elif failure == "save_failure":
+                async def fail(): raise StorageUnavailable("approval commit failed")
+                monkeypatch.setattr(backend, "save", fail)
+            with pytest.raises((FinanceConflict, StorageUnavailable)):
+                await approve_refund_resumption(backend, store, stripe, settings, order, "admin_two", proposal["id"], sender(backend), at=at)
+            if failure == "save_failure": monkeypatch.setattr(backend, "save", original_save)
+        assert not any(r.method == "POST" for r in provider.requests)
+    asyncio.run(run())
