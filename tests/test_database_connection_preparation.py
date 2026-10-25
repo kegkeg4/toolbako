@@ -68,7 +68,7 @@ def test_next_handshake_overlaps_handler_but_sql_and_state_remain_serial(monkeyp
         release_first.set()
         await asyncio.wait_for(asyncio.gather(first, second, third), 1)
         assert entered == [0, 1, 2]
-        assert queries == [0, 0, 1, 1, 2, 2]
+        assert queries == [0, 0, 0, 1, 1, 1, 2, 2, 2]
         assert all(c.closed for c in connections)
         assert backend._connection_slots._value == 2
         assert not backend._local_lock.locked()

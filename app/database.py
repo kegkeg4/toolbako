@@ -203,6 +203,17 @@ class PostgresStateStore:
         if not row or row[0] != SCHEMA_VERSION:
             raise StorageUnavailable("Database migration required", diagnostic_code="schema_version_mismatch")
 
+    async def _close_request_connection(self, conn, *, locked):
+        try:
+            if locked:
+                # Closing the client socket does not acknowledge lock release
+                # at a session pooler. Await the server's explicit unlock before
+                # admitting the next locally queued request.
+                async with asyncio.timeout(2):
+                    await conn.execute("select pg_advisory_unlock(%s)", (LOCK_ID,))
+        finally:
+            await conn.close()
+
     async def probe(self) -> bool:
         try:
             async with await self.connect() as conn:
@@ -218,6 +229,7 @@ class PostgresStateStore:
     @asynccontextmanager
     async def request(self, store):
         acquired = False
+        database_locked = False
         slot_acquired = False
         conn = None
         phase = "connection_slot"
@@ -244,6 +256,7 @@ class PostgresStateStore:
             cursor = await conn.execute("select pg_try_advisory_lock(%s)", (LOCK_ID,))
             if not (await cursor.fetchone())[0]:
                 raise StorageUnavailable("Database is busy; retry later", diagnostic_code="database_busy")
+            database_locked = True
             # The advisory lock must be acquired in an earlier statement. Do
             # not put it in this SELECT: PostgreSQL may evaluate its reads
             # before the lock expression. Schema and state, however, can be
@@ -280,7 +293,7 @@ class PostgresStateStore:
         except BaseException as exc:
             try:
                 if conn:
-                    await conn.close()
+                    await self._close_request_connection(conn, locked=database_locked)
             except Exception:
                 # Preserve the original failure without printing either error.
                 pass
@@ -307,7 +320,7 @@ class PostgresStateStore:
                 self._connection = self._store = None
                 self._emails = []
                 try:
-                    await conn.close()  # Releases the session advisory lock.
+                    await self._close_request_connection(conn, locked=database_locked)
                 except Exception as exc:
                     raise StorageUnavailable("Database connection cleanup failed", diagnostic_code=request_failure_code(exc, "cleanup"), diagnostic_phase="cleanup") from None
                 finally:

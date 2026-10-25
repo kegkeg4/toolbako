@@ -183,7 +183,8 @@ def test_schema_and_state_are_read_together_only_after_lock(database, monkeypatc
     assert statements[0] == "select pg_try_advisory_lock(%s)"
     assert "schema_version" in statements[1] and "marketplace_state" in statements[1]
     assert "advisory" not in statements[1]
-    assert len([s for s in statements if s.startswith("select")]) == 2
+    assert statements[-1] == "select pg_advisory_unlock(%s)"
+    assert len([s for s in statements if s.startswith("select")]) == 3
 
 
 @pytest.mark.parametrize("schema_change", ["delete from toolbako_runtime.schema_version returning version", "update toolbako_runtime.schema_version set version=999 returning version"])
