@@ -161,13 +161,17 @@ def content_hash(value) -> str:
 
 
 class PostgresStateStore:
-    def __init__(self, dsn: str, *, production: bool = False):
+    def __init__(self, dsn: str, *, production: bool = False, reuse_connections: bool = False):
         self.dsn = dsn
         self.production = production
         self._local_lock = asyncio.Lock()
         # One active request and at most one preparing/waiting connection.
-        # Fresh sessions avoid carrying advisory locks across requests.
         self._connection_slots = asyncio.BoundedSemaphore(2)
+        # Web workers can retain at most two verified, unlocked sessions. CLI
+        # workers keep the original fresh-session lifecycle unless opted in.
+        self._reuse_connections = reuse_connections
+        self._idle_connections = []
+        self._connections_closed = False
         self._connection = None
         self._store = None
         self._checkpoint = None
@@ -203,16 +207,56 @@ class PostgresStateStore:
         if not row or row[0] != SCHEMA_VERSION:
             raise StorageUnavailable("Database migration required", diagnostic_code="schema_version_mismatch")
 
-    async def _close_request_connection(self, conn, *, locked):
+    async def _request_connection(self):
+        from psycopg.pq import TransactionStatus
+        while self._idle_connections:
+            conn, returned_at, owner_loop = self._idle_connections.pop()
+            retain = False
+            try:
+                if (owner_loop is asyncio.get_running_loop() and not conn.closed and conn.autocommit
+                        and conn.info.transaction_status == TransactionStatus.IDLE
+                        and time.monotonic() - returned_at < 60):
+                    # Check a reused socket before touching any business state.
+                    # Retry only this harmless probe, never a handler or save.
+                    async with asyncio.timeout(2):
+                        await conn.execute("select 1")
+                    retain = True
+                    return conn
+            except Exception:
+                pass
+            finally:
+                if not retain:
+                    await conn.close()
+        return await self.connect()
+
+    async def close(self):
+        """Called after ASGI requests drain; retained sessions never own locks."""
+        self._connections_closed = True
+        while self._idle_connections:
+            conn, _, _ = self._idle_connections.pop()
+            await conn.close()
+
+    async def _close_request_connection(self, conn, *, locked, reusable=False):
+        retained = False
         try:
             if locked:
                 # Closing the client socket does not acknowledge lock release
                 # at a session pooler. Await the server's explicit unlock before
                 # admitting the next locally queued request.
                 async with asyncio.timeout(2):
-                    await conn.execute("select pg_advisory_unlock(%s)", (LOCK_ID,))
+                    cursor = await conn.execute("select pg_advisory_unlock(%s)", (LOCK_ID,))
+                    if self._reuse_connections:
+                        row = await cursor.fetchone()
+                        if not row or row[0] is not True:
+                            raise StorageUnavailable("Database lock release unconfirmed")
+            if reusable and locked and self._reuse_connections and not self._connections_closed:
+                from psycopg.pq import TransactionStatus
+                if not conn.closed and conn.autocommit and conn.info.transaction_status == TransactionStatus.IDLE:
+                    self._idle_connections.append((conn, time.monotonic(), asyncio.get_running_loop()))
+                    retained = True
         finally:
-            await conn.close()
+            if not retained:
+                await conn.close()
 
     async def probe(self) -> bool:
         try:
@@ -244,7 +288,7 @@ class PostgresStateStore:
             remaining_wait = max(0.0, 5 - (_request_clock() - queued_at))
             phase = "connect"
             timing.mark(phase)
-            conn = await self.connect()
+            conn = await self._request_connection()
             phase = "local_lock"
             timing.mark(phase)
             await asyncio.wait_for(self._local_lock.acquire(), timeout=remaining_wait)
@@ -305,9 +349,11 @@ class PostgresStateStore:
             if not isinstance(exc, Exception):
                 raise
             raise StorageUnavailable("Database request could not start", diagnostic_code=request_failure_code(exc, phase), diagnostic_phase=phase) from None
+        completed = False
         try:
             timing.mark("handler")
             yield timing
+            completed = True
         finally:
             timing.mark("cleanup")
             # A failed request must not leave dirty objects available to another
@@ -315,12 +361,13 @@ class PostgresStateStore:
             try:
                 restore(store, self._checkpoint)
             except Exception as exc:
+                completed = False
                 raise StorageUnavailable("Database request cleanup failed", diagnostic_code=request_failure_code(exc, "cleanup"), diagnostic_phase="cleanup") from None
             finally:
                 self._connection = self._store = None
                 self._emails = []
                 try:
-                    await self._close_request_connection(conn, locked=database_locked)
+                    await self._close_request_connection(conn, locked=database_locked, reusable=completed)
                 except Exception as exc:
                     raise StorageUnavailable("Database connection cleanup failed", diagnostic_code=request_failure_code(exc, "cleanup"), diagnostic_phase="cleanup") from None
                 finally:

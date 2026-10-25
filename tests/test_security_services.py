@@ -207,11 +207,14 @@ def test_app_lifespan_observes_existing_services_and_stops_on_shutdown(monkeypat
         return "ready"
     async def db_probe():
         return True
+    closed = []
+    async def db_close():
+        closed.append(True)
     monkeypatch.setattr(services, "probe_clamav", ready)
     monkeypatch.setattr(services, "probe_redis", ready)
     monkeypatch.setattr(services, "probe_clamav_signatures", ready)
     monkeypatch.setattr(main, "settings", configured())
-    monkeypatch.setattr(main, "database_store", SimpleNamespace(probe=db_probe))
+    monkeypatch.setattr(main, "database_store", SimpleNamespace(probe=db_probe, close=db_close))
     with TestClient(main.app) as client:
         # The event loop starts the background task before this request.
         response = client.get("/readyz")
@@ -226,4 +229,5 @@ def test_app_lifespan_observes_existing_services_and_stops_on_shutdown(monkeypat
         monkeypatch.setattr(main, "settings", configured(clamav_host="different.example"))
         assert not main.security_service_snapshot()["fresh"]
     assert main.app.state.security_services is None
+    assert closed == [True]
     assert not monitor.snapshot()["fresh"]

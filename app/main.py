@@ -92,6 +92,8 @@ async def lifespan(application):
             with suppress(asyncio.CancelledError):
                 await task
         application.state.security_services = None
+        if database_store is not None:
+            await database_store.close()
 
 
 def security_service_snapshot():
@@ -103,7 +105,7 @@ def security_service_readiness():
     return {name: status["ready"] for name, status in security_service_snapshot()["services"].items()}
 
 
-database_store = PostgresStateStore(settings.database_url, production=settings.is_deployed) if settings.database_url else None
+database_store = PostgresStateStore(settings.database_url, production=settings.is_deployed, reuse_connections=True) if settings.database_url else None
 app = FastAPI(title="ツールバコ", description="AIツールの共有・発見プラットフォーム", version="0.1.0", dependencies=[Depends(require_privileged_mfa)], lifespan=lifespan)
 app.add_middleware(SessionMiddleware, secret_key=settings.session_secret, session_cookie="toolbako_session", same_site="lax", https_only=settings.site_base_url.startswith("https"), max_age=settings.session_max_age)
 app.add_middleware(GZipMiddleware, minimum_size=500, compresslevel=6)
