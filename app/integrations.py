@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import urlparse
 from uuid import uuid4
 
 import httpx
@@ -60,9 +61,23 @@ class StripeIntegration:
             raise RuntimeError("決済サービスがリクエストを受け付けませんでした。設定・取引状態を確認してください")
         try:
             result = response.json()
-            if not isinstance(result, dict) or not isinstance(result.get("id"), str):
+            if not isinstance(result, dict):
                 raise ValueError("Invalid provider object")
-        except ValueError as exc:
+            if path == "account_links":
+                # Stripe Account Links have no provider ID. Validate their
+                # actual shape instead of treating every successful link as
+                # an unknown financial result.
+                url = result.get("url", "")
+                parsed = urlparse(url)
+                if (result.get("object") != "account_link" or parsed.scheme != "https"
+                        or parsed.hostname != "connect.stripe.com" or parsed.port not in {None, 443}
+                        or parsed.username or parsed.password or any(ord(c) < 33 or c == "\\" for c in url)
+                        or type(result.get("created")) is not int or type(result.get("expires_at")) is not int
+                        or result["expires_at"] <= result["created"]):
+                    raise ValueError("Invalid account link")
+            elif not isinstance(result.get("id"), str):
+                raise ValueError("Invalid provider object")
+        except (TypeError, ValueError) as exc:
             if self.journal:
                 await self.journal.finish_operation(idempotency_key, "unknown")
             raise StripeOutcomeUnknown(idempotency_key) from exc
@@ -71,6 +86,11 @@ class StripeIntegration:
             # verification. Keep only reconciliation metadata in the journal.
             stored_result = ({key: result[key] for key in ("id", "object", "livemode", "status", "metadata") if key in result}
                              if path.startswith("identity/verification_sessions") else result)
+            if path == "account_links":
+                # The journal ID identifies our operation, not a Stripe
+                # object. Never persist an onboarding access URL.
+                stored_result = {"id": idempotency_key, "object": "account_link",
+                                 "created": result["created"], "expires_at": result["expires_at"]}
             await self.journal.finish_operation(idempotency_key, "succeeded", stored_result)
         return result
 
@@ -78,6 +98,22 @@ class StripeIntegration:
         data = {"_idempotency_key":idempotency_key,"type":"express","country":"JP","email":user.get("email", ""),"metadata[user_id]":user["id"],"capabilities[card_payments][requested]":"true","capabilities[transfers][requested]":"true"}
         if self.charge_mode == "separate":
             data["settings[payouts][schedule][interval]"] = "manual"
+        if self.journal:
+            from .database import OperationConflict, content_hash
+            digest = content_hash({k: v for k, v in data.items() if k != "_idempotency_key"})
+            # A definite rejection created no account. Preserve that history
+            # and permit a later user-initiated attempt after configuration is
+            # corrected. Pending/unknown outcomes must NEVER get a fresh key.
+            for attempt in range(10):
+                candidate = idempotency_key if not attempt else f"{idempotency_key}-retry-{attempt}"
+                previous = await self.journal.operation_details(candidate)
+                if previous and (previous["endpoint"] != "accounts" or previous["request_hash"] != digest):
+                    raise OperationConflict("Connect retry parameters changed")
+                if not previous or previous["status"] != "rejected":
+                    data["_idempotency_key"] = candidate
+                    break
+            else:
+                raise RuntimeError("決済受取設定の再試行上限に達しました。運営へお問い合わせください")
         return await self._post("accounts", data)
 
     async def _get(self, path: str, *, account: str | None = None, params=None):

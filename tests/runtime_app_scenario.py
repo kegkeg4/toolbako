@@ -76,11 +76,11 @@ def main():
             httpx.AsyncClient = lambda **kw: original_client(transport=httpx.MockTransport(provider), **kw)
             try:
                 checkout = buyer.post(f"/checkout/{slug}", data={"purchase_agreement": "yes"}, follow_redirects=False)
-                assert checkout.status_code == 303, checkout.text
-                assert checkout.headers["location"] == "https://checkout.stripe.com/test-runtime"
+                assert checkout.status_code == 200, checkout.text
+                assert 'href="https://checkout.stripe.com/test-runtime"' in checkout.text
                 order_id = store.orders[0]["id"]
                 repeated = buyer.post(f"/checkout/{slug}", data={"purchase_agreement": "yes"}, follow_redirects=False)
-                assert repeated.status_code == 303
+                assert repeated.status_code == 200
                 assert len(calls) == 1
                 assert buyer.get(f"/orders/{order_id}").status_code == 202
             finally:

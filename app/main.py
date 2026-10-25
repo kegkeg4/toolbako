@@ -690,6 +690,24 @@ async def withdraw_transfer_inquiry(request: Request, inquiry_id: str):
     return RedirectResponse(f"/transfer-inquiries/{inquiry_id}?withdrawn=1", 303)
 
 
+def payment_handoff(request: Request, destination: str, *, onboarding: bool = False):
+    # Chromium applies form-action to cross-origin POST redirects. Complete
+    # the form locally and navigate only to the expected Stripe origin.
+    expected_host = "connect.stripe.com" if onboarding else "checkout.stripe.com"
+    try:
+        parsed = urlparse(destination)
+        valid = (parsed.scheme == "https" and parsed.hostname == expected_host
+                 and parsed.port in {None, 443} and not parsed.username and not parsed.password
+                 and not any(ord(c) < 33 or c == "\\" for c in destination))
+    except (TypeError, ValueError):
+        valid = False
+    if not valid:
+        raise HTTPException(502, "決済サービスの移動先を確認できませんでした")
+    return templates.TemplateResponse(request, "payment_handoff.html",
+        context(request, destination=destination, onboarding=onboarding),
+        headers={"Cache-Control": "no-store, private", "Referrer-Policy": "no-referrer"})
+
+
 @app.get("/checkout/{slug}", response_class=HTMLResponse)
 async def checkout(request: Request, slug: str):
     user = current_user(request)
@@ -737,7 +755,7 @@ async def checkout_complete(request: Request, slug: str, options: list[str] = Fo
         if not created and order.get("payment_status") == "paid":
             raise HTTPException(409, "この商品は購入済みです")
         if not created and order.get("payment_status") == "pending" and order.get("checkout_session_url"):
-            return RedirectResponse(order["checkout_session_url"], 303)
+            return payment_handoff(request, order["checkout_session_url"])
         if not created and order.get("payment_status") == "pending":
             if database_store:
                 attempt = await database_store.operation_result(f"checkout-{order['id']}")
@@ -747,7 +765,7 @@ async def checkout_complete(request: Request, slug: str, options: list[str] = Fo
                     recovered = attempt["response"]
                     order["checkout_session_id"] = recovered["id"]
                     order["checkout_session_url"] = recovered["url"]
-                    return RedirectResponse(recovered["url"], 303)
+                    return payment_handoff(request, recovered["url"])
             if order.get("payment_reconciliation_required"):
                 raise HTTPException(409, "決済結果を確認中です。再購入せず、購入履歴を確認してサポートへお問い合わせください")
             raise HTTPException(409, "決済画面を準備中です。数秒後にもう一度お試しください", headers={"Retry-After":"3"})
@@ -772,7 +790,7 @@ async def checkout_complete(request: Request, slug: str, options: list[str] = Fo
             raise HTTPException(502, "決済画面を開始できませんでした") from exc
         order["checkout_session_id"] = session["id"]
         order["checkout_session_url"] = session["url"]
-        return RedirectResponse(session["url"], 303)
+        return payment_handoff(request, session["url"])
     if created:
         store.notify(order["buyer_id"], "購入が完了しました", order["tool_name"], f"/orders/{order['id']}", "transactions")
         store.notify(order["seller_id"], "新しい注文が入りました", f"{order['buyer_name']}さんが購入しました", f"/orders/{order['id']}", "transactions")
@@ -976,7 +994,7 @@ async def select_application(request: Request, request_id: str, application_id: 
             raise HTTPException(502,"決済画面を開始できませんでした") from exc
         order["checkout_session_id"] = session["id"]
         order["checkout_session_url"] = session["url"]
-        return RedirectResponse(session["url"],303)
+        return payment_handoff(request, session["url"])
     store.notify(application["applicant_id"], "提案が採用されました", item["title"], f"/orders/{order['id']}", "requests")
     store.notify(user["id"], "クリエイターとの取引を開始しました", application["applicant_name"], f"/orders/{order['id']}", "transactions")
     return RedirectResponse(f"/orders/{order['id']}",303)
@@ -1242,7 +1260,7 @@ async def extra_payment(request: Request, order_id: str, amount: int = Form(...)
         account = store.connected_accounts.get(order["seller_id"])
         if not settings.stripe_ready or not account or not account.get("charges_enabled"): raise HTTPException(503,"追加支払いを開始できません")
         extra, created = store.reserve_extra_payment(order, amount, note)
-        if not created and extra.get("checkout_session_url"): return RedirectResponse(extra["checkout_session_url"], 303)
+        if not created and extra.get("checkout_session_url"): return payment_handoff(request, extra["checkout_session_url"])
         if not created: raise HTTPException(409, "決済画面を準備中です。数秒後にもう一度お試しください", headers={"Retry-After":"3"})
         try: session = await stripe.create_extra_checkout(order,extra,account["account_id"])
         except RuntimeError as exc:
@@ -1251,7 +1269,7 @@ async def extra_payment(request: Request, order_id: str, amount: int = Form(...)
             raise HTTPException(502,"追加支払いを開始できませんでした") from exc
         extra["checkout_session_id"] = session["id"]
         extra["checkout_session_url"] = session["url"]
-        return RedirectResponse(session["url"],303)
+        return payment_handoff(request, session["url"])
     store.add_extra_payment(order, amount, note)
     store.notify(order["seller_id"], "追加支払いが届きました", f"{order['tool_name']} · ¥{amount:,}", f"/orders/{order_id}", "transactions")
     return RedirectResponse(f"/orders/{order_id}?extra=1", 303)
@@ -1381,7 +1399,7 @@ async def seller_payment_onboard(request: Request):
         link = await stripe.create_account_link(account["account_id"])
     except RuntimeError as exc: raise HTTPException(502,"決済受取設定を開始できませんでした") from exc
     store.audit(user["id"],"connect.onboarding_started",account["account_id"],request.headers.get("x-request-id", ""))
-    return RedirectResponse(link["url"],303)
+    return payment_handoff(request, link["url"], onboarding=True)
 
 
 @app.get("/seller/tools/{slug}/edit", response_class=HTMLResponse)
@@ -1647,7 +1665,7 @@ async def buy_proposal(request: Request, conversation_id: str, proposal_id: str)
             raise HTTPException(502,"決済画面を開始できませんでした") from exc
         order["checkout_session_id"] = session["id"]
         order["checkout_session_url"] = session["url"]
-        return RedirectResponse(session["url"],303)
+        return payment_handoff(request, session["url"])
     store.notify(order["buyer_id"], "見積りを購入しました", order["tool_name"], f"/orders/{order['id']}", "transactions")
     store.notify(order["seller_id"], "見積りが購入されました", order["tool_name"], f"/orders/{order['id']}", "transactions")
     return RedirectResponse(f"/orders/{order['id']}", 303)
