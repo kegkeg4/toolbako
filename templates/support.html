@@ -39,7 +39,7 @@
       {% for case in cases %}
       <article><span class="state-{{ 'verified' if case.status=='resolved' else 'pending' }}">{{ {'open':'受付済み','investigating':'調査中','resolved':'解決済み','rejected':'対応終了'}[case.status] }}</span><b>{{ case.subject }}</b><small>{{ case.created_at.strftime('%Y/%m/%d') }} · #{{ case.id[:8] }}</small></article>
       {% else %}<p>お問い合わせ履歴はありません。</p>{% endfor %}
-      <div class="support-sla"><b>対応目安</b><p>セキュリティ・決済：24時間以内<br>一般問い合わせ：2営業日以内</p>{% if support_email %}<small>{{ support_email }}</small>{% endif %}</div>
+      <div class="support-sla"><b>初回回答の目安</b><p>セキュリティ・決済：土日祝を含め24時間以内<br>一般問い合わせ：2営業日以内</p><p>一般窓口の営業時間：平日9:00〜18:00（日本時間・土日祝休み）。上記は初回回答の目安で、解決完了までの時間ではありません。</p>{% if support_email %}<p>ログインできない場合や購入前のお問い合わせは、<a href="mailto:{{ support_email }}">{{ support_email }}</a> へご連絡ください。</p><p>運営事業者の住所・電話番号の開示請求も、購入・会員登録なしで受け付けます。購入判断に先立って十分な時間的余裕をもって回答します。</p>{% endif %}</div>
     </aside>
   </div>
 </section>

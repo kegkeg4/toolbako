@@ -2111,7 +2111,7 @@ async def signup_submit(request: Request, display_name: str = Form(...), usernam
     if settings.supabase_ready:
         try:
             async with httpx.AsyncClient(timeout=10) as client:
-                result = await client.post(f"{settings.supabase_url}/auth/v1/signup", headers={"apikey":settings.supabase_anon_key}, json={"email":email,"password":password,"data":{"display_name":display_name,"user_name":username,"terms_version":"2026-07-22","privacy_version":"2026-07-22"}})
+                result = await client.post(f"{settings.supabase_url}/auth/v1/signup", headers={"apikey":settings.supabase_anon_key}, json={"email":email,"password":password,"data":{"display_name":display_name,"user_name":username,"terms_version":"2026-10-25","privacy_version":"2026-07-22"}})
         except httpx.HTTPError as exc:
             raise HTTPException(502, "登録サービスへ接続できませんでした") from exc
         if result.status_code >= 400: raise HTTPException(400, "登録できませんでした")
@@ -2121,7 +2121,7 @@ async def signup_submit(request: Request, display_name: str = Form(...), usernam
     with store._lock:
         if username in store.registered_users or any(item.get("email") == email for item in store.registered_users.values()): raise HTTPException(409, "同じユーザー名またはメールアドレスが登録済みです")
         store.registered_users[username] = {"id":user_id,"email":email,"display_name":display_name,"bio":"","x_url":"","website_url":"","password_salt":password_salt,"password_hash":password_hash}
-        store.legal_consents.extend([{"user_id":user_id,"document_type":"terms","version":"2026-07-22","created_at":datetime.now(timezone.utc)},{"user_id":user_id,"document_type":"privacy","version":"2026-07-22","created_at":datetime.now(timezone.utc)}])
+        store.legal_consents.extend([{"user_id":user_id,"document_type":"terms","version":"2026-10-25","created_at":datetime.now(timezone.utc)},{"user_id":user_id,"document_type":"privacy","version":"2026-07-22","created_at":datetime.now(timezone.utc)}])
     establish_session(request, {"id":user_id,"username":username,"display_name":display_name,"email":email,"avatar_url":None,"bio":"","is_verified":False})
     store.audit(user_id, "account.created", username, request.headers.get("x-request-id", ""))
     separator = "&" if "?" in redirect_path else "?"
@@ -2449,7 +2449,8 @@ async def create_support_request(request: Request, category: str = Form(...), su
     item = store.create_support_case(user, category, subject, detail)
     store.audit(user["id"], "support.created", item["id"], request.headers.get("x-request-id", ""))
     if user.get("email"):
-        try: sent = await email_service.send(user["email"],f"[ツールバコ] お問い合わせを受け付けました #{item['id'][:8]}",f"{subject}\n\n受付番号: {item['id']}\n通常2営業日以内にご連絡します。")
+        response_guidance = "土日祝を含め24時間以内を目安に初回回答します。" if category in {"security", "payment"} else "平日9:00〜18:00（日本時間・土日祝休み）の運営で、2営業日以内を目安に初回回答します。"
+        try: sent = await email_service.send(user["email"],f"[ツールバコ] お問い合わせを受け付けました #{item['id'][:8]}",f"{subject}\n\n受付番号: {item['id']}\n{response_guidance}\n解決完了までの時間をお約束するものではありません。")
         except httpx.HTTPError: sent = False
         if settings.email_ready and not sent: store.audit(user["id"],"email.delivery_failed",item["id"],request.headers.get("x-request-id", ""))
     return RedirectResponse(f"/support?created={item['id']}",303)
