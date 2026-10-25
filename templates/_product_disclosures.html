@@ -1,0 +1,10 @@
+{% set disclosure = display_disclosures(tool) %}
+<section class="product-disclosures" aria-label="購入前の利用条件">
+  <h3>購入前の利用条件</h3>
+  <p>出品者が記載した情報です。不明な点は購入前にご確認ください。</p>
+  <dl>
+    {% for key, spec in disclosure_fields.items() %}<dt>{{ spec[0] }}</dt><dd>{{ disclosure.get(key) or '未記載・購入前に出品者へ確認' }}</dd>{% endfor %}
+    <dt>商用利用</dt><dd>{{ permission_labels.get(disclosure.get('commercial_use', 'unknown'), permission_labels['unknown']) }}</dd>
+    <dt>再販売・再配布</dt><dd>{{ permission_labels.get(disclosure.get('resale', 'unknown'), permission_labels['unknown']) }}</dd>
+  </dl>
+</section>

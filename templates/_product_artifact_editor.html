@@ -1,0 +1,14 @@
+<section class="manage-form" id="instant-artifact">
+  <h2>即時納品ファイル・導入手順</h2>
+  <p>購入後すぐに渡すファイルを登録します。複数ファイルはZIPにまとめてください。登録・変更後は掲載の再審査が必要です。</p>
+  {% if request.query_params.get('artifact_saved') %}<p role="status">✓ 検査済みのファイルを保存しました</p>{% endif %}
+  {% if tool.instant_artifact|default({}) %}<p>登録済み：{{ tool.instant_artifact.file.name }}（{{ tool.instant_artifact.file.size }} bytes）</p><p>ファイル検査：{{ tool.instant_artifact.file.scan_engine }} ／ {{ tool.instant_artifact.uploaded_at }}</p>
+  {% else %}<p>未登録です。即時納品を選ぶ場合は、公開前に登録してください。</p>{% endif %}
+  <form action="/seller/tools/{{ tool.slug }}/artifact" method="post" enctype="multipart/form-data">
+    <label>納品ファイル（50MBまで）<input type="file" name="artifact_file" required {% if not delivery_upload_ready %}disabled{% endif %}></label>
+    <label>購入者向け導入手順<textarea name="guide" minlength="10" maxlength="1500" rows="5" required>{{ tool.instant_artifact.guide if tool.instant_artifact|default({}) else '' }}</textarea></label>
+    <label class="agreement"><input type="checkbox" name="listing_rights_agreement" value="yes" required><span>{{ rights_statement }}</span></label>
+    <button class="button" {% if not delivery_upload_ready %}disabled{% endif %}>検査して納品ファイルを保存</button>
+  </form>
+  <p><small>ファイルは非公開で保管されます。過去の注文には購入時の版が残り、新しい版へ勝手に差し替えません。検査は動作・権利・安全性すべてを保証するものではありません。</small></p>
+</section>

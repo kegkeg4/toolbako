@@ -1,5 +1,5 @@
 {% extends "base.html" %}{% block title %}{{ tool.name }}を管理 — ツールバコ{% endblock %}{% block content %}
-<section class="simple-suite">
+<section class="simple-suite product-manager-page">
   <header class="suite-head-row"><div><span class="section-kicker">PRODUCT MANAGER</span><h1>{{ tool.name }}</h1><p>商品情報、3つの販売方法、受付枠、更新情報を管理します。</p></div><a class="outline-button" href="/tools/{{ tool.slug }}">プレビュー</a></header>
   {% if saved %}<div class="manage-save-notice" role="status">✓ 変更を保存しました</div>{% endif %}{% if version_added %}<div class="manage-save-notice" role="status">✓ 更新情報を公開しました</div>{% endif %}
   <p><a href="/support#guide-image" target="_blank" rel="noopener">商品画像の変更・保存の手順を見る（別タブ）</a></p>
@@ -30,8 +30,10 @@
       {% if subscription_checkout_ready %}
       <div class="subscription-setting"><label class="agreement"><input type="checkbox" name="supports_subscription" value="yes" {% if tool.supports_subscription %}checked{% endif %}><span>月額プランも提供する</span></label><label>月額料金<input type="number" name="subscription_price" value="{{ tool.subscription_price }}" min="0"></label></div>
       {% else %}<p role="note">現在は買い切りのみ出品できます。月額プランは今後の対応予定です。</p>{% endif %}
+      {% include "_product_disclosure_fields.html" %}
       <button class="button large">変更を保存</button>
     </form>
+    {% include "_product_artifact_editor.html" %}
     <section class="manage-form version-manager"><div><span class="section-kicker">CHANGELOG</span><h2>更新情報を公開</h2><p>フォロー中の利用者へ通知され、商品ページの更新履歴に追加されます。</p></div><form action="/seller/tools/{{ tool.slug }}/versions" method="post"><div class="field-grid"><label>バージョン<input name="version" maxlength="20" placeholder="例：2.1.0" required></label><label>更新内容<input name="title" minlength="3" maxlength="120" placeholder="例：CSV出力に対応" required></label></div><button class="outline-button">更新を公開</button></form><div class="version-preview">{% for version in tool.versions[:5] %}<p><b>v{{ version.version }}</b><span>{{ version.title }}</span><time>{{ version.date }}</time></p>{% else %}<p>更新情報はまだありません。</p>{% endfor %}</div></section>
   </div><aside><article><b>公開状態</b><span class="tool-state state-{{ tool.status }}">{{ {'published':'公開中','paused':'受付休止','draft':'下書き'}[tool.status] }}</span><div class="stack-actions"><form action="/seller/tools/{{ tool.slug }}/status/published" method="post"><button{% if tool.safety_scan.status != "passed" %} disabled{% endif %}>{{ "公開する" if tool.safety_scan.status == "passed" else "掲載審査の承認待ち" }}</button></form><form action="/seller/tools/{{ tool.slug }}/status/paused" method="post"><button>受付を休止</button></form><form action="/seller/tools/{{ tool.slug }}/status/draft" method="post"><button>下書きへ戻す</button></form></div></article>{% include "_listing_review_status.html" %}<article><b>出品を充実させる</b><p>利用条件、購入前のお願い、FAQ、更新情報を具体的にすると購入前の不安が減ります。</p><a href="/tools/{{ tool.slug }}">表示を確認 →</a></article></aside></div>
 </section>

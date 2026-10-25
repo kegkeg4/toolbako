@@ -1,0 +1,52 @@
+name: Independent Toolbako availability
+on:
+  schedule:
+    - cron: '17,47 * * * *'
+  workflow_dispatch:
+  push:
+    paths: ['.github/workflows/availability-monitor.yml']
+permissions:
+  contents: read
+concurrency:
+  group: toolbako-independent-availability
+  cancel-in-progress: false
+jobs:
+  public-health:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - name: Check public health without credentials or customer data
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json, os, time, urllib.request
+          from datetime import datetime, timezone
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, *args, **kwargs):
+                  return None
+          client = urllib.request.build_opener(NoRedirect)
+          outcomes = []
+          for attempt in range(3):
+              outcomes = []
+              for path in ('/healthz', '/deploymentz'):
+                  try:
+                      request = urllib.request.Request('https://toolbako.onellc-ai.com' + path,
+                          headers={'User-Agent': 'Toolbako-independent-health/1'})
+                      with client.open(request, timeout=15) as response:
+                          payload = json.loads(response.read(8193))
+                          healthy = response.status == 200 and payload.get('status') == 'ok'
+                  except Exception:
+                      healthy = False
+                  outcomes.append({'endpoint': path, 'healthy': healthy})
+              if all(row['healthy'] for row in outcomes):
+                  break
+              if attempt < 2:
+                  time.sleep(20)
+          healthy = all(row['healthy'] for row in outcomes)
+          print(json.dumps({'healthy': healthy, 'attempts': attempt + 1, 'checks': outcomes}))
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as output:
+              output.write('Toolbako external availability: ' + ('healthy' if healthy else 'FAILED') + '\n')
+              output.write(datetime.now(timezone.utc).isoformat() + '\n')
+              output.write('This checks service reachability and deployment prerequisites, not payment launch approval.\n')
+          raise SystemExit(0 if healthy else 1)
+          PY

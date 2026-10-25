@@ -7,6 +7,9 @@ from typing import Any
 from uuid import uuid4
 
 from .config import settings
+from .product_disclosures import purchase_snapshot
+from .product_artifacts import artifact_ready, instant_ready
+from copy import deepcopy
 from .payout_policy import RESERVED_PAYOUT_STATUSES, payout_fee, scheduled_payout_date
 
 CATEGORIES = ["業務効率化", "文章・ライティング", "画像・デザイン", "開発者ツール", "マーケティング", "学習・教育", "エンタメ・ネタ", "データ分析", "その他"]
@@ -335,6 +338,8 @@ class DemoStore:
             if billing_type == "subscription" and not tool.get("supports_subscription"): raise ValueError("subscription unavailable")
             existing = next((x for x in self.orders if x["buyer_id"] == user["id"] and x["tool_slug"] == slug and x["status"] != "cancelled" and x.get("payment_status", "paid") not in {"cancelled", "expired"}), None)
             if existing: return (existing, False) if return_created else existing
+            if not settings.demo_mode and not instant_ready(tool, production=True):
+                raise ValueError("instant artifact unavailable")
             active = sum(1 for x in self.orders if x["seller_id"] == tool["author_id"] and x["tool_slug"] == slug and x["status"] in {"in_progress","awaiting_acceptance","cancel_pending"})
             if active >= tool.get("capacity", 5): raise ValueError("capacity reached")
             selected_options = [x for x in tool.get("options",[]) if x["id"] in (option_ids or [])]
@@ -345,6 +350,9 @@ class DemoStore:
             seller_account = self.registered_users.get(tool["author_username"], {})
             order = {"id":str(uuid4()),"tool_slug":slug,"tool_name":tool["name"],"buyer_id":user["id"],"buyer_name":user["display_name"],"buyer_username":user["username"],"buyer_email":user.get("email"),"seller_id":tool["author_id"],"seller_name":tool["author_name"],"seller_username":tool["author_username"],"seller_email":tool.get("author_email") or seller_account.get("email"),"amount":total,"base_amount":base_amount,"primary_payment_amount":total,"discount":discount,"coupon":coupon_code if discount else None,"selected_options":selected_options,"platform_fee":platform_fee_for(total),"platform_fee_rate":settings.platform_fee_rate,"status":"in_progress","payment_status":"pending" if payment_pending else "paid","sales_recorded":not payment_pending,"messages":[],"delivery":None,"revision_count":0,"cancel_reason":None,"reviewed":False,"buyer_reviewed":False,"extras":[],"billing_type":billing_type,"fulfillment_type":tool.get("fulfillment_type", "custom"),"license_key":None,"created_at":datetime.now(timezone.utc),"updated_at":datetime.now(timezone.utc)}
             order["receipt_no"] = f"TB-{order['created_at'].strftime('%Y%m')}-{order['id'][-8:].upper()}"
+            order["product_conditions"] = purchase_snapshot(tool)
+            if tool.get("fulfillment_type") == "instant" and artifact_ready(tool.get("instant_artifact"), production=not settings.demo_mode):
+                order["instant_artifact"] = deepcopy(tool["instant_artifact"])
             self.orders.insert(0, order)
             if not payment_pending: tool["sales_count"] += 1
             if discount:
@@ -360,6 +368,9 @@ class DemoStore:
     def complete_instant_order(self, order: dict[str, Any]) -> None:
         if order.get("fulfillment_type") != "instant" or order.get("status") == "completed":
             return
+        artifact = order.get("instant_artifact")
+        if not settings.demo_mode and (order.get("payment_status") != "paid" or not artifact_ready(artifact, production=True)):
+            return
         completed_at = datetime.now(timezone.utc)
         tool = self.get(order.get("tool_slug", "")) or {}
         distribution = tool.get("distribution", "download")
@@ -370,6 +381,8 @@ class DemoStore:
             "prompt":"プロンプト一式と利用ガイドを購入ライブラリへ追加しました。",
         }.get(distribution, "購入コンテンツをライブラリへ追加しました。")
         order.update({"status":"completed", "delivery":{"note":note,"created_at":completed_at,"version":1}, "license_key":self._license_key(order), "completed_at":completed_at, "room_closed_at":completed_at, "review_deadline":completed_at+timedelta(days=10), "updated_at":completed_at})
+        if artifact_ready(artifact, production=not settings.demo_mode):
+            order["delivery"].update(note=artifact["guide"], files=[deepcopy(artifact["file"])], artifact_version=artifact["version"])
 
     def release_coupon(self, order: dict[str, Any]) -> None:
         code = order.get("coupon")

@@ -14,11 +14,15 @@ REVIEW_FIELDS = (
     "name", "tagline", "description_md", "thumbnail_url", "category", "tags",
     "distribution", "price_type", "price", "fulfillment_type", "purchase_notes",
     "faq", "demo_url", "ai_used", "support_days", "estimated_delivery_days",
+    "purchase_disclosures",
+    "instant_artifact",
 )
 
 
 def content_fingerprint(tool):
     payload = {key: tool.get(key) for key in REVIEW_FIELDS}
+    payload["purchase_disclosures"] = tool.get("purchase_disclosures") or {}
+    payload["instant_artifact"] = tool.get("instant_artifact") or {}
     return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode()).hexdigest()
 
 

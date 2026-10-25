@@ -11,6 +11,9 @@
       <h2>{{ tool.name }}</h2><p>{{ tool.tagline }}</p><p>販売者：{{ tool.author_name }}（@{{ tool.author_username }}）</p>
       {% if tool.thumbnail_url %}<img src="{{ tool.thumbnail_url }}" alt="商品画像" width="480" height="360">{% endif %}
       <dl><dt>カテゴリ・提供形態</dt><dd>{{ tool.category }} / {{ dist_labels.get(tool.distribution, tool.distribution) }}</dd><dt>価格</dt><dd>{{ price_labels.get(tool.price_type, tool.price_type) }} / ¥{{ '{:,}'.format(tool.price) }}</dd><dt>納品方法</dt><dd>{{ '購入後すぐに提供' if tool.fulfillment_type == 'instant' else '取引ルームで納品' }}</dd><dt>納品目安・サポート</dt><dd>{{ tool.estimated_delivery_days|default(1) }}日 / 購入後{{ tool.support_days }}日</dd><dt>利用AI</dt><dd>{{ tool.ai_used|join('、') }}</dd></dl>
+      {% include "_product_disclosures.html" %}
+      <p>販売権限の確認記録：{% if tool.rights_confirmation|default({}) %}{{ tool.rights_confirmation.confirmed_at }}（版 {{ tool.rights_confirmation.version }}）{% else %}未記録・出品者へ確認してください{% endif %}</p>
+      {% if tool.instant_artifact|default({}) %}<h3>納品ファイル</h3><p>{{ tool.instant_artifact.file.name }} ／ {{ tool.instant_artifact.file.size }} bytes ／ 検査：{{ tool.instant_artifact.file.scan_engine }}</p><div class="review-copy">{{ tool.instant_artifact.guide }}</div>{% elif tool.fulfillment_type == "instant" %}<p>即時納品ファイル：未登録</p>{% endif %}
       <h3>商品説明</h3><div class="review-copy">{{ tool.description_md }}</div>
       <h3>購入にあたってのお願い</h3><div class="review-copy">{{ tool.purchase_notes or '記載なし' }}</div>
       <h3>よくある質問</h3>{% for item in tool.faq|default([]) %}<p><b>{{ item.question }}</b><br>{{ item.answer }}</p>{% else %}<p>記載なし</p>{% endfor %}

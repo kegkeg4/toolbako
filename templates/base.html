@@ -12,6 +12,7 @@
   <link rel="icon" type="image/png" sizes="192x192" href="/static/brand/toolbako-icon.png?v={{ asset_version }}"><link rel="apple-touch-icon" href="/static/brand/toolbako-icon.png?v={{ asset_version }}">
   <link rel="stylesheet" href="/static/style.css?v={{ asset_version }}"><link rel="stylesheet" href="/static/polish.css?v={{ asset_version }}">{% block page_styles %}{% endblock %}<link rel="stylesheet" href="/static/creator-badges.css?v={{ asset_version }}"><script defer src="/static/app.js?v={{ asset_version }}"></script>
   {% for item in seo_jsonld %}<script type="application/ld+json" nonce="{{ csp_nonce }}">{{ item|tojson }}</script>{% endfor %}
+  <link rel="stylesheet" href="/static/product-disclosures.css?v=20261025-4">
 </head>
 <body class="{% block body_class %}{% endblock %}">
   <a class="skip-link" href="#main-content">本文へ移動</a>
@@ -25,5 +26,5 @@
   </header>
   {% block category_nav %}{% endblock %}
   <main id="main-content" tabindex="-1">{% block content %}{% endblock %}</main>
-  <footer class="site-footer"><div class="footer-main"><a class="brand brand-logo-link footer-brand-logo" href="/" aria-label="ツールバコ ホーム"><img src="/static/brand/toolbako-logo-full.png?v=20261024-fb23db15" width="1774" height="887" alt=""><span class="sr-only">ツールバコ</span></a><p>つくったものを置ける。誰かの工夫に出会える。</p></div><div class="footer-links"><a href="/tools">ツール</a><a href="/transfers">独占譲渡</a><a href="/creators">クリエイター</a><a href="/requests">募集</a><a href="/about">About</a><a href="/support">使い方ガイド・ヘルプ</a><a href="/terms">利用規約</a><a href="/privacy">プライバシー</a><a href="/tokushoho">特商法表記</a></div><small>© 2026 ツールバコ　運営：{% if legal_operator.website %}<a href="{{ legal_operator.website }}" target="_blank" rel="noopener noreferrer">{{ legal_operator.name or '合同会社ONE' }}</a>{% else %}{{ legal_operator.name or '合同会社ONE' }}{% endif %}</small></footer>
+  <footer class="site-footer"><div class="footer-main"><a class="brand brand-logo-link footer-brand-logo" href="/" aria-label="ツールバコ ホーム"><img src="/static/brand/toolbako-logo-full.png?v=20261024-fb23db15" width="1774" height="887" alt=""><span class="sr-only">ツールバコ</span></a><p>つくったものを置ける。誰かの工夫に出会える。</p></div><div class="footer-links"><a href="/tools">ツール</a><a href="/transfers">独占譲渡</a><a href="/creators">クリエイター</a><a href="/requests">募集</a><a href="/about">About</a><a href="/support">使い方ガイド・ヘルプ</a><a href="/terms">利用規約</a><a href="/privacy">プライバシー</a><a href="/tokushoho">特商法表記</a><a href="/support#copyright-report">著作権侵害の通報</a></div><small>© 2026 ツールバコ　運営：{% if legal_operator.website %}<a href="{{ legal_operator.website }}" target="_blank" rel="noopener noreferrer">{{ legal_operator.name or '合同会社ONE' }}</a>{% else %}{{ legal_operator.name or '合同会社ONE' }}{% endif %}</small></footer>
 </body></html>

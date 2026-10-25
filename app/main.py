@@ -62,6 +62,8 @@ from .operations import operation_summary
 from .identity import verification_url
 from .account_lifecycle import deletion_hold
 from .listing_review import REVIEW_CHECKS, REVIEW_LABELS, content_fingerprint, review_token, reopen_review
+from .product_disclosures import DISCLOSURE_FIELDS, PERMISSION_LABELS, RIGHTS_STATEMENT, parse_disclosures, record_rights, display_disclosures
+from .product_artifacts import artifact_ready, instant_ready, store_artifact, download_scope
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -261,8 +263,10 @@ def seo_metadata(request: Request) -> dict:
 
 
 def context(request: Request, **values):
+    values.update(disclosure_fields=DISCLOSURE_FIELDS, permission_labels=PERMISSION_LABELS, rights_statement=RIGHTS_STATEMENT, display_disclosures=display_disclosures)
     values["review_labels"] = REVIEW_LABELS
     values["delivery_upload_ready"] = delivery_upload_available(settings)
+    values["instant_ready"] = lambda tool: instant_ready(tool, production=not settings.demo_mode)
     values["subscription_checkout_ready"] = settings.demo_mode
     status_labels = {"in_progress":"取引中","awaiting_acceptance":"納品確認待ち","completed":"取引完了","cancel_pending":"キャンセル確認中","cancelled":"キャンセル済み"}
     user = current_user(request)
@@ -493,6 +497,7 @@ async def tool_create(
     purchase_notes = clean_visible_text(purchase_notes, 0, 2000, "購入にあたってのお願い", preserve_lines=True)
     if category not in CATEGORIES or price_type not in PRICE_LABELS or distribution not in DIST_LABELS or fulfillment_type not in {"instant","custom"} or prohibited_agreement != "yes": raise HTTPException(422, "選択値が不正です")
     if any(ai not in AI_OPTIONS for ai in ai_used): raise HTTPException(422, "使用AIの選択値が不正です")
+    disclosures = parse_disclosures(await request.form())
     demo_url = safe_http_url(demo_url)
     tag_list = [clean_visible_text(value.strip().lstrip("#"), 1, 24, "タグ") for value in tags.split(",") if value.strip()][:5]
     base = slugify(name); slug = base; suffix = 2
@@ -511,6 +516,9 @@ async def tool_create(
     transfer_settings = validated_transfer_settings(exclusive_available, exclusive_price_min, transfer_assets, tech_stack, monthly_revenue, monthly_profit, monthly_cost, weekly_ops_hours, handover_days, exclusive_summary, transfer_rights_agreement)
     if transfer_settings["exclusive_available"] and not can_offer_exclusive_transfer(user): raise HTTPException(403, "独占譲渡の出品には本人確認が必要です")
     item = store.create({"slug":slug,"name":name,"tagline":tagline,"description_md":description_md,"category":category,"price_type":price_type,"price":price if price_type == "paid" else 0,"distribution":distribution,"fulfillment_type":fulfillment_type,"estimated_delivery_days":estimated_delivery_days,"purchase_notes":purchase_notes,"faq":faq,"demo_url":demo_url,"external_pay_url":"","ai_used":ai_used[:6],"tags":tag_list,"author_name":user["display_name"],"author_username":user["username"],"author_id":user["id"],"author_email":user.get("email"),"thumbnail_url":thumbnail_url,"customization_available":customization_available == "yes" or price_type == "consultation","transfer_review_status":"pending" if transfer_settings["exclusive_available"] else "not_requested",**transfer_settings})
+    with store._lock:
+        item["purchase_disclosures"] = disclosures
+        record_rights(store, item, user)
     generate_og(slug, name, tagline, user["username"])
     return RedirectResponse(f"/tools/{item['slug']}?created=1", 303)
 
@@ -713,6 +721,8 @@ async def checkout(request: Request, slug: str):
     if not user: return RedirectResponse(f"/login?next=/checkout/{slug}", 303)
     tool = store.get_public(slug)
     if not tool or tool.get("price_type") != "paid": raise HTTPException(404, "購入できない商品です")
+    if not settings.demo_mode and not instant_ready(tool, production=True):
+        raise HTTPException(409, "即時納品ファイルの準備中です。購入前に出品者へお問い合わせください")
     owned = next((x for x in store.orders if x["buyer_id"] == user["id"] and x["tool_slug"] == slug and x["status"] != "cancelled" and x.get("payment_status", "paid") not in {"cancelled", "expired"}), None)
     if store.blocked_between(user["id"], user["username"], tool["author_id"], tool["author_username"]): raise HTTPException(403, "この販売者の商品は購入できません")
     active_orders = store.tool_active_orders(slug)
@@ -1152,11 +1162,17 @@ async def download_delivery_file(request: Request, order_id: str, file_id: str):
     if not order or not order.get("delivery"): raise HTTPException(404)
     item = next((x for x in order["delivery"].get("files",[]) if x["id"]==file_id and x.get("scan_status")=="passed"),None)
     if not item: raise HTTPException(404)
-    if not settings.demo_mode and user["id"] == order["buyer_id"] and (order.get("payment_status") != "paid" or order.get("refund_status") or order.get("status") == "cancelled"):
+    if user["id"] == order["buyer_id"] and (order.get("payment_status", "paid" if settings.demo_mode else None) != "paid" or order.get("refund_status") or order.get("status") == "cancelled"):
         raise HTTPException(404)
+    if user["id"] == order["buyer_id"] and order.get("billing_type") == "subscription":
+        subscription = next((x for x in store.subscriptions if x.get("order_id") == order_id), None)
+        if not subscription or subscription.get("status") != "active": raise HTTPException(404)
     if item.get("storage_backend") == "supabase":
         try:
-            url = await SupabaseObjectStorage(settings).signed_delivery_url(item, order_id)
+            scope = download_scope(order, item)
+            url = await SupabaseObjectStorage(settings).signed_delivery_url(item, scope)
+        except ValueError:
+            raise HTTPException(404) from None
         except ObjectStorageError:
             raise HTTPException(503, "納品ファイルのダウンロードを確認できません。運営へお問い合わせください") from None
         store.audit(user["id"],"delivery.downloaded",f"{order_id}:{file_id}",request.headers.get("x-request-id", ""))
@@ -1421,6 +1437,10 @@ async def seller_tool_save(
     description_md = clean_visible_text(description_md, 1, 5000, "商品説明", preserve_lines=True)
     purchase_notes = clean_visible_text(purchase_notes, 0, 2000, "購入にあたってのお願い", preserve_lines=True)
     minimum_price = 100 if tool.get("price_type") == "paid" else 0
+    form = await request.form()
+    disclosures = parse_disclosures(form, tool.get("purchase_disclosures"), legacy=tool)
+    if disclosures != tool.get("purchase_disclosures", {}) and form.get("listing_rights_agreement") != "yes":
+        raise HTTPException(422, "購入前の利用条件を変更する場合は、販売権限と第三者の権利について確認してください")
     if not minimum_price <= price <= 1_000_000 or fulfillment_type not in {"instant","custom"} or not 1 <= capacity <= 50 or not 0 <= support_days <= 365 or not 1 <= estimated_delivery_days <= 120: raise HTTPException(422)
     if supports_subscription == "yes" and not settings.demo_mode:
         raise HTTPException(409, "現在は買い切りのみ出品できます。月額プランは今後の対応予定です")
@@ -1450,6 +1470,9 @@ async def seller_tool_save(
         thumbnail_url = await save_thumbnail(thumbnail, slug)
     with store._lock:
         old_review_content = content_fingerprint(tool)
+        tool["purchase_disclosures"] = disclosures
+        if form.get("listing_rights_agreement") == "yes":
+            record_rights(store, tool, user)
         tool.update({"name":name,"tagline":tagline,"description_md":description_md,"price":price,"capacity":capacity,"support_days":support_days,"estimated_delivery_days":estimated_delivery_days,"fulfillment_type":fulfillment_type,"purchase_notes":purchase_notes,"faq":faq,"supports_subscription":supports_subscription=="yes","subscription_price":subscription_price if supports_subscription=="yes" else 0,"customization_available":customization_available == "yes" or tool.get("price_type") == "consultation","thumbnail_url":thumbnail_url,"transfer_review_status":transfer_review_status,**transfer_settings})
         if old_review_content != content_fingerprint(tool) and tool.get("safety_scan", {}).get("status") == "passed":
             reopen_review(tool, datetime.now(timezone.utc), reason="掲載内容が変更されたため再審査中です。承認後に再度公開してください。")
@@ -1471,6 +1494,22 @@ async def seller_tool_review_request(request: Request, slug: str):
             reopen_review(tool, datetime.now(timezone.utc), reason="販売者から再審査の申請がありました。")
             store.audit(user["id"], "tool.review_requested", slug, request.headers.get("x-request-id", ""))
     return RedirectResponse(f"/seller/tools/{slug}/edit#listing-review", 303)
+
+
+@app.post("/seller/tools/{slug}/artifact")
+async def upload_product_artifact(request: Request, slug: str, guide: str = Form(...),
+                                  listing_rights_agreement: str = Form(...), artifact_file: UploadFile = File(...)):
+    user = current_user(request)
+    if not user: raise HTTPException(401)
+    tool = own_tool(user, slug)
+    if listing_rights_agreement != "yes": raise HTTPException(422, "販売権限と第三者の権利を確認してください")
+    artifact = await store_artifact(artifact_file, guide, settings)
+    with store._lock:
+        tool["instant_artifact"] = artifact
+        record_rights(store, tool, user)
+        reopen_review(tool, datetime.now(timezone.utc), reason="納品ファイルが登録・変更されたため再審査中です。承認後に公開してください。")
+        store.audit(user["id"], "tool.artifact_uploaded", f"{slug}:{artifact['version']}", request.headers.get("x-request-id", ""))
+    return RedirectResponse(f"/seller/tools/{slug}/edit?artifact_saved=1#instant-artifact", 303)
 
 
 @app.post("/seller/tools/{slug}/versions")
@@ -1497,6 +1536,8 @@ async def seller_tool_status(request: Request, slug: str, status: str):
     if not user: raise HTTPException(401)
     tool = own_tool(user, slug)
     if status not in {"published","draft","paused"}: raise HTTPException(422)
+    if status == "published" and not settings.demo_mode and not instant_ready(tool, production=True):
+        raise HTTPException(409, "即時納品には検査済みのファイルと導入手順が必要です。販売管理で登録してください")
     if status == "published" and tool.get("safety_scan",{}).get("status") != "passed":
         raise HTTPException(409, "運営の掲載審査が必要です。販売管理の「掲載審査」で状況と次の手順を確認してください")
     previous_status = tool.get("status")
@@ -2434,7 +2475,7 @@ async def support_center(request: Request):
 async def create_support_request(request: Request, category: str = Form(...), subject: str = Form(...), detail: str = Form(...)):
     user = current_user(request)
     if not user: return RedirectResponse("/login?next=/support", 303)
-    if category not in {"account","payment","identity","tool","security","other"}: raise HTTPException(422)
+    if category not in {"account","payment","identity","tool","security","copyright","other"}: raise HTTPException(422)
     subject = clean_visible_text(subject, 3, 100, "件名")
     detail = clean_visible_text(detail, 20, 2000, "詳しい状況", preserve_lines=True)
     item = store.create_support_case(user, category, subject, detail)
@@ -2742,6 +2783,8 @@ async def admin_tool_safety(request: Request, slug: str, status: str, note: str 
     note = clean_visible_text(note, 10, 2000, "審査記録・販売者への案内", preserve_lines=True)
     if status == "passed" and set(checks) != set(REVIEW_CHECKS):
         raise HTTPException(422, "すべての確認項目を確認してから承認してください")
+    if status == "passed" and not settings.demo_mode and not instant_ready(item, production=True):
+        raise HTTPException(409, "即時納品ファイルが未準備のため承認できません")
     with store._lock:
         if not re.fullmatch(r"[0-9a-f]{64}", token) or not hmac.compare_digest(token, review_token(item)):
             raise HTTPException(409, "商品または審査状況が変更されています。審査画面を開き直して確認してください")
