@@ -186,6 +186,34 @@ class PostgresStateStore:
 
     async def public_view(self, *, catalog=False):
         from .public_read import PublicView
+        projection = "'[]'::jsonb, '{}'::jsonb"
+        if catalog:
+            projection = """
+                coalesce((select jsonb_agg(item)
+                  from jsonb_array_elements(s.payload->'tools') item
+                  where coalesce(item->'is_removed', 'false'::jsonb) <> 'true'::jsonb
+                    and coalesce(item->'is_published', 'true'::jsonb) = 'true'::jsonb
+                    and coalesce(item->'status', '\"published\"'::jsonb) = '\"published\"'::jsonb), '[]'::jsonb),
+                coalesce((select jsonb_object_agg(key, jsonb_build_object(
+                    'is_founding_member', value->'is_founding_member',
+                    'founding_member_since', value->'founding_member_since',
+                    'is_certified_creator', value->'is_certified_creator',
+                    'certified_creator_since', value->'certified_creator_since'))
+                  from jsonb_each(s.payload->'registered_users')), '{}'::jsonb)
+            """
+        return await self._read_view(projection, (), "", lambda row: PublicView(decode_value(row[2]), decode_value(row[3])))
+
+    async def member_view(self, sid, path):
+        from .member_read import MemberView, member_projection, MEMBER_READ_PATHS
+        if path not in MEMBER_READ_PATHS or not isinstance(sid, str) or not 0 < len(sid) <= 128:
+            raise ValueError("Invalid member read")
+        joins = """ left join lateral (select s.payload->'account_sessions'->%s::text as record) a on true
+          left join lateral (select a.record->'user'->>'id' as uid,
+                            a.record->'user'->>'username' as username) u on true """
+        return await self._read_view(member_projection(path), (sid, sid), joins,
+                                     lambda row: MemberView(decode_value(row[2])))
+
+    async def _read_view(self, projection, params, joins, build):
         from psycopg.pq import TransactionStatus
         conn = None
         reusable = False
@@ -207,25 +235,11 @@ class PostgresStateStore:
                             if conn is None:
                                 conn = await self.connect()
                                 await conn.execute("set default_transaction_read_only = on")
-                            projection = "'[]'::jsonb, '{}'::jsonb"
-                            if catalog:
-                                projection = """
-                                    coalesce((select jsonb_agg(item)
-                                      from jsonb_array_elements(s.payload->'tools') item
-                                      where coalesce(item->'is_removed', 'false'::jsonb) <> 'true'::jsonb
-                                        and coalesce(item->'is_published', 'true'::jsonb) = 'true'::jsonb
-                                        and coalesce(item->'status', '\"published\"'::jsonb) = '\"published\"'::jsonb), '[]'::jsonb),
-                                    coalesce((select jsonb_object_agg(key, jsonb_build_object(
-                                        'is_founding_member', value->'is_founding_member',
-                                        'founding_member_since', value->'founding_member_since',
-                                        'is_certified_creator', value->'is_certified_creator',
-                                        'certified_creator_since', value->'certified_creator_since'))
-                                      from jsonb_each(s.payload->'registered_users')), '{}'::jsonb)
-                                """
                             row = await (await conn.execute(
                                 "select v.version, s.revision, " + projection +
                                 " from toolbako_runtime.schema_version v "
-                                "left join toolbako_runtime.marketplace_state s on s.singleton where v.singleton"
+                                "left join toolbako_runtime.marketplace_state s on s.singleton " + joins + " where v.singleton",
+                                params or None,
                             )).fetchone()
                             break
                         except Exception:
@@ -238,7 +252,7 @@ class PostgresStateStore:
                         raise StorageUnavailable("Public state unavailable", diagnostic_code="schema_version_mismatch")
                     if row[1] is None:
                         raise StorageUnavailable("State initialization required", diagnostic_code="state_uninitialized")
-                    view = PublicView(decode_value(row[2]), decode_value(row[3]))
+                    view = build(row)
                     # Fresh committed snapshot per SELECT, never shared objects.
                     reusable = True
                     return view
@@ -627,10 +641,12 @@ class PostgresStateStore:
 
 
 class DatabaseBoundaryMiddleware(BaseHTTPMiddleware):
-    def __init__(self, app, *, backend, store, public_reads=False):
+    def __init__(self, app, *, backend, store, public_reads=False, member_reads=False, session_max_age=0):
         super().__init__(app)
         self.backend, self.store = backend, store
         self.public_reads = public_reads
+        self.member_reads = member_reads
+        self.session_max_age = session_max_age
 
     async def dispatch(self, request, call_next):
         if request.url.path.startswith("/static/") or request.url.path in {"/healthz", "/readyz", "/deploymentz"}:
@@ -640,6 +656,7 @@ class DatabaseBoundaryMiddleware(BaseHTTPMiddleware):
         started = time.monotonic()
         phase = "load"
         timing = None
+        initial_session = dict(request.scope["session"]) if "session" in request.scope else None
         try:
             from .public_read import anonymous_read, CATALOG_PATHS
             if self.public_reads and anonymous_read(request):
@@ -655,6 +672,26 @@ class DatabaseBoundaryMiddleware(BaseHTTPMiddleware):
                     # Connection released before rendering. No store restore/save,
                     # expiry sweep or authentication occurs on this anonymous view.
                     return await call_next(request)
+            from .member_read import member_read
+            if self.member_reads and member_read(request):
+                from .security import SessionService
+                try:
+                    view = await self.backend.member_view(request.session["sid"], request.url.path)
+                except StorageUnavailable as exc:
+                    if exc.diagnostic_code != "state_uninitialized":
+                        raise
+                else:
+                    # The existing session validator checks expiry, revocation,
+                    # account identity, bans, erasure and authoritative identity.
+                    # Invalid sessions still use the original cleanup boundary.
+                    sessions = SessionService(view, self.session_max_age)
+                    original_session = dict(request.session)
+                    if sessions.current(request):
+                        request.state.member_view = view
+                        request.state.member_sessions = sessions
+                        return await call_next(request)
+                    request.session.clear()
+                    request.session.update(original_session)
             async with self.backend.request(self.store) as timing:
                 phase = "handler"
                 response = await call_next(request)
@@ -665,6 +702,9 @@ class DatabaseBoundaryMiddleware(BaseHTTPMiddleware):
                     if isinstance(timing, RequestTiming):
                         timing.mark(phase)
                     await self.backend.save()
+                elif initial_session is not None:
+                    request.session.clear()
+                    request.session.update(initial_session)
                 phase = "cleanup"
             # Report only after connection and lock cleanup. No extra DB query,
             # external monitoring service, or successful response before commit.
@@ -677,6 +717,11 @@ class DatabaseBoundaryMiddleware(BaseHTTPMiddleware):
                     pass
             return response
         except Exception as exc:
+            # Session signing now wraps this boundary. Never issue an elevated
+            # or newly established cookie when its DB commit did not succeed.
+            if initial_session is not None:
+                request.session.clear()
+                request.session.update(initial_session)
             if isinstance(exc, StorageUnavailable) and exc.diagnostic_phase in DATABASE_REQUEST_PHASES:
                 phase = exc.diagnostic_phase
             request_id = getattr(request.state, "request_id", "")

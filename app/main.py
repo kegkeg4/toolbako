@@ -107,10 +107,11 @@ def security_service_readiness():
 
 database_store = PostgresStateStore(settings.database_url, production=settings.is_deployed, reuse_connections=True) if settings.database_url else None
 app = FastAPI(title="ツールバコ", description="AIツールの共有・発見プラットフォーム", version="0.1.0", dependencies=[Depends(require_privileged_mfa)], lifespan=lifespan)
-app.add_middleware(SessionMiddleware, secret_key=settings.session_secret, session_cookie="toolbako_session", same_site="lax", https_only=settings.site_base_url.startswith("https"), max_age=settings.session_max_age)
 app.add_middleware(GZipMiddleware, minimum_size=500, compresslevel=6)
 if database_store or settings.is_production:
-    app.add_middleware(DatabaseBoundaryMiddleware, backend=database_store, store=store, public_reads=True)
+    app.add_middleware(DatabaseBoundaryMiddleware, backend=database_store, store=store, public_reads=True, member_reads=not settings.demo_mode, session_max_age=settings.session_max_age)
+# Signed-cookie validation must precede the owner-scoped DB projection.
+app.add_middleware(SessionMiddleware, secret_key=settings.session_secret, session_cookie="toolbako_session", same_site="lax", https_only=settings.site_base_url.startswith("https"), max_age=settings.session_max_age)
 app.add_middleware(StripeWebhookGuardMiddleware, settings=settings)
 app.add_middleware(ProductionGuardMiddleware, settings=settings)
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(settings.allowed_hosts) if settings.allowed_hosts else ["*"])
@@ -187,13 +188,16 @@ establish_session = session_service.establish
 update_current_session = session_service.update
 revoke_user_sessions = session_service.revoke_user
 def current_user(request: Request):
+    member_sessions = getattr(request.state, "member_sessions", None)
+    if member_sessions is not None:
+        return member_sessions.current(request)
     if getattr(request.state, "public_view", None) is not None:
         return None
     return session_service.current(request)
 
 
 def browsing_store(request: Request):
-    return getattr(request.state, "public_view", None) or store
+    return getattr(request.state, "member_view", None) or getattr(request.state, "public_view", None) or store
 
 PROFILE_CACHE_FIELDS = (
     "id", "email", "display_name", "avatar_url", "headline", "bio", "skills", "experience", "portfolio",
@@ -272,7 +276,7 @@ def seo_metadata(request: Request) -> dict:
 
 
 def context(request: Request, **values):
-    public_view = getattr(request.state, "public_view", None)
+    public_view = getattr(request.state, "member_view", None) or getattr(request.state, "public_view", None)
     if public_view is not None:
         values["creator_badges_for"] = public_view.badges_for
     values.update(disclosure_fields=DISCLOSURE_FIELDS, permission_labels=PERMISSION_LABELS, rights_statement=RIGHTS_STATEMENT, display_disclosures=display_disclosures)
@@ -282,7 +286,7 @@ def context(request: Request, **values):
     values["subscription_checkout_ready"] = settings.demo_mode
     status_labels = {"in_progress":"取引中","awaiting_acceptance":"納品確認待ち","completed":"取引完了","cancel_pending":"キャンセル確認中","cancelled":"キャンセル済み"}
     user = current_user(request)
-    unread_notification_count = sum(1 for item in store.notifications if item.get("user_id") == user["id"] and not item.get("read")) if user else 0
+    unread_notification_count = sum(1 for item in browsing_store(request).notifications if item.get("user_id") == user["id"] and not item.get("read")) if user else 0
     legal_operator = {"name":settings.legal_business_name,"representative":settings.legal_representative,"address":settings.legal_address,"phone":settings.legal_phone,"contact_on_request":settings.legal_contact_on_request,"email":settings.support_email,"website":settings.legal_website,"invoice_number":settings.legal_invoice_number}
     return {"request": request, "user": user, "admin_access":is_admin(user), "unread_notification_count":unread_notification_count, "categories": CATEGORIES, "ai_options": AI_OPTIONS, "price_labels": PRICE_LABELS, "dist_labels": DIST_LABELS, "status_labels": status_labels, "transfer_asset_labels":TRANSFER_ASSET_LABELS, "transfer_status_labels":TRANSFER_STATUS_LABELS, "site_url": settings.site_base_url, "asset_version":settings.asset_version, "csp_nonce":getattr(request.state, "csp_nonce", ""), "demo_mode":settings.demo_mode, "oauth_providers":settings.enabled_oauth_providers, "email_ready":settings.email_ready, "stripe_ready":settings.stripe_ready, "platform_fee_percent":round(settings.platform_fee_rate * 100, 2), "custom_fee_percent":round(settings.custom_fee_rate * 100, 2), "payout_schedule_label":settings.payout_schedule_label, "payout_minimum":settings.payout_minimum, "payout_fee":settings.payout_fee, "payout_fee_free_threshold":settings.payout_fee_free_threshold, "payout_auto_days":settings.payout_auto_days, "payout_weekday_label":settings.payout_weekday_label, "legal_operator":legal_operator, **seo_metadata(request), **values}
 
@@ -850,6 +854,7 @@ async def mypage(request: Request, tab: str = "overview"):
 
 @app.get("/favorites", response_class=HTMLResponse)
 async def favorites(request: Request, folder: str = ""):
+    store = browsing_store(request)
     user = current_user(request)
     if not user: return RedirectResponse("/login?next=/favorites", 303)
     all_items = [item for item in store.list_tools() if (user["id"], item["slug"]) in store.likes]
@@ -898,6 +903,7 @@ async def delete_favorite_folder(request: Request, folder_id: str):
 
 @app.get("/notifications", response_class=HTMLResponse)
 async def notifications(request: Request, filter: str = "all"):
+    store = browsing_store(request)
     user = current_user(request)
     if not user: return RedirectResponse("/login?next=/notifications", 303)
     filter = filter if filter in {"all","unread","messages","transactions","requests","updates"} else "all"
@@ -1342,6 +1348,7 @@ async def purchase_library(request: Request):
 
 @app.get("/subscriptions", response_class=HTMLResponse)
 async def subscriptions(request: Request):
+    store = browsing_store(request)
     user = current_user(request)
     if not user: return RedirectResponse("/login?next=/subscriptions", 303)
     items = [x for x in store.subscriptions if x["buyer_id"] == user["id"]]
@@ -2399,6 +2406,7 @@ async def consult_creator(request: Request, username: str):
 
 @app.get("/settings", response_class=HTMLResponse)
 async def settings_page(request: Request):
+    store = browsing_store(request)
     user = current_user(request)
     if not user: return RedirectResponse("/login?next=/settings", 303)
     profile_settings = {**user, **store.registered_users.get(user["username"], {})}
@@ -2479,6 +2487,7 @@ async def settings_save(
 
 @app.get("/support", response_class=HTMLResponse)
 async def support_center(request: Request):
+    store = browsing_store(request)
     user = current_user(request)
     cases = [x for x in store.support_cases if x["user_id"] == user["id"]] if user else []
     return templates.TemplateResponse(request, "support.html", context(request, cases=cases, support_email=settings.support_email))
