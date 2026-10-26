@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
+import time
 from urllib.parse import urlparse
 
 import httpx
@@ -15,6 +17,21 @@ import httpx
 from .config import Settings
 from .database import PostgresStateStore
 from .supabase_api import supabase_headers
+
+logger = logging.getLogger(__name__)
+
+
+def _http_failure_code(error: httpx.HTTPError) -> str:
+    # Exception strings can contain credentials, query strings or provider data.
+    for kind, code in ((httpx.ConnectTimeout, "connect_timeout"),
+                       (httpx.ReadTimeout, "read_timeout"),
+                       (httpx.WriteTimeout, "write_timeout"),
+                       (httpx.PoolTimeout, "pool_timeout"),
+                       (httpx.ConnectError, "connect_error"),
+                       (httpx.RemoteProtocolError, "remote_protocol_error")):
+        if isinstance(error, kind):
+            return code
+    return "http_error"
 
 
 def database_configuration_diagnostics(settings: Settings) -> dict[str, bool]:
@@ -117,12 +134,25 @@ async def connection_checks(settings: Settings) -> dict[str, bool]:
     async with httpx.AsyncClient(timeout=10, follow_redirects=False) as client:
         async def check(item):
             name, method, path, headers, params, accepted = item
+            started = time.monotonic()
+            status = None
+            failure = None
             try:
                 response = await client.request(method, settings.supabase_url + path,
                                                 headers=headers, params=params)
-                return name, response.status_code in accepted
-            except httpx.HTTPError:
-                return name, False
+                status = response.status_code
+                if status not in accepted:
+                    failure = "unexpected_status"
+            except httpx.HTTPError as error:
+                failure = _http_failure_code(error)
+            if failure:
+                # Fixed check names and scalar diagnostics only. Never log the
+                # request, headers, response body, exception text or traceback.
+                logger.warning("connection_preflight_failure %s", json.dumps({
+                    "check": name, "failure": failure, "status_code": status,
+                    "elapsed_ms": round((time.monotonic() - started) * 1000),
+                }))
+            return name, failure is None
         results.update(await asyncio.gather(*(check(item) for item in checks)))
     if settings.storage_provider == "supabase":
         from .object_storage import SupabaseObjectStorage, ObjectStorageError

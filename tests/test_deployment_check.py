@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 import httpx
 import pytest
@@ -73,6 +74,43 @@ def test_preflight_cli_does_not_print_exception_or_credentials(monkeypatch, caps
     output = capsys.readouterr().out
     assert "private-password" not in output and "sk_live_hidden" not in output
     assert '"connection_preflight_passed": false' in output
+
+
+@pytest.mark.parametrize("fault,expected,status", [
+    (httpx.ConnectTimeout, "connect_timeout", None),
+    (httpx.ReadTimeout, "read_timeout", None),
+    (httpx.WriteTimeout, "write_timeout", None),
+    (httpx.PoolTimeout, "pool_timeout", None),
+    (httpx.ConnectError, "connect_error", None),
+    (httpx.RemoteProtocolError, "remote_protocol_error", None),
+    (httpx.ReadError, "http_error", None),
+    (400, "unexpected_status", 400),
+    (503, "unexpected_status", 503),
+])
+def test_preflight_failure_diagnostics_are_actionable_and_secret_free(fault, expected, status, monkeypatch, caplog):
+    async def probe(backend):
+        return True
+    monkeypatch.setattr(checks.PostgresStateStore, "probe", probe)
+    def request(req):
+        if req.url.path.endswith("creator_badges"):
+            if isinstance(fault, int):
+                return httpx.Response(fault, text="PRIVATE_PROVIDER_BODY", headers={"x-private": "PRIVATE_HEADER"})
+            raise fault("PRIVATE_EXCEPTION service-fixture anon-fixture", request=req)
+        return httpx.Response(401 if req.method == "HEAD" and req.headers["apikey"] == "anon-fixture" else 200)
+    client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: client(transport=httpx.MockTransport(request), **kwargs))
+    with caplog.at_level("WARNING", logger=checks.__name__):
+        result = asyncio.run(checks.connection_checks(configured()))
+    assert result["badge_api"] is False
+    assert all(value for key, value in result.items() if key != "badge_api")
+    messages = [record.getMessage() for record in caplog.records if record.name == checks.__name__]
+    assert len(messages) == 1
+    diagnostic = json.loads(messages[0].split(" ", 1)[1])
+    assert diagnostic == {"check": "badge_api", "failure": expected, "status_code": status,
+                          "elapsed_ms": diagnostic["elapsed_ms"]}
+    assert isinstance(diagnostic["elapsed_ms"], int) and diagnostic["elapsed_ms"] >= 0
+    for secret in ("PRIVATE_PROVIDER_BODY", "PRIVATE_HEADER", "PRIVATE_EXCEPTION", "service-fixture", "anon-fixture", "project.supabase.co"):
+        assert secret not in messages[0]
 
 
 def test_deployment_health_does_not_approve_launch_or_payments(monkeypatch):
