@@ -297,22 +297,36 @@ class PostgresStateStore:
             # lock. Only the connection handshake is prepared concurrently.
             phase = "advisory_lock"
             timing.mark(phase)
-            cursor = await conn.execute("select pg_try_advisory_lock(%s)", (LOCK_ID,))
-            if not (await cursor.fetchone())[0]:
-                raise StorageUnavailable("Database is busy; retry later", diagnostic_code="database_busy")
-            database_locked = True
-            # The advisory lock must be acquired in an earlier statement. Do
-            # not put it in this SELECT: PostgreSQL may evaluate its reads
-            # before the lock expression. Schema and state, however, can be
-            # read together, saving a network round trip on every navigation.
-            phase = "load"
-            timing.mark(phase)
-            cursor = await conn.execute(
+            state_query = (
                 "select v.version, s.revision, s.payload "
                 "from toolbako_runtime.schema_version v "
                 "left join toolbako_runtime.marketplace_state s on s.singleton "
                 "where v.singleton"
             )
+            if self._reuse_connections:
+                # Separate statements execute in order on the same session.
+                # Pipeline only the lock attempt and read: no writes, handlers
+                # or payment calls may run before the lock result is checked.
+                # A failure may occur AFTER the server took the session lock,
+                # so conservatively attempt unlock during failure cleanup.
+                database_locked = True
+                async with conn.pipeline():
+                    lock_cursor = await conn.execute("select pg_try_advisory_lock(%s)", (LOCK_ID,))
+                    cursor = await conn.execute(state_query)
+                locked = await lock_cursor.fetchone()
+                if not locked or locked[0] is not True:
+                    database_locked = False
+                    raise StorageUnavailable("Database is busy; retry later", diagnostic_code="database_busy")
+            else:
+                lock_cursor = await conn.execute("select pg_try_advisory_lock(%s)", (LOCK_ID,))
+                if not (await lock_cursor.fetchone())[0]:
+                    raise StorageUnavailable("Database is busy; retry later", diagnostic_code="database_busy")
+                database_locked = True
+                phase = "load"
+                timing.mark(phase)
+                cursor = await conn.execute(state_query)
+            phase = "load"
+            timing.mark(phase)
             row = await cursor.fetchone()
             if not row or row[0] != SCHEMA_VERSION:
                 raise StorageUnavailable("Database migration required", diagnostic_code="schema_version_mismatch")

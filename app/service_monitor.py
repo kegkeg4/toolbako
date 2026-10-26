@@ -61,6 +61,37 @@ async def probe(client, url):
         return False
 
 
+async def probe_health(client, url):
+    """Bounded public JSON check; a proxy's HTTP 200 error page is unhealthy."""
+    try:
+        async with client.stream("GET", url) as response:
+            if response.status_code != 200:
+                return False
+            body = bytearray()
+            async for chunk in response.aiter_bytes():
+                body.extend(chunk)
+                if len(body) > 1024:
+                    return False
+            payload = json.loads(body)
+            return isinstance(payload, dict) and payload.get("status") == "ok"
+    except (httpx.HTTPError, TimeoutError, ValueError):
+        return False
+
+
+async def check_site(client, login_url):
+    # Both infrastructure health and the ordinary DB-backed login page must
+    # work. These requests contain no account/session or business data.
+    root = "https://toolbako.onellc-ai.com"
+    try:
+        async with asyncio.timeout(12):
+            results = await asyncio.gather(probe(client, login_url),
+                probe_health(client, root + "/healthz"),
+                probe_health(client, root + "/deploymentz"))
+        return all(results)
+    except TimeoutError:
+        return False
+
+
 async def wait_for_next_check(stop, observer, *, interval=60):
     """A dead queue observer must fail the service so Railway can restart it."""
     stopping = asyncio.create_task(stop.wait())
@@ -96,12 +127,14 @@ async def run(url, recipient, *, stop=None):
             "User-Agent": "Toolbako-availability-monitor/1",
         }) as client:
             while not stop.is_set():
-                healthy = await probe(client, url)
+                started = time.monotonic()
+                healthy = await check_site(client, url)
                 await alert.check(healthy)
                 print(json.dumps({"event": "availability_observation", "healthy": healthy,
                                   "consecutive_failures": alert.failures,
                                   "checked_at": datetime.now(timezone.utc).isoformat()}), flush=True)
-                if not await wait_for_next_check(stop, observer):
+                if not await wait_for_next_check(stop, observer,
+                        interval=max(0, 60 - (time.monotonic() - started))):
                     return 1
         return 0
     finally:

@@ -3,7 +3,7 @@ import asyncio
 import httpx
 import pytest
 
-from app.service_monitor import AvailabilityAlert, probe, wait_for_next_check
+from app.service_monitor import AvailabilityAlert, probe, probe_health, check_site, wait_for_next_check
 
 
 class Sender:
@@ -85,4 +85,31 @@ def test_queue_observer_keeps_running_until_normal_stop():
         stop.set()
         assert await wait_for_next_check(stop, observer, interval=1)
         await observer
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("body,expected", [
+    ('{"status":"ok"}', True), ('{"status":"error"}', False),
+    ('<html>upstream unavailable</html>', False), ('[]', False),
+    ('{"status":"ok","padding":"' + 'x'*1100 + '"}', False),
+])
+def test_json_probe_rejects_false_positive_and_oversized_bodies(body, expected):
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(
+                lambda _: httpx.Response(200, text=body))) as client:
+            assert await probe_health(client, 'https://example.invalid/healthz') is expected
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('broken', [None, '/login', '/healthz', '/deploymentz'])
+def test_site_requires_page_and_both_health_checks(broken):
+    async def run():
+        calls = []
+        def respond(request):
+            calls.append(request.url.path)
+            return httpx.Response(503 if request.url.path == broken else 200,
+                                  json={'status':'ok'})
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            assert await check_site(client, 'https://toolbako.onellc-ai.com/login') is (broken is None)
+        assert sorted(calls) == ['/deploymentz', '/healthz', '/login']
     asyncio.run(run())

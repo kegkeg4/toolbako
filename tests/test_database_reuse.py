@@ -149,3 +149,45 @@ def test_expired_or_different_loop_sessions_are_closed(database):
             await backend.close()
 
     asyncio.run(verify())
+
+
+def test_pipeline_busy_never_restores_unlocked_state(database):
+    _, dsn = database
+    async def run():
+        holder = PostgresStateStore(dsn)
+        contender = PostgresStateStore(dsn, reuse_connections=True)
+        untouched = DemoStore(seed=False)
+        untouched.audit(None, "local.only", "keep")
+        async with holder.request(DemoStore(seed=False)):
+            with pytest.raises(StorageUnavailable) as error:
+                async with contender.request(untouched):
+                    pytest.fail("Handler ran without the session lock")
+            assert error.value.diagnostic_code == "database_busy"
+            assert untouched.audit_logs[0]["target"] == "keep"
+            assert not contender._idle_connections
+        async with contender.request(untouched):
+            assert untouched.audit_logs == []
+        await contender.close()
+    asyncio.run(run())
+
+
+def test_pipeline_read_failure_releases_lock_before_next_worker(database):
+    _, dsn = database
+    async def run():
+        backend = PostgresStateStore(dsn, reuse_connections=True)
+        async with await backend.connect() as setup:
+            await setup.execute("alter table toolbako_runtime.marketplace_state rename to temporarily_missing")
+        try:
+            with pytest.raises(StorageUnavailable):
+                async with backend.request(DemoStore(seed=False)):
+                    pytest.fail("Missing table reached handler")
+            assert not backend._idle_connections
+            assert not backend._local_lock.locked()
+        finally:
+            async with await backend.connect() as setup:
+                await setup.execute("alter table toolbako_runtime.temporarily_missing rename to marketplace_state")
+        async with backend.request(DemoStore(seed=False)):
+            backend._store.audit(None, "pipeline.recovery", "saved")
+            await backend.save()
+        await backend.close()
+    asyncio.run(run())
