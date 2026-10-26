@@ -16,11 +16,15 @@ from test_database import database, query
 def test_route_gate_never_treats_credentials_or_writes_as_public():
     for path in PUBLIC_READ_PATHS:
         assert anonymous_read(Request({'type':'http','method':'GET','path':path,'headers':[]}))
+    assert anonymous_read(Request({'type':'http','method':'HEAD','path':'/login','headers':[]}))
     for method, path, headers in [
         ('POST','/tools',[]), ('GET','/tools/new',[]), ('GET','/tools/x',[]),
         ('GET','/admin',[]), ('GET','/orders/x',[]), ('GET','/tools',[(b'cookie',b'')]),
         ('GET','/login',[(b'cookie',b'toolbako_session=invalid')]),
         ('GET','/',[(b'authorization',b'Bearer invalid')]),
+        ('HEAD','/login',[(b'cookie',b'toolbako_session=invalid')]),
+        ('HEAD','/login',[(b'authorization',b'Bearer invalid')]),
+        ('HEAD','/tools',[]), ('HEAD','/admin',[]),
     ]:
         assert not anonymous_read(Request({'type':'http','method':method,'path':path,'headers':headers}))
 

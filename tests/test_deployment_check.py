@@ -113,7 +113,8 @@ def test_preflight_failure_diagnostics_are_actionable_and_secret_free(fault, exp
         assert secret not in messages[0]
 
 
-def test_deployment_health_does_not_approve_launch_or_payments(monkeypatch):
+@pytest.mark.parametrize("method", ["GET", "HEAD"])
+def test_deployment_health_does_not_approve_launch_or_payments(monkeypatch, method):
     from types import SimpleNamespace
     from fastapi.testclient import TestClient
     import app.main as main
@@ -122,9 +123,12 @@ def test_deployment_health_does_not_approve_launch_or_payments(monkeypatch):
     monkeypatch.setattr(main, "settings", configured())
     monkeypatch.setattr(main, "database_store", SimpleNamespace(probe=probe))
     client = TestClient(main.app)
-    operational = client.get("/deploymentz")
+    operational = client.request(method, "/deploymentz")
     assert operational.status_code == 200
-    assert operational.json() == {"status": "ok", "live_payments_enabled": False}
+    if method == "GET":
+        assert operational.json() == {"status": "ok", "live_payments_enabled": False}
+    else:
+        assert operational.content == b""
     assert "no-store" in operational.headers["cache-control"]
     launch = client.get("/readyz")
     assert launch.status_code == 503 and not launch.json()["ready"]
@@ -132,7 +136,8 @@ def test_deployment_health_does_not_approve_launch_or_payments(monkeypatch):
 
 
 @pytest.mark.parametrize("failure", ["missing_config", "database", "live_key"])
-def test_deployment_health_fails_closed(monkeypatch, failure):
+@pytest.mark.parametrize("method", ["GET", "HEAD"])
+def test_deployment_health_fails_closed(monkeypatch, failure, method):
     from types import SimpleNamespace
     from fastapi.testclient import TestClient
     import app.main as main
@@ -144,6 +149,23 @@ def test_deployment_health_fails_closed(monkeypatch, failure):
                              {"stripe_secret_key": "sk_live_forbidden"} if failure == "live_key" else {}))
     monkeypatch.setattr(main, "settings", settings)
     monkeypatch.setattr(main, "database_store", SimpleNamespace(probe=probe))
-    response = TestClient(main.app).get("/deploymentz")
-    assert response.status_code == 503 and response.json()["live_payments_enabled"] is False
+    response = TestClient(main.app).request(method, "/deploymentz")
+    assert response.status_code == 503
+    if method == "GET":
+        assert response.json()["live_payments_enabled"] is False
+    else:
+        assert response.content == b""
     assert len(calls) == (1 if failure == "database" else 0)
+
+
+@pytest.mark.parametrize("path", ["/healthz", "/login"])
+def test_public_monitor_head_matches_get_without_body(path):
+    from fastapi.testclient import TestClient
+    from app.main import app
+    with TestClient(app) as client:
+        response = client.head(path)
+        get = client.get(path)
+    assert response.status_code == get.status_code == 200
+    assert response.content == b"" and get.content
+    assert response.headers["content-type"] == get.headers["content-type"]
+    assert "no-store" in response.headers["cache-control"]

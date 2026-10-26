@@ -2013,6 +2013,7 @@ async def report(request: Request, target_type: str = Form(...), target_id: str 
     return RedirectResponse(f"{safe_next(referer_path)}?reported=1", 303)
 
 
+@app.head("/login", response_class=HTMLResponse, include_in_schema=False)
 @app.get("/login", response_class=HTMLResponse)
 async def login(request: Request, next: str = "/"):
     return templates.TemplateResponse(request, "login.html", context(request, next=safe_next(next)))
@@ -2933,6 +2934,7 @@ async def robots():
     return PlainTextResponse("User-agent: *\nAllow: /\n" + "".join(f"Disallow: {path}\n" for path in private_paths) + f"Sitemap: {settings.site_base_url}/sitemap.xml\n")
 
 
+@app.head("/healthz", include_in_schema=False)
 @app.get("/healthz")
 async def health(): return {"status":"ok", "mode":"supabase" if settings.supabase_ready else "demo"}
 
@@ -2944,6 +2946,7 @@ async def readiness():
     return JSONResponse(result, status_code=200 if result["ready"] or settings.demo_mode else 503)
 
 
+@app.head("/deploymentz", include_in_schema=False)
 @app.get("/deploymentz")
 async def deployment_health():
     # Allows a secure DB/Auth staging build to start before money movement is

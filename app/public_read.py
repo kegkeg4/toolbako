@@ -13,7 +13,8 @@ PUBLIC_READ_PATHS = CATALOG_PATHS | frozenset({
 def anonymous_read(request):
     # Any credential/cookie, even malformed/empty, uses the original boundary.
     # Explicit routes only: GET alone does not prove a handler is read-only.
-    return (request.method == "GET" and request.url.path in PUBLIC_READ_PATHS
+    method_allowed = request.method == "GET" or (request.method == "HEAD" and request.url.path == "/login")
+    return (method_allowed and request.url.path in PUBLIC_READ_PATHS
             and "cookie" not in request.headers and "authorization" not in request.headers)
 
 
