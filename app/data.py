@@ -543,6 +543,7 @@ class DemoStore:
         at = at or datetime.now(timezone.utc)
         changed = 0
         with self._lock:
+            review_order_ids = set()
             for order in self.orders:
                 if order.get("status") == "awaiting_acceptance" and order.get("auto_close_at") and order["auto_close_at"] <= at:
                     order["status"] = "completed"
@@ -558,12 +559,13 @@ class DemoStore:
                     order["updated_at"] = at
                     changed += 1
                 if order.get("status") == "completed" and order.get("review_deadline") and order["review_deadline"] <= at:
-                    for review in self.reviews:
-                        if review.get("order_id") == order["id"] and not review.get("published", True):
-                            review["published"] = True
-                            changed += 1
-                    for review in self.buyer_reviews:
-                        if review.get("order_id") == order["id"] and not review.get("published", True):
+                    review_order_ids.add(order["id"])
+            # Scan each review collection once, not once per completed order.
+            # Retain the same lock, deadlines, mutations and changed count.
+            if review_order_ids:
+                for reviews in (self.reviews, self.buyer_reviews):
+                    for review in reviews:
+                        if review.get("order_id") in review_order_ids and not review.get("published", True):
                             review["published"] = True
                             changed += 1
         return changed
@@ -762,6 +764,15 @@ class DemoStore:
 
     def tool_active_orders(self, slug: str) -> int:
         return sum(1 for x in self.orders if x["tool_slug"] == slug and x["status"] in {"in_progress","awaiting_acceptance","cancel_pending"})
+
+    def tool_active_order_counts(self, slugs) -> dict[str, int]:
+        """Batch the dashboard counts without caching financial state."""
+        counts = dict.fromkeys(slugs, 0)
+        for order in self.orders:
+            slug = order["tool_slug"]
+            if slug in counts and order["status"] in {"in_progress", "awaiting_acceptance", "cancel_pending"}:
+                counts[slug] += 1
+        return counts
 
     def audit(self, user_id: str | None, action: str, target: str, request_id: str = "") -> None:
         if not request_id:

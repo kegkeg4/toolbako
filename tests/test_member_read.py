@@ -37,7 +37,7 @@ def sample_store():
 
 
 def request_for(sid='sid-a',path='/notifications',method='GET',headers=()):
-    return Request({'type':'http','method':method,'path':path,'headers':list(headers),'session':{'sid':sid}})
+    return Request({'type':'http','method':method,'path':path,'query_string':b'','headers':list(headers),'session':{'sid':sid}})
 
 
 def cookie(secret, sid='sid-a', **other):
@@ -88,6 +88,47 @@ def test_member_view_has_only_owner_records_and_never_waits_for_writer(database)
             assert [v.notifications[0]['user_id'] for v in views]==['a','b']*6
             assert len(reader._public_connections)<=2
         finally:await reader.close()
+    asyncio.run(run())
+
+
+def test_library_owner_filter_and_subscription_revocation_are_fresh(database, monkeypatch):
+    from app import main
+    writer, dsn = database
+    store = sample_store()
+    now = datetime.now(timezone.utc)
+    store.orders = [dict(id='order-'+n, buyer_id=n, seller_id='seller', tool_name='Library '+n,
+                         status='completed', billing_type='subscription', created_at=now,
+                         license_key='LICENSE-'+n) for n in ('a','b')]
+    store.orders.append(dict(store.orders[0],id='unpaid',status='pending_payment',license_key='UNPAID'))
+    for sub in store.subscriptions:
+        sub['order_id'] = 'order-'+sub['buyer_id']
+    async def run():
+        from psycopg.types.json import Jsonb
+        from app.database import snapshot
+        reader = PostgresStateStore(dsn,reuse_connections=True)
+        try:
+            # Artificial state only, directly seeded into the disposable DB.
+            async with await writer.connect() as conn:
+                await conn.execute('insert into toolbako_runtime.marketplace_state(singleton,payload) values(true,%s)', (Jsonb(snapshot(store)),))
+            async with writer.request(DemoStore(seed=False)):
+                view = await reader.member_view('sid-a','/library')
+                assert [x['id'] for x in view.orders] == ['order-a']
+                assert [x['id'] for x in view.subscriptions] == ['sub-a']
+                monkeypatch.setattr(main,'store',store)
+                req=request_for(path='/library');req.state.member_view=view
+                req.state.member_sessions=SessionService(view,3600)
+                response=await main.purchase_library(req)
+                assert b'LICENSE-a' in response.body and b'LICENSE-b' not in response.body and b'UNPAID' not in response.body
+            store.subscriptions[0]['status']='cancelled'
+            async with await writer.connect() as conn:
+                await conn.execute('update toolbako_runtime.marketplace_state set payload=%s,revision=revision+1 where singleton',(Jsonb(snapshot(store)),))
+            view=await reader.member_view('sid-a','/library')
+            req=request_for(path='/library');req.state.member_view=view
+            req.state.member_sessions=SessionService(view,3600)
+            response=await main.purchase_library(req)
+            assert b'LICENSE-a' not in response.body
+        finally:
+            await reader.close()
     asyncio.run(run())
 
 

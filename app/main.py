@@ -1336,11 +1336,16 @@ async def order_document(request: Request, order_id: str, kind: str):
 
 @app.get("/library", response_class=HTMLResponse)
 async def purchase_library(request: Request):
+    store = browsing_store(request)
     user = current_user(request)
     if not user: return RedirectResponse("/login?next=/library", 303)
+    subscriptions_by_order = {}
+    for subscription in store.subscriptions:
+        # Preserve first-match semantics even for duplicate legacy entries.
+        subscriptions_by_order.setdefault(subscription.get("order_id"), subscription)
     def has_access(order: dict) -> bool:
         if order.get("billing_type", "one_time") != "subscription": return True
-        subscription = next((item for item in store.subscriptions if item.get("order_id") == order["id"]), None)
+        subscription = subscriptions_by_order.get(order["id"])
         return bool(subscription and subscription.get("status") == "active")
     orders = [x for x in store.orders if x["buyer_id"] == user["id"] and x["status"] == "completed" and has_access(x)]
     return templates.TemplateResponse(request, "library.html", context(request, orders=orders))
@@ -1383,7 +1388,7 @@ async def seller_dashboard(request: Request):
     transfer_inquiries = sorted([item for item in store.transfer_inquiries if item["seller_id"] == user["id"]], key=lambda item:item["updated_at"], reverse=True)
     profile_checks = [bool(account.get("headline")), bool(account.get("bio")), bool(account.get("skills")), bool(account.get("availability") and account.get("availability") != "受付状況未設定")]
     profile_score = round(sum(profile_checks) / len(profile_checks) * 100)
-    return templates.TemplateResponse(request, "seller.html", context(request, tools=own_tools, orders=orders, recent_orders=orders[:8], action_orders=action_orders, transfer_inquiries=transfer_inquiries, rank=rank, profile_score=profile_score, active_by_slug={x["slug"]:store.tool_active_orders(x["slug"]) for x in own_tools}, gross=sum(x["amount"] for x in completed), fees=sum(x["platform_fee"] for x in completed), pending=sum(x["amount"]-x["platform_fee"] for x in orders if x["status"] not in {"completed","cancelled"})))
+    return templates.TemplateResponse(request, "seller.html", context(request, tools=own_tools, orders=orders, recent_orders=orders[:8], action_orders=action_orders, transfer_inquiries=transfer_inquiries, rank=rank, profile_score=profile_score, active_by_slug=store.tool_active_order_counts(x["slug"] for x in own_tools), gross=sum(x["amount"] for x in completed), fees=sum(x["platform_fee"] for x in completed), pending=sum(x["amount"]-x["platform_fee"] for x in orders if x["status"] not in {"completed","cancelled"})))
 
 
 @app.get("/seller/transfers", response_class=HTMLResponse)

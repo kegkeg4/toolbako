@@ -7,7 +7,7 @@ from .public_read import PUBLIC_READ_PATHS, PublicView
 
 
 MEMBER_READ_PATHS = (PUBLIC_READ_PATHS - {'/login'}) | frozenset({
-    '/favorites', '/notifications', '/settings', '/subscriptions',
+    '/favorites', '/notifications', '/settings', '/subscriptions', '/library',
 })
 
 
@@ -52,7 +52,8 @@ def member_projection(path):
             return "'[]'::jsonb"
         return f"coalesce((select jsonb_agg(item) from jsonb_array_elements(s.payload->'{field}') item where item->>'{key}'=u.uid), '[]'::jsonb)"
     # Strip password material and provider tokens even though this view stays
-    # server-side. No orders, payouts, audit records or other users' sessions.
+    # server-side. Library receives only its buyer's completed orders; other
+    # pages receive no orders. No payouts, audit or other users' sessions.
     return "jsonb_build_object(" + ','.join([
         "'account_sessions', case when a.record is null then '{}'::jsonb else jsonb_build_object(%s::text, a.record - 'provider_tokens') end",
         "'registered_users', case when u.username is null then '{}'::jsonb else jsonb_build_object(u.username, (s.payload->'registered_users'->u.username) - 'password_hash' - 'password_salt') end",
@@ -60,7 +61,8 @@ def member_projection(path):
         "'account_deletions'," + own_rows('account_deletions'),
         "'notifications'," + own_rows('notifications'),
         "'support_cases'," + own_rows('support_cases', needed=path == '/support'),
-        "'subscriptions'," + own_rows('subscriptions', 'buyer_id', path == '/subscriptions'),
+        "'subscriptions'," + own_rows('subscriptions', 'buyer_id', path in {'/subscriptions', '/library'}),
+        *(["'orders',coalesce((select jsonb_agg(item) from jsonb_array_elements(s.payload->'orders') item where item->>'buyer_id'=u.uid and item->>'status'='completed'),'[]'::jsonb)"] if path == '/library' else []),
         "'tools'," + tools,
         "'public_badges'," + badges,
         "'likes',jsonb_build_object('__type__','set','value',coalesce((select jsonb_agg(item) from jsonb_array_elements(s.payload->'likes'->'value') item where item->'value'->>0=u.uid),'[]'::jsonb))" if path == '/favorites' else "'likes',jsonb_build_object('__type__','set','value','[]'::jsonb)",
