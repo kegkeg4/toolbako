@@ -110,7 +110,7 @@ app = FastAPI(title="ツールバコ", description="AIツールの共有・発�
 app.add_middleware(SessionMiddleware, secret_key=settings.session_secret, session_cookie="toolbako_session", same_site="lax", https_only=settings.site_base_url.startswith("https"), max_age=settings.session_max_age)
 app.add_middleware(GZipMiddleware, minimum_size=500, compresslevel=6)
 if database_store or settings.is_production:
-    app.add_middleware(DatabaseBoundaryMiddleware, backend=database_store, store=store)
+    app.add_middleware(DatabaseBoundaryMiddleware, backend=database_store, store=store, public_reads=True)
 app.add_middleware(StripeWebhookGuardMiddleware, settings=settings)
 app.add_middleware(ProductionGuardMiddleware, settings=settings)
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(settings.allowed_hosts) if settings.allowed_hosts else ["*"])
@@ -186,7 +186,14 @@ initialize_monitoring(settings)
 establish_session = session_service.establish
 update_current_session = session_service.update
 revoke_user_sessions = session_service.revoke_user
-current_user = session_service.current
+def current_user(request: Request):
+    if getattr(request.state, "public_view", None) is not None:
+        return None
+    return session_service.current(request)
+
+
+def browsing_store(request: Request):
+    return getattr(request.state, "public_view", None) or store
 
 PROFILE_CACHE_FIELDS = (
     "id", "email", "display_name", "avatar_url", "headline", "bio", "skills", "experience", "portfolio",
@@ -265,6 +272,9 @@ def seo_metadata(request: Request) -> dict:
 
 
 def context(request: Request, **values):
+    public_view = getattr(request.state, "public_view", None)
+    if public_view is not None:
+        values["creator_badges_for"] = public_view.badges_for
     values.update(disclosure_fields=DISCLOSURE_FIELDS, permission_labels=PERMISSION_LABELS, rights_statement=RIGHTS_STATEMENT, display_disclosures=display_disclosures)
     values["review_labels"] = REVIEW_LABELS
     values["delivery_upload_ready"] = delivery_upload_available(settings)
@@ -272,7 +282,7 @@ def context(request: Request, **values):
     values["subscription_checkout_ready"] = settings.demo_mode
     status_labels = {"in_progress":"取引中","awaiting_acceptance":"納品確認待ち","completed":"取引完了","cancel_pending":"キャンセル確認中","cancelled":"キャンセル済み"}
     user = current_user(request)
-    unread_notification_count = sum(1 for item in store.notifications if user and item.get("user_id") == user["id"] and not item.get("read"))
+    unread_notification_count = sum(1 for item in store.notifications if item.get("user_id") == user["id"] and not item.get("read")) if user else 0
     legal_operator = {"name":settings.legal_business_name,"representative":settings.legal_representative,"address":settings.legal_address,"phone":settings.legal_phone,"contact_on_request":settings.legal_contact_on_request,"email":settings.support_email,"website":settings.legal_website,"invoice_number":settings.legal_invoice_number}
     return {"request": request, "user": user, "admin_access":is_admin(user), "unread_notification_count":unread_notification_count, "categories": CATEGORIES, "ai_options": AI_OPTIONS, "price_labels": PRICE_LABELS, "dist_labels": DIST_LABELS, "status_labels": status_labels, "transfer_asset_labels":TRANSFER_ASSET_LABELS, "transfer_status_labels":TRANSFER_STATUS_LABELS, "site_url": settings.site_base_url, "asset_version":settings.asset_version, "csp_nonce":getattr(request.state, "csp_nonce", ""), "demo_mode":settings.demo_mode, "oauth_providers":settings.enabled_oauth_providers, "email_ready":settings.email_ready, "stripe_ready":settings.stripe_ready, "platform_fee_percent":round(settings.platform_fee_rate * 100, 2), "custom_fee_percent":round(settings.custom_fee_rate * 100, 2), "payout_schedule_label":settings.payout_schedule_label, "payout_minimum":settings.payout_minimum, "payout_fee":settings.payout_fee, "payout_fee_free_threshold":settings.payout_fee_free_threshold, "payout_auto_days":settings.payout_auto_days, "payout_weekday_label":settings.payout_weekday_label, "legal_operator":legal_operator, **seo_metadata(request), **values}
 
@@ -408,10 +418,11 @@ async def save_thumbnail(upload: UploadFile | None, slug: str) -> str | None:
 
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
-    tools = store.list_tools()
-    trending = store.list_tools(sort="trending")[:5]
+    catalog = browsing_store(request)
+    tools = catalog.list_tools()
+    trending = catalog.list_tools(sort="trending")[:5]
     picks = {c: next((t for t in tools if t["category"] == c), None) for c in CATEGORIES}
-    return templates.TemplateResponse(request, "home.html", context(request, trending=trending, newest=tools[:6], category_picks=picks, curated=store.get_public("oyatsu-gacha")))
+    return templates.TemplateResponse(request, "home.html", context(request, trending=trending, newest=tools[:6], category_picks=picks, curated=catalog.get_public("oyatsu-gacha")))
 
 
 @app.head("/", include_in_schema=False)
@@ -427,7 +438,7 @@ async def tools_list(request: Request, q: str = "", category: str = "", price_ty
     price_type = price_type if price_type in PRICE_LABELS else ""
     ai = ai if ai in AI_OPTIONS else ""
     sort = sort if sort in {"new", "popular", "trending"} else "new"
-    items = store.list_tools(q, category, price_type, ai, sort)
+    items = browsing_store(request).list_tools(q, category, price_type, ai, sort)
     return templates.TemplateResponse(request, "tools.html", context(request, tools=items, q=q, selected_category=category, selected_price=price_type, selected_ai=ai, sort=sort))
 
 
@@ -2469,7 +2480,7 @@ async def settings_save(
 @app.get("/support", response_class=HTMLResponse)
 async def support_center(request: Request):
     user = current_user(request)
-    cases = [x for x in store.support_cases if user and x["user_id"] == user["id"]]
+    cases = [x for x in store.support_cases if x["user_id"] == user["id"]] if user else []
     return templates.TemplateResponse(request, "support.html", context(request, cases=cases, support_email=settings.support_email))
 
 

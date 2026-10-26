@@ -36,7 +36,7 @@ DATABASE_FAILURE_CODES = frozenset({
     "tls_connection_failed", "network_connection_failed", "connection_failed",
     "schema_missing", "schema_access_denied", "schema_version_mismatch",
     "query_timeout", "schema_probe_failed",
-    "local_lock_timeout", "connection_capacity_timeout", "database_busy", "request_failed", "state_conflict",
+    "local_lock_timeout", "connection_capacity_timeout", "database_busy", "request_failed", "state_conflict", "state_uninitialized",
 })
 DATABASE_REQUEST_PHASES = frozenset({"connection_slot", "local_lock", "connect", "advisory_lock", "load", "handler", "save", "cleanup"})
 _request_clock = time.monotonic
@@ -179,6 +179,76 @@ class PostgresStateStore:
         self._audit_hashes = {}
         self._emails = []
         self._last_finance_hash = None
+        # Anonymous reads do not share the mutable store or writer lock. Keep
+        # their connections separate, bounded to two, and database-read-only.
+        self._public_slots = asyncio.BoundedSemaphore(2)
+        self._public_connections = []
+
+    async def public_view(self, *, catalog=False):
+        from .public_read import PublicView
+        from psycopg.pq import TransactionStatus
+        conn = None
+        reusable = False
+        async with asyncio.timeout(12):
+            async with self._public_slots:
+                try:
+                    while self._public_connections:
+                        candidate, returned_at, owner_loop = self._public_connections.pop()
+                        if (owner_loop is asyncio.get_running_loop() and not candidate.closed
+                                and candidate.info.transaction_status == TransactionStatus.IDLE
+                                and time.monotonic() - returned_at < 60):
+                            conn = candidate
+                            break
+                        await candidate.close()
+                    # A stale socket can be retried here: only a SELECT is sent,
+                    # no handler, session mutation, or provider action is replayed.
+                    for attempt in range(2):
+                        try:
+                            if conn is None:
+                                conn = await self.connect()
+                                await conn.execute("set default_transaction_read_only = on")
+                            projection = "'[]'::jsonb, '{}'::jsonb"
+                            if catalog:
+                                projection = """
+                                    coalesce((select jsonb_agg(item)
+                                      from jsonb_array_elements(s.payload->'tools') item
+                                      where coalesce(item->'is_removed', 'false'::jsonb) <> 'true'::jsonb
+                                        and coalesce(item->'is_published', 'true'::jsonb) = 'true'::jsonb
+                                        and coalesce(item->'status', '\"published\"'::jsonb) = '\"published\"'::jsonb), '[]'::jsonb),
+                                    coalesce((select jsonb_object_agg(key, jsonb_build_object(
+                                        'is_founding_member', value->'is_founding_member',
+                                        'founding_member_since', value->'founding_member_since',
+                                        'is_certified_creator', value->'is_certified_creator',
+                                        'certified_creator_since', value->'certified_creator_since'))
+                                      from jsonb_each(s.payload->'registered_users')), '{}'::jsonb)
+                                """
+                            row = await (await conn.execute(
+                                "select v.version, s.revision, " + projection +
+                                " from toolbako_runtime.schema_version v "
+                                "left join toolbako_runtime.marketplace_state s on s.singleton where v.singleton"
+                            )).fetchone()
+                            break
+                        except Exception:
+                            if conn is not None:
+                                await conn.close()
+                                conn = None
+                            if attempt:
+                                raise
+                    if not row or row[0] != SCHEMA_VERSION:
+                        raise StorageUnavailable("Public state unavailable", diagnostic_code="schema_version_mismatch")
+                    if row[1] is None:
+                        raise StorageUnavailable("State initialization required", diagnostic_code="state_uninitialized")
+                    view = PublicView(decode_value(row[2]), decode_value(row[3]))
+                    # Fresh committed snapshot per SELECT, never shared objects.
+                    reusable = True
+                    return view
+                finally:
+                    if conn is not None:
+                        if (reusable and self._reuse_connections and not self._connections_closed
+                                and not conn.closed and conn.info.transaction_status == TransactionStatus.IDLE):
+                            self._public_connections.append((conn, time.monotonic(), asyncio.get_running_loop()))
+                        else:
+                            await conn.close()
 
     async def connect(self):
         try:
@@ -234,6 +304,9 @@ class PostgresStateStore:
         self._connections_closed = True
         while self._idle_connections:
             conn, _, _ = self._idle_connections.pop()
+            await conn.close()
+        while self._public_connections:
+            conn, _, _ = self._public_connections.pop()
             await conn.close()
 
     async def _close_request_connection(self, conn, *, locked, reusable=False):
@@ -554,9 +627,10 @@ class PostgresStateStore:
 
 
 class DatabaseBoundaryMiddleware(BaseHTTPMiddleware):
-    def __init__(self, app, *, backend, store):
+    def __init__(self, app, *, backend, store, public_reads=False):
         super().__init__(app)
         self.backend, self.store = backend, store
+        self.public_reads = public_reads
 
     async def dispatch(self, request, call_next):
         if request.url.path.startswith("/static/") or request.url.path in {"/healthz", "/readyz", "/deploymentz"}:
@@ -567,6 +641,20 @@ class DatabaseBoundaryMiddleware(BaseHTTPMiddleware):
         phase = "load"
         timing = None
         try:
+            from .public_read import anonymous_read, CATALOG_PATHS
+            if self.public_reads and anonymous_read(request):
+                try:
+                    view = await self.backend.public_view(catalog=request.url.path in CATALOG_PATHS)
+                except StorageUnavailable as exc:
+                    if exc.diagnostic_code != "state_uninitialized":
+                        raise
+                    # A freshly migrated deployment still initializes EMPTY
+                    # state through the existing serialized write boundary.
+                else:
+                    request.state.public_view = view
+                    # Connection released before rendering. No store restore/save,
+                    # expiry sweep or authentication occurs on this anonymous view.
+                    return await call_next(request)
             async with self.backend.request(self.store) as timing:
                 phase = "handler"
                 response = await call_next(request)

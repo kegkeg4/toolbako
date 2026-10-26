@@ -1,4 +1,4 @@
-{% from "_creator_badges.html" import creator_badges %}
+{% from "_creator_badges.html" import creator_badges with context %}
 <article class="market-card">
   <a class="market-card-visual thumb-{{ tool.accent|default('coral') }}" href="/tools/{{ tool.slug }}">
     <span class="market-visual-orbit" aria-hidden="true"></span>
