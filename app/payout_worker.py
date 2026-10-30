@@ -17,6 +17,22 @@ def sandbox_payouts_ready(settings):
             and settings.stripe_secret_key.startswith(("sk_test_", "rk_test_")))
 
 
+def verify_source_payment(payment, fact, *, source_charge=None):
+    """Use the same source proof before allocation and before bank payout."""
+    charge = payment.get("latest_charge") or {}
+    if (payment.get("id") != fact["id"] or payment.get("livemode") is not False
+            or payment.get("status") != "succeeded" or payment.get("currency") != "jpy"
+            or type(payment.get("amount_received")) is not int or payment["amount_received"] != fact["amount"]
+            or payment.get("transfer_data") or payment.get("on_behalf_of")
+            or payment.get("transfer_group") != f"order-{fact['order_id']}"
+            or not isinstance(charge, dict) or not str(charge.get("id", "")).startswith("ch_")
+            or charge.get("livemode") is not False or charge.get("payment_intent") != fact["id"]
+            or charge.get("paid") is not True or charge.get("amount_refunded", 0) or charge.get("disputed")
+            or (source_charge is not None and charge["id"] != source_charge)):
+        raise FinanceConflict("分配元の決済・注文・元Chargeの一致を確認できません")
+    return charge
+
+
 def verify_bank_payout(payout, remote):
     if (not str(remote.get("id", "")).startswith("po_") or remote.get("id") != payout.get("provider_payout_id")
             or remote.get("currency") != "jpy" or remote.get("amount") != payout["net_amount"]
@@ -143,15 +159,7 @@ async def _step(backend, store, stripe, payout):
     if allocation:
         fact = facts[allocation["receipt_id"]]
         payment = await stripe.retrieve_payment(fact["id"])
-        charge = payment.get("latest_charge") or {}
-        if (payment.get("id") != fact["id"] or payment.get("status") != "succeeded"
-                or payment.get("currency") != "jpy" or payment.get("amount_received") != fact["amount"]
-                or payment.get("transfer_data") or payment.get("on_behalf_of")
-                or payment.get("transfer_group") != f"order-{fact['order_id']}"
-                or not isinstance(charge, dict) or not str(charge.get("id", "")).startswith("ch_")
-                or charge.get("payment_intent") != fact["id"] or not charge.get("paid")
-                or charge.get("amount_refunded", 0) or charge.get("disputed")):
-            raise FinanceConflict("分配元の決済を確認できません")
+        charge = verify_source_payment(payment, fact)
         payout["status"] = "transferring"
         allocation["source_charge"] = charge["id"]
         result = await stripe.create_allocation_transfer(payout, allocation, charge["id"])
@@ -166,9 +174,9 @@ async def _step(backend, store, stripe, payout):
     for allocation in payout["allocations"]:
         fact = facts[allocation["receipt_id"]]
         payment = await stripe.retrieve_payment(fact["id"])
-        charge = payment.get("latest_charge") or {}
-        if not isinstance(charge, dict) or payment.get("status") != "succeeded" or payment.get("amount_received") != fact["amount"] or payment.get("currency") != "jpy" or charge.get("amount_refunded", 0) or charge.get("disputed"):
-            raise FinanceConflict("分配後の返金・紛争を確認してください")
+        if allocation["transfer_amount"] > 0 and not allocation.get("source_charge"):
+            raise FinanceConflict("分配元のCharge記録がありません")
+        verify_source_payment(payment, fact, source_charge=allocation.get("source_charge"))
     remote_balance = await stripe.retrieve_balance(payout["account_id"])
     available = sum(x["amount"] for x in remote_balance.get("available", []) if x.get("currency") == "jpy" and type(x.get("amount")) is int)
     if available < payout["net_amount"]:
