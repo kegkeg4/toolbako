@@ -5,9 +5,9 @@
   <header><span class="section-kicker">ACCOUNT SECURITY</span><h1>アカウントとデータを守る</h1><p>購入情報、売上金、取引メッセージを安全に管理します。</p></header>
   <div class="settings-list">
     <article>
-      <div><b>2段階認証</b>{% if demo_mode %}<p>現在は画面体験用の設定です。本番では認証基盤のMFAを有効化します。</p>{% else %}<p>認証基盤のMFA登録画面を有効化後に利用できます。</p>{% endif %}</div>
-      <span class="state-{{ 'verified' if security.two_factor else 'not_started' }}">{{ ('体験設定ON' if security.two_factor else '体験設定OFF') if demo_mode else '本番接続待ち' }}</span>
-      {% if demo_mode %}<form action="/security/two-factor" method="post"><button class="outline-button">{{ '無効にする' if security.two_factor else '体験設定をON' }}</button></form>{% else %}<button disabled>運営者の設定待ち</button>{% endif %}
+      <div><b>2段階認証</b><p>認証アプリの6桁コードで確認します。管理画面・販売管理・振込などの重要操作は、確認から10分以内に行ってください。</p></div>
+      <span class="state-{{ 'verified' if mfa_recent else 'not_started' }}">{{ 'この端末で確認済み' if mfa_recent else ('確認が必要' if mfa_ready else '認証基盤の接続待ち') }}</span>
+      {% if mfa_ready %}<a class="outline-button" href="/security/mfa">認証アプリを設定・確認</a>{% else %}<button class="outline-button" disabled>Supabase接続後に利用できます</button>{% endif %}
     </article>
     <article><div><b>パスワード</b><p>{{ 'デモでは送信を省略します。' if demo_mode else '登録メールアドレスへ、期限つきの再設定リンクを送信します。' }}</p></div><span>最終変更：未設定</span><form action="/security/password-reset" method="post"><button class="outline-button">再設定{{ 'を体験' if demo_mode else 'メールを送る' }}</button></form></article>
     <article><div><b>ログイン中の端末</b><p>このブラウザ以外のログインをまとめて無効化できます。</p></div><span>{{ security.sessions }}台</span><form action="/security/sessions/revoke-others" method="post"><button class="outline-button" {% if security.sessions <= 1 %}disabled{% endif %}>他の端末をログアウト</button></form></article>

@@ -1,0 +1,43 @@
+name: Private infrastructure image checks
+on:
+  push:
+    paths:
+      - 'deploy/clamav/**'
+      - 'deploy/redis/**'
+      - 'deploy/mail-worker/**'
+      - 'app/mail_worker.py'
+      - 'app/mail_monitor.py'
+      - 'app/operations.py'
+      - 'requirements.txt'
+      - 'tests/infrastructure_containers.py'
+      - '.github/workflows/infrastructure.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  containers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - run: docker build -t toolbako-clamav-check deploy/clamav
+      - run: docker build -t toolbako-redis-check deploy/redis
+      - run: python3 tests/infrastructure_containers.py
+      - run: docker build -f deploy/mail-worker/Dockerfile -t toolbako-mail-worker-check .
+      - name: Check isolated mail worker entry point
+        run: |
+          docker run --rm --network none toolbako-mail-worker-check --help
+          docker run --rm --network none --entrypoint python toolbako-mail-worker-check -m app.mail_monitor --help
+          test "$(docker image inspect toolbako-mail-worker-check --format '{{.Config.User}}')" = '10001:10001'
+          set +e
+          output=$(docker run --rm --network none toolbako-mail-worker-check 2>&1)
+          result=$?
+          set -e
+          test "$result" -eq 1
+          printf '%s\n' "$output" | grep -F 'Email worker failed.'
+          set +e
+          output=$(docker run --rm --network none --entrypoint python toolbako-mail-worker-check -m app.mail_monitor 2>&1)
+          result=$?
+          set -e
+          test "$result" -eq 1
+          printf '%s\n' "$output" | grep -F '"status":"unavailable"'

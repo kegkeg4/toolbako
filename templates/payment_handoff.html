@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}{{ '売上受取設定' if onboarding else '決済画面' }}へ移動 — ツールバコ{% endblock %}
+{% block content %}
+<section class="auth-page"><div class="auth-card">
+  <h1>{{ '売上受取設定' if onboarding else '決済画面' }}へ移動します</h1>
+  <p role="status">Stripeの画面を開いています。自動で移動しない場合は、下のボタンを押してください。</p>
+  <a class="button large full" data-payment-destination href="{{ destination }}" rel="noreferrer">{{ 'Stripeの売上受取設定を開く' if onboarding else 'Stripeの決済画面を開く' }}</a>
+  <p>この時点では{{ '受取設定' if onboarding else '購入' }}は完了していません。</p>
+  <p><a href="{{ '/seller/payments' if onboarding else '/purchases' }}">{{ '売上受取設定へ戻る' if onboarding else '購入履歴へ戻る' }}</a></p>
+</div></section>
+<script defer src="/static/payment-handoff.js?v=20261025-1"></script>
+{% endblock %}

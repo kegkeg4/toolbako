@@ -1,0 +1,12 @@
+{% set disclosure = display_disclosures(tool) if tool is defined else {} %}
+<fieldset class="form-section product-disclosure-editor">
+  <legend>購入前に伝える利用条件</legend>
+  <p>確認できた内容を入力してください。未記載の項目は「購入前に出品者へ確認」と表示されます。APIキーや顧客情報は入力しないでください。</p>
+  {% for key, spec in disclosure_fields.items() %}
+  <div class="field"><label for="disclosure-{{ key }}">{{ spec[0] }}</label><textarea id="disclosure-{{ key }}" name="disclosure_{{ key }}" maxlength="{{ spec[1] }}" rows="3">{{ disclosure.get(key, '') }}</textarea>{% if key == 'additional_costs' %}<small>料金が不要な場合も、その旨を記載してください。必要なAPI契約、支払先、従量料金や上限の有無を説明します。</small>{% endif %}</div>
+  {% endfor %}
+  {% for key, label in [('commercial_use', '商用利用'), ('resale', '再販売・再配布')] %}
+  <div class="field"><label for="disclosure-{{ key }}">{{ label }}</label><select id="disclosure-{{ key }}" name="disclosure_{{ key }}">{% for value, text in permission_labels.items() %}<option value="{{ value }}" {% if disclosure.get(key, 'unknown') == value %}selected{% endif %}>{{ text }}</option>{% endfor %}</select></div>
+  {% endfor %}
+  {% if tool is defined %}<label class="agreement"><input type="checkbox" name="listing_rights_agreement" value="yes"><span>{{ rights_statement }}<small>この欄の利用条件を変更するときに確認してください。保存後は掲載の再審査が必要になります。</small></span></label>{% endif %}
+</fieldset>

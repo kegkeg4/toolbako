@@ -1,0 +1,774 @@
+"""Durable, serialized repository for the existing marketplace model.
+
+This is a compatibility bridge, not the final normalized financial ledger.
+Each dynamic request reloads committed state under a database-wide lock. The
+lock stays on a dedicated connection across payment reservation checkpoints.
+Only direct Postgres / session pooling is supported. Never use transaction
+pooling: its session locks could be detached from the owning request.
+"""
+from __future__ import annotations
+
+import argparse
+import asyncio
+import hashlib
+import json
+import logging
+import re
+import time
+from uuid import uuid4
+from contextlib import asynccontextmanager
+from pathlib import Path
+
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import JSONResponse
+
+from .persistence import STATE_FIELDS, decode_value, encode_value
+
+SCHEMA_VERSION = 2
+LOCK_ID = 7365419001298
+logger = logging.getLogger("toolbako.database")
+
+DATABASE_FAILURE_CODES = frozenset({
+    "unavailable", "configuration_invalid", "authentication_failed",
+    "password_not_supplied", "pooler_target_not_found", "pooler_unavailable",
+    "unsupported_startup_parameter", "database_not_found", "connections_exhausted",
+    "database_not_ready", "connection_timeout", "dns_resolution_failed",
+    "tls_connection_failed", "network_connection_failed", "connection_failed",
+    "schema_missing", "schema_access_denied", "schema_version_mismatch",
+    "query_timeout", "schema_probe_failed",
+    "local_lock_timeout", "connection_capacity_timeout", "database_busy", "request_failed", "state_conflict", "state_uninitialized",
+})
+DATABASE_REQUEST_PHASES = frozenset({"connection_slot", "local_lock", "connect", "advisory_lock", "load", "handler", "save", "cleanup"})
+_request_clock = time.monotonic
+SLOW_DATABASE_REQUEST_MS = 2000
+
+
+class RequestTiming:
+    """Per-request durations only; never retains route, SQL or business data."""
+
+    def __init__(self):
+        self.started = self.changed = _request_clock()
+        self.phase = "local_lock"
+        self.durations = {phase: 0.0 for phase in sorted(DATABASE_REQUEST_PHASES)}
+        self.finished = None
+
+    def mark(self, phase):
+        if phase not in DATABASE_REQUEST_PHASES or self.finished is not None:
+            return
+        now = _request_clock()
+        self.durations[self.phase] += max(0.0, now - self.changed)
+        self.changed, self.phase = now, phase
+
+    def finish(self):
+        if self.finished is None:
+            self.mark(self.phase)
+            self.finished = self.changed
+
+    def report(self, request_id):
+        self.finish()
+        elapsed = round((self.finished - self.started) * 1000)
+        if elapsed < SLOW_DATABASE_REQUEST_MS:
+            return
+        logger.warning("Database request slow %s", json.dumps({
+            "event": "database_request_slow", "elapsed_ms": elapsed,
+            "phase_ms": {phase: round(seconds * 1000) for phase, seconds in self.durations.items()},
+            "request_id": request_id if isinstance(request_id, str) and re.fullmatch(r"[0-9a-f]{32}", request_id) else "",
+        }))
+
+
+def database_failure_code(exc: Exception, *, phase: str) -> str:
+    """Classify in memory; export only a fixed code, never a provider message.
+
+    libpq connection errors can lack SQLSTATE. Known message signatures are a
+    fallback diagnostic, not proof that a particular credential is incorrect.
+    """
+    try:
+        state = getattr(exc, "sqlstate", None)
+        codes = {
+            "28000": "authentication_failed", "28P01": "authentication_failed",
+            "3D000": "database_not_found", "53300": "connections_exhausted",
+            "57P03": "database_not_ready", "42P01": "schema_missing",
+            "3F000": "schema_missing", "42501": "schema_access_denied",
+            "57014": "query_timeout",
+        }
+        if state in codes:
+            return codes[state]
+        if phase == "connect":
+            message = str(exc).lower()
+            signatures = (
+                ("pooler_target_not_found", ("tenant or user not found",)),
+                ("pooler_unavailable", ("circuit breaker open",)),
+                ("unsupported_startup_parameter", ("unsupported startup parameter",)),
+                ("password_not_supplied", ("no password supplied",)),
+                ("authentication_failed", ("password authentication failed", "sasl authentication failed")),
+                ("dns_resolution_failed", ("could not translate host name", "failed to resolve host", "name or service not known", "nodename nor servname provided")),
+                ("connection_timeout", ("connection timed out", "timeout expired", "connection timeout")),
+                ("tls_connection_failed", ("certificate verify failed", "ssl error", "server does not support ssl")),
+                ("network_connection_failed", ("connection refused", "network is unreachable", "no route to host")),
+            )
+            for code, matches in signatures:
+                if any(signature in message for signature in matches):
+                    return code
+    except Exception:
+        pass
+    return "connection_failed" if phase == "connect" else "schema_probe_failed"
+
+
+class StorageUnavailable(Exception):
+    """Deliberately contains no connection URL, provider payload or credential."""
+
+    def __init__(self, message="Storage unavailable", *, diagnostic_code="unavailable", diagnostic_phase=""):
+        super().__init__(message)
+        self.diagnostic_code = diagnostic_code if isinstance(diagnostic_code, str) and diagnostic_code in DATABASE_FAILURE_CODES else "unavailable"
+        self.diagnostic_phase = diagnostic_phase if isinstance(diagnostic_phase, str) and diagnostic_phase in DATABASE_REQUEST_PHASES else ""
+
+
+class OperationConflict(Exception):
+    pass
+
+
+def request_failure_code(exc: BaseException, phase: str) -> str:
+    if isinstance(exc, StorageUnavailable):
+        code = exc.diagnostic_code
+        return code if isinstance(code, str) and code in DATABASE_FAILURE_CODES else "unavailable"
+    if isinstance(exc, TimeoutError) and phase == "local_lock":
+        return "local_lock_timeout"
+    if isinstance(exc, TimeoutError) and phase == "connection_slot":
+        return "connection_capacity_timeout"
+    if isinstance(exc, OperationConflict):
+        return "state_conflict"
+    code = database_failure_code(exc, phase=phase)
+    return "request_failed" if code == "schema_probe_failed" else code
+
+
+def snapshot(store) -> dict:
+    with store._lock:
+        return encode_value({field: getattr(store, field) for field in STATE_FIELDS})
+
+
+def restore(store, payload: dict) -> None:
+    if set(payload) != set(STATE_FIELDS):
+        raise StorageUnavailable("Database state needs a compatible migration")
+    state = decode_value(payload)
+    with store._lock:
+        for field in STATE_FIELDS:
+            setattr(store, field, state[field])
+
+
+def content_hash(value) -> str:
+    data = json.dumps(encode_value(value), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(data.encode()).hexdigest()
+
+
+class PostgresStateStore:
+    def __init__(self, dsn: str, *, production: bool = False, reuse_connections: bool = False):
+        self.dsn = dsn
+        self.production = production
+        self._local_lock = asyncio.Lock()
+        # One active request and at most one preparing/waiting connection.
+        self._connection_slots = asyncio.BoundedSemaphore(2)
+        # Web workers can retain at most two verified, unlocked sessions. CLI
+        # workers keep the original fresh-session lifecycle unless opted in.
+        self._reuse_connections = reuse_connections
+        self._idle_connections = []
+        self._connections_closed = False
+        self._connection = None
+        self._store = None
+        self._checkpoint = None
+        self._revision = None
+        self._audit_hashes = {}
+        self._emails = []
+        self._last_finance_hash = None
+        # Anonymous reads do not share the mutable store or writer lock. Keep
+        # their connections separate, bounded to two, and database-read-only.
+        self._public_slots = asyncio.BoundedSemaphore(2)
+        self._public_connections = []
+
+    async def public_view(self, *, catalog=False):
+        from .public_read import PublicView
+        projection = "'[]'::jsonb, '{}'::jsonb"
+        if catalog:
+            projection = """
+                coalesce((select jsonb_agg(item)
+                  from jsonb_array_elements(s.payload->'tools') item
+                  where coalesce(item->'is_removed', 'false'::jsonb) <> 'true'::jsonb
+                    and coalesce(item->'is_published', 'true'::jsonb) = 'true'::jsonb
+                    and coalesce(item->'status', '\"published\"'::jsonb) = '\"published\"'::jsonb), '[]'::jsonb),
+                coalesce((select jsonb_object_agg(key, jsonb_build_object(
+                    'is_founding_member', value->'is_founding_member',
+                    'founding_member_since', value->'founding_member_since',
+                    'is_certified_creator', value->'is_certified_creator',
+                    'certified_creator_since', value->'certified_creator_since'))
+                  from jsonb_each(s.payload->'registered_users')), '{}'::jsonb)
+            """
+        return await self._read_view(projection, (), "", lambda row: PublicView(decode_value(row[2]), decode_value(row[3])))
+
+    async def member_view(self, sid, path):
+        from .member_read import MemberView, member_projection, MEMBER_READ_PATHS
+        if path not in MEMBER_READ_PATHS or not isinstance(sid, str) or not 0 < len(sid) <= 128:
+            raise ValueError("Invalid member read")
+        joins = """ left join lateral (select s.payload->'account_sessions'->%s::text as record) a on true
+          left join lateral (select a.record->'user'->>'id' as uid,
+                            a.record->'user'->>'username' as username) u on true """
+        return await self._read_view(member_projection(path), (sid, sid), joins,
+                                     lambda row: MemberView(decode_value(row[2])))
+
+    async def _read_view(self, projection, params, joins, build):
+        from psycopg.pq import TransactionStatus
+        conn = None
+        reusable = False
+        async with asyncio.timeout(12):
+            async with self._public_slots:
+                try:
+                    while self._public_connections:
+                        candidate, returned_at, owner_loop = self._public_connections.pop()
+                        if (owner_loop is asyncio.get_running_loop() and not candidate.closed
+                                and candidate.info.transaction_status == TransactionStatus.IDLE
+                                and time.monotonic() - returned_at < 60):
+                            conn = candidate
+                            break
+                        await candidate.close()
+                    # A stale socket can be retried here: only a SELECT is sent,
+                    # no handler, session mutation, or provider action is replayed.
+                    for attempt in range(2):
+                        try:
+                            if conn is None:
+                                conn = await self.connect()
+                                await conn.execute("set default_transaction_read_only = on")
+                            row = await (await conn.execute(
+                                "select v.version, s.revision, " + projection +
+                                " from toolbako_runtime.schema_version v "
+                                "left join toolbako_runtime.marketplace_state s on s.singleton " + joins + " where v.singleton",
+                                params or None,
+                            )).fetchone()
+                            break
+                        except Exception:
+                            if conn is not None:
+                                await conn.close()
+                                conn = None
+                            if attempt:
+                                raise
+                    if not row or row[0] != SCHEMA_VERSION:
+                        raise StorageUnavailable("Public state unavailable", diagnostic_code="schema_version_mismatch")
+                    if row[1] is None:
+                        raise StorageUnavailable("State initialization required", diagnostic_code="state_uninitialized")
+                    view = build(row)
+                    # Fresh committed snapshot per SELECT, never shared objects.
+                    reusable = True
+                    return view
+                finally:
+                    if conn is not None:
+                        if (reusable and self._reuse_connections and not self._connections_closed
+                                and not conn.closed and conn.info.transaction_status == TransactionStatus.IDLE):
+                            self._public_connections.append((conn, time.monotonic(), asyncio.get_running_loop()))
+                        else:
+                            await conn.close()
+
+    async def connect(self):
+        try:
+            from psycopg import AsyncConnection
+            from psycopg.conninfo import conninfo_to_dict
+            config = conninfo_to_dict(self.dsn)
+            # The well-known Supabase transaction pooler endpoint is unsafe for
+            # session-level locking. Custom poolers also MUST use session mode.
+            if not self.dsn or config.get("port") == "6543":
+                raise ValueError("unsupported database connection")
+            if self.production and config.get("sslmode") not in {"require", "verify-ca", "verify-full"}:
+                raise ValueError("TLS is required")
+        except Exception:
+            raise StorageUnavailable("Database connection unavailable or unsafe", diagnostic_code="configuration_invalid") from None
+        try:
+            return await AsyncConnection.connect(
+                self.dsn, autocommit=True, connect_timeout=5,
+                prepare_threshold=None, options="-c statement_timeout=10000",
+            )
+        except Exception as exc:
+            raise StorageUnavailable("Database connection unavailable or unsafe", diagnostic_code=database_failure_code(exc, phase="connect")) from None
+
+    async def _check_schema(self, conn):
+        cursor = await conn.execute("select version from toolbako_runtime.schema_version where singleton")
+        row = await cursor.fetchone()
+        if not row or row[0] != SCHEMA_VERSION:
+            raise StorageUnavailable("Database migration required", diagnostic_code="schema_version_mismatch")
+
+    async def _request_connection(self):
+        from psycopg.pq import TransactionStatus
+        while self._idle_connections:
+            conn, returned_at, owner_loop = self._idle_connections.pop()
+            retain = False
+            try:
+                if (owner_loop is asyncio.get_running_loop() and not conn.closed and conn.autocommit
+                        and conn.info.transaction_status == TransactionStatus.IDLE
+                        and time.monotonic() - returned_at < 60):
+                    # Check a reused socket before touching any business state.
+                    # Retry only this harmless probe, never a handler or save.
+                    async with asyncio.timeout(2):
+                        await conn.execute("select 1")
+                    retain = True
+                    return conn
+            except Exception:
+                pass
+            finally:
+                if not retain:
+                    await conn.close()
+        return await self.connect()
+
+    async def close(self):
+        """Called after ASGI requests drain; retained sessions never own locks."""
+        self._connections_closed = True
+        while self._idle_connections:
+            conn, _, _ = self._idle_connections.pop()
+            await conn.close()
+        while self._public_connections:
+            conn, _, _ = self._public_connections.pop()
+            await conn.close()
+
+    async def _close_request_connection(self, conn, *, locked, reusable=False):
+        retained = False
+        try:
+            if locked:
+                # Closing the client socket does not acknowledge lock release
+                # at a session pooler. Await the server's explicit unlock before
+                # admitting the next locally queued request.
+                async with asyncio.timeout(2):
+                    cursor = await conn.execute("select pg_advisory_unlock(%s)", (LOCK_ID,))
+                    if self._reuse_connections:
+                        row = await cursor.fetchone()
+                        if not row or row[0] is not True:
+                            raise StorageUnavailable("Database lock release unconfirmed")
+            if reusable and locked and self._reuse_connections and not self._connections_closed:
+                from psycopg.pq import TransactionStatus
+                if not conn.closed and conn.autocommit and conn.info.transaction_status == TransactionStatus.IDLE:
+                    self._idle_connections.append((conn, time.monotonic(), asyncio.get_running_loop()))
+                    retained = True
+        finally:
+            if not retained:
+                await conn.close()
+
+    async def probe(self) -> bool:
+        try:
+            async with await self.connect() as conn:
+                await self._check_schema(conn)
+            return True
+        except Exception as exc:
+            code = exc.diagnostic_code if isinstance(exc, StorageUnavailable) else database_failure_code(exc, phase="schema")
+            # Never log the exception, traceback, SQLSTATE detail, URL or secret.
+            code = code if isinstance(code, str) and code in DATABASE_FAILURE_CODES else "unavailable"
+            logger.warning("database_probe_failed reason=%s", code)
+            return False
+
+    @asynccontextmanager
+    async def request(self, store):
+        acquired = False
+        database_locked = False
+        slot_acquired = False
+        conn = None
+        phase = "connection_slot"
+        timing = RequestTiming()
+        timing.mark(phase)
+        try:
+            queued_at = _request_clock()
+            await asyncio.wait_for(self._connection_slots.acquire(), timeout=5)
+            slot_acquired = True
+            # Both queues share the old five-second waiting allowance.
+            # Connection establishment retains its separate connect timeout.
+            remaining_wait = max(0.0, 5 - (_request_clock() - queued_at))
+            phase = "connect"
+            timing.mark(phase)
+            conn = await self._request_connection()
+            phase = "local_lock"
+            timing.mark(phase)
+            await asyncio.wait_for(self._local_lock.acquire(), timeout=remaining_wait)
+            acquired = True
+            # No SQL or shared marketplace state may be accessed before this
+            # lock. Only the connection handshake is prepared concurrently.
+            phase = "advisory_lock"
+            timing.mark(phase)
+            state_query = (
+                "select v.version, s.revision, s.payload "
+                "from toolbako_runtime.schema_version v "
+                "left join toolbako_runtime.marketplace_state s on s.singleton "
+                "where v.singleton"
+            )
+            if self._reuse_connections:
+                # Separate statements execute in order on the same session.
+                # Pipeline only the lock attempt and read: no writes, handlers
+                # or payment calls may run before the lock result is checked.
+                # A failure may occur AFTER the server took the session lock,
+                # so conservatively attempt unlock during failure cleanup.
+                database_locked = True
+                async with conn.pipeline():
+                    lock_cursor = await conn.execute("select pg_try_advisory_lock(%s)", (LOCK_ID,))
+                    cursor = await conn.execute(state_query)
+                locked = await lock_cursor.fetchone()
+                if not locked or locked[0] is not True:
+                    database_locked = False
+                    raise StorageUnavailable("Database is busy; retry later", diagnostic_code="database_busy")
+            else:
+                lock_cursor = await conn.execute("select pg_try_advisory_lock(%s)", (LOCK_ID,))
+                if not (await lock_cursor.fetchone())[0]:
+                    raise StorageUnavailable("Database is busy; retry later", diagnostic_code="database_busy")
+                database_locked = True
+                phase = "load"
+                timing.mark(phase)
+                cursor = await conn.execute(state_query)
+            phase = "load"
+            timing.mark(phase)
+            row = await cursor.fetchone()
+            if not row or row[0] != SCHEMA_VERSION:
+                raise StorageUnavailable("Database migration required", diagnostic_code="schema_version_mismatch")
+            if row[1] is None:
+                # Never silently copy a local/demo instance into production.
+                from .data import DemoStore
+                payload = snapshot(DemoStore(seed=False))
+                await conn.execute(
+                    "insert into toolbako_runtime.marketplace_state(singleton, payload) values (true, %s::jsonb)",
+                    (json.dumps(payload),),
+                )
+                row = (SCHEMA_VERSION, 0, payload)
+            self._revision, self._checkpoint = row[1:]
+            restore(store, self._checkpoint)
+            # JSON encodes sets as arrays. Another Python worker may have a
+            # different iteration order; compare with this worker's encoding
+            # of the freshly loaded state, not the other worker's array order.
+            self._checkpoint = snapshot(store)
+            self._audit_hashes = {event["id"]: content_hash(event) for event in store.audit_logs}
+            self._connection, self._store = conn, store
+            self._emails = []
+        except BaseException as exc:
+            try:
+                if conn:
+                    await self._close_request_connection(conn, locked=database_locked)
+            except Exception:
+                # Preserve the original failure without printing either error.
+                pass
+            finally:
+                if acquired:
+                    self._local_lock.release()
+                if slot_acquired:
+                    self._connection_slots.release()
+            if not isinstance(exc, Exception):
+                raise
+            raise StorageUnavailable("Database request could not start", diagnostic_code=request_failure_code(exc, phase), diagnostic_phase=phase) from None
+        completed = False
+        try:
+            timing.mark("handler")
+            yield timing
+            completed = True
+        finally:
+            timing.mark("cleanup")
+            # A failed request must not leave dirty objects available to another
+            # request. A pre-provider checkpoint remains durable intentionally.
+            try:
+                restore(store, self._checkpoint)
+            except Exception as exc:
+                completed = False
+                raise StorageUnavailable("Database request cleanup failed", diagnostic_code=request_failure_code(exc, "cleanup"), diagnostic_phase="cleanup") from None
+            finally:
+                self._connection = self._store = None
+                self._emails = []
+                try:
+                    await self._close_request_connection(conn, locked=database_locked, reusable=completed)
+                except Exception as exc:
+                    raise StorageUnavailable("Database connection cleanup failed", diagnostic_code=request_failure_code(exc, "cleanup"), diagnostic_phase="cleanup") from None
+                finally:
+                    self._local_lock.release()
+                    self._connection_slots.release()
+                    timing.finish()
+
+    async def _save(self, conn, *, payload=None):
+        from .finance import sync_finance
+        payload = snapshot(self._store) if payload is None else payload
+        finance_hash = content_hash((payload["orders"], payload["payouts"]))
+        # Ordinary navigation/session refresh must not issue per-sale SQL for
+        # the whole ledger. The cache is accepted ONLY after a DB commit.
+        if finance_hash != self._last_finance_hash:
+            await sync_finance(conn, self._store)
+        for email in self._emails:
+            await conn.execute(
+                "insert into toolbako_runtime.email_outbox(id,recipient,sender,subject,body) "
+                "values(%s,%s,%s,%s,%s) on conflict(id) do nothing", email,
+            )
+        for event in self._store.audit_logs:
+            digest = content_hash(event)
+            if event["id"] in self._audit_hashes:
+                if self._audit_hashes[event["id"]] != digest:
+                    raise OperationConflict("An existing audit event was modified")
+                continue
+            cursor = await conn.execute(
+                "insert into toolbako_runtime.audit_events "
+                "(id, actor_id, action, target, request_id, occurred_at, content_hash) "
+                "values (%s,%s,%s,%s,%s,%s,%s) on conflict (id) do nothing returning id",
+                (event["id"], event.get("user_id"), event["action"], event["target"],
+                 event.get("request_id", ""), event["created_at"], digest),
+            )
+            if not await cursor.fetchone():
+                cursor = await conn.execute("select content_hash from toolbako_runtime.audit_events where id=%s", (event["id"],))
+                if (await cursor.fetchone())[0] != digest:
+                    raise OperationConflict("Audit event ID conflict")
+        cursor = await conn.execute(
+            "update toolbako_runtime.marketplace_state set payload=%s::jsonb, revision=revision+1, updated_at=now() "
+            "where singleton and revision=%s returning revision",
+            (json.dumps(payload), self._revision),
+        )
+        row = await cursor.fetchone()
+        if not row:
+            raise OperationConflict("Concurrent state update detected")
+        return row[0], payload
+
+    def _accept_commit(self, committed):
+        self._revision, self._checkpoint = committed
+        self._last_finance_hash = content_hash((self._checkpoint["orders"], self._checkpoint["payouts"]))
+        self._audit_hashes = {event["id"]: content_hash(event) for event in self._store.audit_logs}
+        self._emails = []
+
+    def enqueue_email(self, recipient: str, sender: str, subject: str, body: str):
+        if self._connection is None:
+            raise StorageUnavailable("A database request boundary is required")
+        self._emails.append((str(uuid4()), recipient, sender, subject, body))
+
+    async def save(self):
+        if self._connection is None:
+            raise StorageUnavailable("A database request boundary is required")
+        try:
+            payload = snapshot(self._store)
+            finance_hash = content_hash((payload["orders"], payload["payouts"]))
+            if (payload == self._checkpoint and not self._emails
+                    and finance_hash == self._last_finance_hash):
+                # This is NOT a GET/write route shortcut or a stale page cache.
+                # Each request still loads fresh committed state under the
+                # database lock. Expiry, auth, audit and financial mutations
+                # anywhere in STATE_FIELDS and an outbox-only change must save.
+                # The first save on each worker still verifies the subledger.
+                return
+            async with self._connection.transaction():
+                committed = await self._save(self._connection, payload=payload)
+            self._accept_commit(committed)
+        except Exception as exc:
+            raise StorageUnavailable("Database commit failed", diagnostic_code=request_failure_code(exc, "save"), diagnostic_phase="save") from None
+
+    async def begin_operation(self, operation_id: str, endpoint: str, data: dict):
+        """Commit both the business reservation and Stripe intent BEFORE I/O.
+
+        Completed attempts are replayed; unknown/pending attempts are held for
+        reconciliation, not automatically retried after Stripe's key TTL.
+        """
+        from .integrations import StripeOutcomeUnknown
+        conn = self._connection
+        if conn is None:
+            raise StorageUnavailable("A database request boundary is required")
+        digest = content_hash(data)
+        cursor = await conn.execute(
+            "select endpoint,request_hash,status,response from toolbako_runtime.stripe_operations where operation_id=%s",
+            (operation_id,),
+        )
+        row = await cursor.fetchone()
+        if row:
+            if row[0] != endpoint or row[1] != digest:
+                raise OperationConflict("Stripe idempotency key was reused with changed parameters")
+            if row[2] == "succeeded":
+                return row[3]
+            if row[2] == "rejected":
+                raise RuntimeError("This Stripe operation was rejected; contact support")
+            raise StripeOutcomeUnknown(operation_id)
+        async with conn.transaction():
+            await conn.execute(
+                "insert into toolbako_runtime.stripe_operations(operation_id,endpoint,request_hash,status) values(%s,%s,%s,'pending')",
+                (operation_id, endpoint, digest),
+            )
+            committed = await self._save(conn)
+        self._accept_commit(committed)
+        return None
+
+    async def operation_result(self, operation_id: str):
+        if self._connection is None:
+            raise StorageUnavailable("A database request boundary is required")
+        cursor = await self._connection.execute(
+            "select status,response from toolbako_runtime.stripe_operations where operation_id=%s", (operation_id,),
+        )
+        row = await cursor.fetchone()
+        return {"status": row[0], "response": row[1]} if row else None
+
+    async def operation_details(self, operation_id: str):
+        if self._connection is None:
+            raise StorageUnavailable("A database request boundary is required")
+        row = await (await self._connection.execute(
+            "select endpoint,request_hash,status,created_at from toolbako_runtime.stripe_operations where operation_id=%s",
+            (operation_id,),
+        )).fetchone()
+        return dict(zip(("endpoint", "request_hash", "status", "created_at"), row)) if row else None
+
+    async def unresolved_payment_operations(self):
+        """Bounded admin inventory, without provider payloads or credentials."""
+        if self._connection is None:
+            raise StorageUnavailable("A database request boundary is required")
+        rows = await (await self._connection.execute(
+            "select operation_id,endpoint,status from toolbako_runtime.stripe_operations "
+            "where status in ('pending','unknown') and endpoint in ('checkout/sessions','refunds') "
+            "order by created_at,operation_id limit 101"
+        )).fetchall()
+        return {"items": [dict(zip(("id", "endpoint", "status"), row)) for row in rows[:100]],
+                "truncated": len(rows) > 100}
+
+    async def reconcile_operation(self, operation_id: str, *, endpoint: str, request_hash: str, response: dict):
+        """Commit verified recovery, business state and audit in one transaction."""
+        if self._connection is None or not isinstance(response.get("id"), str):
+            raise OperationConflict("Invalid reconciliation boundary")
+        try:
+            async with self._connection.transaction():
+                row = await (await self._connection.execute(
+                    "update toolbako_runtime.stripe_operations set status='succeeded',response=%s::jsonb,updated_at=now() "
+                    "where operation_id=%s and endpoint=%s and request_hash=%s and status in ('pending','unknown') returning operation_id",
+                    (json.dumps(response), operation_id, endpoint, request_hash),
+                )).fetchone()
+                if not row:
+                    raise OperationConflict("Operation changed during reconciliation")
+                committed = await self._save(self._connection)
+            self._accept_commit(committed)
+        except Exception:
+            raise StorageUnavailable("Reconciliation was not committed") from None
+
+    async def finish_operation(self, operation_id: str, status: str, response: dict | None = None):
+        if status not in {"succeeded", "unknown", "rejected"} or (status == "succeeded") != (response is not None):
+            raise ValueError("Invalid operation outcome")
+        cursor = await self._connection.execute(
+            "update toolbako_runtime.stripe_operations set status=%s,response=%s::jsonb,updated_at=now() "
+            "where operation_id=%s and status='pending' returning operation_id",
+            (status, json.dumps(response) if response is not None else None, operation_id),
+        )
+        if not await cursor.fetchone():
+            raise OperationConflict("Stripe operation is not pending")
+
+
+class DatabaseBoundaryMiddleware(BaseHTTPMiddleware):
+    def __init__(self, app, *, backend, store, public_reads=False, member_reads=False, session_max_age=0):
+        super().__init__(app)
+        self.backend, self.store = backend, store
+        self.public_reads = public_reads
+        self.member_reads = member_reads
+        self.session_max_age = session_max_age
+
+    async def dispatch(self, request, call_next):
+        if request.url.path.startswith("/static/") or request.url.path in {"/healthz", "/readyz", "/deploymentz"}:
+            return await call_next(request)
+        if self.backend is None:
+            return self.unavailable()
+        started = time.monotonic()
+        phase = "load"
+        timing = None
+        initial_session = dict(request.scope["session"]) if "session" in request.scope else None
+        try:
+            from .public_read import anonymous_read, CATALOG_PATHS
+            if self.public_reads and anonymous_read(request):
+                try:
+                    view = await self.backend.public_view(catalog=request.url.path in CATALOG_PATHS)
+                except StorageUnavailable as exc:
+                    if exc.diagnostic_code != "state_uninitialized":
+                        raise
+                    # A freshly migrated deployment still initializes EMPTY
+                    # state through the existing serialized write boundary.
+                else:
+                    request.state.public_view = view
+                    # Connection released before rendering. No store restore/save,
+                    # expiry sweep or authentication occurs on this anonymous view.
+                    return await call_next(request)
+            from .member_read import member_read
+            if self.member_reads and member_read(request):
+                from .security import SessionService
+                try:
+                    view = await self.backend.member_view(request.session["sid"], request.url.path)
+                except StorageUnavailable as exc:
+                    if exc.diagnostic_code != "state_uninitialized":
+                        raise
+                else:
+                    # The existing session validator checks expiry, revocation,
+                    # account identity, bans, erasure and authoritative identity.
+                    # Invalid sessions still use the original cleanup boundary.
+                    sessions = SessionService(view, self.session_max_age)
+                    original_session = dict(request.session)
+                    if sessions.current(request):
+                        request.state.member_view = view
+                        request.state.member_sessions = sessions
+                        return await call_next(request)
+                    request.session.clear()
+                    request.session.update(original_session)
+            async with self.backend.request(self.store) as timing:
+                phase = "handler"
+                response = await call_next(request)
+                if response.status_code < 500:
+                    # GET also revokes expired sessions / performs due lifecycle
+                    # transitions. Commit before returning response headers.
+                    phase = "save"
+                    if isinstance(timing, RequestTiming):
+                        timing.mark(phase)
+                    await self.backend.save()
+                elif initial_session is not None:
+                    request.session.clear()
+                    request.session.update(initial_session)
+                phase = "cleanup"
+            # Report only after connection and lock cleanup. No extra DB query,
+            # external monitoring service, or successful response before commit.
+            if isinstance(timing, RequestTiming):
+                try:
+                    timing.report(getattr(request.state, "request_id", ""))
+                except Exception:
+                    # A failed log sink must not turn an already committed
+                    # operation into a 503 that encourages a duplicate retry.
+                    pass
+            return response
+        except Exception as exc:
+            # Session signing now wraps this boundary. Never issue an elevated
+            # or newly established cookie when its DB commit did not succeed.
+            if initial_session is not None:
+                request.session.clear()
+                request.session.update(initial_session)
+            if isinstance(exc, StorageUnavailable) and exc.diagnostic_phase in DATABASE_REQUEST_PHASES:
+                phase = exc.diagnostic_phase
+            request_id = getattr(request.state, "request_id", "")
+            # Fixed classifications only. Never log URL, query, provider text,
+            # SQL, headers, users or traceback, including caller request IDs.
+            logger.warning("Database request failed; no success response was sent %s", json.dumps({
+                "event": "database_request_failed", "phase": phase,
+                "reason": request_failure_code(exc, phase),
+                "elapsed_ms": round((time.monotonic() - started) * 1000),
+                "request_id": request_id if isinstance(request_id, str) and re.fullmatch(r"[0-9a-f]{32}", request_id) else "",
+            }))
+            return self.unavailable()
+
+    @staticmethod
+    def unavailable():
+        return JSONResponse(
+            {"error": "storage_unavailable", "message": "保存先を確認中です。操作を繰り返さず、時間をおいて再読み込みしてください。"},
+            status_code=503, headers={"Retry-After": "30", "Cache-Control": "no-store"},
+        )
+
+
+async def migrate(backend):
+    async with await backend.connect() as conn:
+        async with conn.transaction():
+            await conn.execute("select pg_advisory_xact_lock(%s)", (LOCK_ID,))
+            await conn.execute(Path(__file__).with_name("runtime_schema.sql").read_text())
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Toolbako private runtime database (never imports demo data)")
+    parser.add_argument("command", choices=("migrate", "check"))
+    args = parser.parse_args()
+    from .config import settings
+    backend = PostgresStateStore(settings.database_url, production=settings.is_deployed)
+    try:
+        if args.command == "migrate":
+            asyncio.run(migrate(backend))
+            print("Runtime schema applied. No demo data was imported. Live payments remain blocked.")
+        else:
+            ok = asyncio.run(backend.probe())
+            print("Runtime database: ready" if ok else "Runtime database: unavailable or migration missing")
+            raise SystemExit(0 if ok else 1)
+    except Exception:
+        # psycopg/libpq exceptions may contain connection details. Do not print.
+        print("Database operation failed. Check connection, TLS, session pooling and migration permissions.")
+        raise SystemExit(1) from None
+
+
+if __name__ == "__main__":
+    main()

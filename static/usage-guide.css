@@ -1,0 +1,27 @@
+.support-center { max-width: 1120px; }
+.support-center > header { margin-bottom: 24px; }
+.support-center .guide-contact-link { display: inline-flex; align-items: center; min-height: 44px; text-decoration: underline; }
+.usage-guide { margin-bottom: 40px; color: #292b3a; line-height: 1.85; font-size: 15px; }
+.usage-guide h2 { margin: 4px 0 8px; font-size: 26px; }
+.usage-guide h3 { margin: 0 0 16px; font-size: 21px; line-height: 1.5; }
+.usage-guide h4 { margin: 0 0 8px; font-size: 16px; line-height: 1.6; }
+.usage-guide p { margin: 10px 0; color: #4e5266; }
+.usage-guide a { color: #4547b5; text-decoration: underline; text-underline-offset: 3px; }
+.guide-index { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 22px 0; }
+.guide-index a { display: flex; flex-direction: column; justify-content: center; gap: 4px; padding: 18px; border: 1px solid #dcdde9; border-radius: 14px; background: #fff; text-decoration: none; }
+.guide-index a:hover { border-color: #5557d9; background: #f6f5ff; }
+.guide-index span { color: #555a6e; font-size: 13px; }
+.guide-section { margin: 16px 0; padding: 28px; border: 1px solid #e0e1e8; border-radius: 18px; background: #fff; }
+.usage-guide ol { padding-left: 25px; margin: 12px 0; }
+.usage-guide li { padding-left: 5px; margin: 10px 0; }
+.guide-auth-types { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 22px 0; }
+.guide-auth-types article { padding: 18px; border: 1px solid #e0e1e8; border-radius: 12px; background: #fafaff; }
+.guide-note { background: #f3f3ff; border-left: 4px solid #6668d8; border-radius: 4px 12px 12px 4px; padding: 18px 20px; margin: 20px 0; }
+.guide-note strong { color: #252744; }
+.usage-guide [id], .usage-guide, .support-center #contact { scroll-margin-top: 105px; }
+.guide-faq details { border-top: 1px solid #e0e1e8; }
+.guide-faq summary { cursor: pointer; padding: 16px 4px; font-weight: 700; min-height: 48px; }
+.guide-faq details > div { padding: 0 4px 14px; }
+.usage-guide a:focus-visible, .guide-faq summary:focus-visible { outline: 3px solid #5557d9; outline-offset: 3px; border-radius: 4px; }
+@media (max-width: 760px) { .guide-index { grid-template-columns: repeat(2, minmax(0, 1fr)); } .guide-auth-types { grid-template-columns: 1fr; } }
+@media (max-width: 480px) { .guide-section { padding: 20px 16px; } .guide-index { gap: 8px; } .guide-index a { padding: 14px 12px; } .guide-note { padding: 16px; } .usage-guide h3 { font-size: 19px; } }

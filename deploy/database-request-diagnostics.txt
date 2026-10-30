@@ -1,0 +1,55 @@
+ツールバコ DBリクエスト障害の切り分け（2026-10-24）
+
+2026-10-23の計測追加はa75e2a5で反映済み。
+2026-10-24の接続準備並行化は、配備記録と実測結果をONE_RELEASE_HANDOFF.mdで確認。
+
+対象: 既存Railway rare-manifestation / web。公開・決済開始の判定ではない。
+ログ: Database request failed; no success response was sent に続くJSON。
+記録するのは event, phase, reason, elapsed_ms, request_id のみ。
+URL・クエリ・メール・SQL・接続文字列・例外本文・スタックは記録しない。
+request_id はサーバー生成32桁hexだけ。利用者のX-Request-IDは使わない。
+
+遅い要求の追加診断（database_request_slow）:
+要求開始から接続終了・アプリ内ロック解放まで2秒以上の場合だけ、正常に境界を
+抜けた要求のevent/elapsed_ms/phase_ms/request_idを記録する。
+phase_msの固定項目はconnection_slot, connect, local_lock, advisory_lock, load, handler, save, cleanup。
+connection_slotは接続枠待ち、local_lockは処理待ち、connectは接続、loadは状態読込と復元、handlerは画面/API処理
+（その途中の外部通信・明示保存を含む）、saveはmiddlewareによる最後の保存、
+cleanupは状態復元と接続終了。レスポンス本文の転送時間・全SQLの内訳ではない。
+各項目はms単位で丸めるので、合計とelapsed_msには丸め誤差がありうる。
+通常の2秒未満の要求は追加記録しない。URL・ユーザー・本文・SQLを記録しない。
+失敗要求は従来のdatabase_request_failedで調べる。slowは成功率の集計には使わない。
+2026-10-24: 要求処理用の接続準備をwebプロセスごとに最大2件に制限して並行化。
+1件が処理中に次の接続を準備できる。接続は各要求で新規作成・終了し、再利用しない。
+DBのSQL・共有状態へのアクセスは従来どおりローカルロック取得後に開始する。
+接続枠待ちとローカルロック待ちの合計上限は5秒。接続確立の期限5秒は別枠。
+監視probeの接続はこの2枠に含まれない。別workerも含むシステム全体の上限ではない。
+保存順序・セッションadvisory lock・金融処理・TLS・接続先・権限は変更しない。
+接続失敗で金融処理を自動再実行しない。待ち時間解消やピーク負荷合格を意味しない。
+
+phase と主な調査先:
+- connection_slot / connection_capacity_timeout: 2件の接続準備・処理枠が占有中。直前の長い処理・負荷を確認。
+- local_lock / local_lock_timeout: 同一web内の処理待ち。接続枠待ちと合算した5秒の上限。
+- connect / connection_timeout 等: DB接続先・TLS・ネットワーク・接続数を読取確認。
+- advisory_lock / database_busy: 別プロセスが保持するDBロック。処理中のworker・要求を確認。
+- load: スキーマ・状態読込。query_timeout / schema_version_mismatch 等を確認。
+- handler: 画面/APIの処理中。DB原因とは限らない。要求IDと時刻で照合。
+- save: 保存・会計同期・監査・通知キューのトランザクション。
+- cleanup: 状態復元・接続終了。例外があってもアプリ内ロックは解放する。
+
+対応:
+1. 発生時刻・phase・reason・elapsed_msと要求IDを記録する。
+2. エラー率・正常応答の有無と稼働ログを照合する。負荷を追加せず確認する。
+3. 決済結果不明時は、再購入や別キーでの再実行を促さず、既存の照合手順へ。
+4. DB排他を外す、待ち時間を無制限にする、成功レスポンスを返す等で隠さない。
+5. 秘密値を含む例外本文をログへ追加しない。必要な分類は固定コードとして追加する。
+
+検証:
+ローカルの人工接続失敗、SQL期限切れ、ロック競合、復元失敗、接続終了失敗、
+キャンセル、保存失敗で503・秘密情報非出力・ロック解放を確認。
+修正前のコードでは2つの後片付け失敗でロックが残ることも比較検証した。
+過去の503の原因をこの比較だけで断定しない。14:11-14:14の旧版ログでも
+複数回の発生を確認しており、稼働環境での継続調査が必要。
+
+参考:
+https://www.psycopg.org/psycopg3/docs/api/errors.html
