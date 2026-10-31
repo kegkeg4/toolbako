@@ -21,6 +21,45 @@ from .supabase_api import supabase_headers
 logger = logging.getLogger(__name__)
 
 
+def _auth_error_category(response: httpx.Response) -> str:
+    """Classify known provider errors without logging arbitrary response data."""
+    try:
+        data = response.json()
+    except ValueError:
+        return "unclassified"
+    if not isinstance(data, dict):
+        return "unclassified"
+    code = data.get("code")
+    if code in ("PGRST301", "PGRST302", "PGRST303"):
+        return "jwt_rejected"
+    if code == "42501":
+        return "permission_denied"
+    message = data.get("message")
+    if message in ("Invalid API key", "Unregistered API key"):
+        return "api_key_rejected"
+    if message in ("Forbidden use of secret API key in browser", "Secret API keys cannot be used in a browser"):
+        return "browser_key_rejected"
+    return "unclassified"
+
+
+async def _diagnose_head_auth(client, url, headers, params):
+    """A single zero-row GET explains a failed HEAD; it never changes its verdict.
+
+    Keep credentials on the same configured endpoint, forbid redirects, and
+    discard all response content except a small fixed classification vocabulary.
+    """
+    started = time.monotonic()
+    try:
+        response = await client.get(url, headers=headers, params=params)
+        return {"diagnostic_get_status": response.status_code,
+                "diagnostic_auth_category": (_auth_error_category(response)
+                                             if response.status_code in {401, 403} else "not_auth_error"),
+                "diagnostic_elapsed_ms": round((time.monotonic() - started) * 1000)}
+    except httpx.HTTPError as error:
+        return {"diagnostic_failure": _http_failure_code(error),
+                "diagnostic_elapsed_ms": round((time.monotonic() - started) * 1000)}
+
+
 def _http_failure_code(error: httpx.HTTPError) -> str:
     # Exception strings can contain credentials, query strings or provider data.
     for kind, code in ((httpx.ConnectTimeout, "connect_timeout"),
@@ -146,11 +185,16 @@ async def connection_checks(settings: Settings) -> dict[str, bool]:
             except httpx.HTTPError as error:
                 failure = _http_failure_code(error)
             if failure:
+                elapsed_ms = round((time.monotonic() - started) * 1000)
+                diagnostic = {}
+                if name in {"profile_api", "badge_api"} and method == "HEAD" and status in {401, 403}:
+                    diagnostic = await _diagnose_head_auth(
+                        client, settings.supabase_url + path, headers, params)
                 # Fixed check names and scalar diagnostics only. Never log the
                 # request, headers, response body, exception text or traceback.
                 logger.warning("connection_preflight_failure %s", json.dumps({
                     "check": name, "failure": failure, "status_code": status,
-                    "elapsed_ms": round((time.monotonic() - started) * 1000),
+                    "elapsed_ms": elapsed_ms, **diagnostic,
                 }))
             return name, failure is None
         results.update(await asyncio.gather(*(check(item) for item in checks)))

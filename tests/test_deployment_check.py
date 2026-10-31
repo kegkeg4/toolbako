@@ -113,6 +113,71 @@ def test_preflight_failure_diagnostics_are_actionable_and_secret_free(fault, exp
         assert secret not in messages[0]
 
 
+@pytest.mark.parametrize("get_status,body,expected", [
+    (200, [], "not_auth_error"),
+    (401, {"message": "Invalid API key", "details": "PRIVATE_BODY"}, "api_key_rejected"),
+    (401, {"code": "PGRST301", "message": "PRIVATE_BODY"}, "jwt_rejected"),
+    (403, {"code": "42501", "message": "PRIVATE_BODY"}, "permission_denied"),
+    (401, {"message": "Forbidden use of secret API key in browser"}, "browser_key_rejected"),
+    (401, {"message": "PRIVATE_BODY", "code": "PRIVATE_CODE"}, "unclassified"),
+    (401, {"message": ["PRIVATE_BODY"], "code": {"private": "PRIVATE_CODE"}}, "unclassified"),
+    (401, ["PRIVATE_BODY"], "unclassified"),
+    (302, {"message": "PRIVATE_BODY"}, "not_auth_error"),
+])
+def test_failed_server_head_get_diagnosis_does_not_approve_deploy(get_status, body, expected, monkeypatch, caplog):
+    async def probe(backend):
+        return True
+    monkeypatch.setattr(checks.PostgresStateStore, "probe", probe)
+    seen = []
+    def request(req):
+        seen.append(req)
+        assert req.url.host == "project.supabase.co"
+        if req.url.path.endswith("creator_badges"):
+            assert req.url.params["limit"] == "0"
+            assert req.headers["apikey"] == "service-fixture"
+            if req.method == "HEAD":
+                return httpx.Response(401)
+            assert req.method == "GET"
+            return httpx.Response(get_status, json=body, headers={"location": "https://unrelated.example"})
+        return httpx.Response(401 if req.method == "HEAD" and req.headers["apikey"] == "anon-fixture" else 200)
+    client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: client(transport=httpx.MockTransport(request), **kwargs))
+    with caplog.at_level("WARNING", logger=checks.__name__):
+        result = asyncio.run(checks.connection_checks(configured()))
+    assert result["badge_api"] is False  # Even when diagnostic GET succeeds.
+    assert all(v for k, v in result.items() if k != "badge_api")
+    assert len(seen) == 5
+    entries = [r.getMessage() for r in caplog.records if r.name == checks.__name__]
+    assert len(entries) == 1
+    diagnostic = json.loads(entries[0].split(" ", 1)[1])
+    assert diagnostic["status_code"] == 401
+    assert diagnostic["diagnostic_get_status"] == get_status
+    assert diagnostic["diagnostic_auth_category"] == expected
+    for private in ("PRIVATE_BODY", "PRIVATE_CODE", "service-fixture", "anon-fixture", "project.supabase.co"):
+        assert private not in entries[0]
+
+
+def test_diagnostic_timeout_keeps_original_failure_and_redacts_exception(monkeypatch, caplog):
+    async def probe(backend):
+        return True
+    monkeypatch.setattr(checks.PostgresStateStore, "probe", probe)
+    def request(req):
+        if req.url.path.endswith("creator_badges"):
+            if req.method == "HEAD":
+                return httpx.Response(401)
+            raise httpx.ReadTimeout("PRIVATE_BODY service-fixture", request=req)
+        return httpx.Response(401 if req.method == "HEAD" and req.headers["apikey"] == "anon-fixture" else 200)
+    client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: client(transport=httpx.MockTransport(request), **kwargs))
+    with caplog.at_level("WARNING", logger=checks.__name__):
+        result = asyncio.run(checks.connection_checks(configured()))
+    assert result["badge_api"] is False
+    diagnostic = json.loads(caplog.records[-1].getMessage().split(" ", 1)[1])
+    assert diagnostic["status_code"] == 401
+    assert diagnostic["diagnostic_failure"] == "read_timeout"
+    assert "PRIVATE_BODY" not in caplog.text and "service-fixture" not in caplog.text
+
+
 @pytest.mark.parametrize("method", ["GET", "HEAD"])
 def test_deployment_health_does_not_approve_launch_or_payments(monkeypatch, method):
     from types import SimpleNamespace
