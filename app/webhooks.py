@@ -145,6 +145,27 @@ class StripeWebhookService(StripeWebhookValidator):
                 raise HTTPException(413, "webhook payload too large")
             payload.extend(chunk)
         event = self.validate_event(bytes(payload), request.headers.get('stripe-signature', ''))
+        from .financial_scope import configured_scope, FinancialScopeError
+        scope = configured_scope(self.settings)
+        try:
+            if self.journal is not None and hasattr(self.journal, "assert_financial_scope"):
+                await self.journal.assert_financial_scope(scope)
+            elif scope is not None:
+                raise FinancialScopeError()
+            if scope is not None:
+                if (self.provider is None or self.provider.financial_scope != scope
+                        or not re.fullmatch(r"evt_[A-Za-z0-9_]+", event["id"])):
+                    raise FinancialScopeError()
+                # Signature + livemode alone do not prove which platform owns
+                # an event. Retrieve it with the pinned platform's own key.
+                remote = await self.provider._get("events/" + event["id"], account=event.get("account"))
+                # A connected-account retrieval can omit the delivery envelope's
+                # account property. The authenticated request context supplies it.
+                if (remote.get("account", event.get("account")) != event.get("account")
+                        or any(remote.get(key) != event.get(key) for key in ("id", "type", "livemode", "data"))):
+                    raise FinancialScopeError()
+        except RuntimeError:
+            raise HTTPException(503, "payment environment verification unavailable") from None
         event_id = event['id']
         # A committed event must be acknowledged even if its related state was
         # removed or changed since processing. Signature/scope/mode still apply.

@@ -7,6 +7,7 @@ from uuid import uuid4
 import httpx
 
 from .config import settings
+from .financial_scope import FinancialScopeError, key_mode
 
 
 class StripeOutcomeUnknown(Exception):
@@ -17,19 +18,36 @@ class StripeOutcomeUnknown(Exception):
 
 
 class StripeIntegration:
-    def __init__(self, secret_key: str, base_url: str, *, api_version: str = "", charge_mode: str = "destination", journal=None):
+    def __init__(self, secret_key: str, base_url: str, *, api_version: str = "", charge_mode: str = "destination", journal=None, financial_scope=None):
         self.secret_key = secret_key
         self.base_url = base_url.rstrip("/")
         self.api_version = api_version
         self.charge_mode = charge_mode if charge_mode in {"destination", "separate"} else "destination"
         self.journal = journal
+        self.financial_scope = financial_scope
+
+    async def verify_financial_scope(self):
+        scope = self.financial_scope
+        if self.journal is not None and hasattr(self.journal, "assert_financial_scope"):
+            await self.journal.assert_financial_scope(scope)
+        elif scope is not None:
+            raise FinancialScopeError()
+        if scope is None:
+            return
+        scope.validate_key(self.secret_key)
+        # Never cache proof across key/account changes. Read only the platform,
+        # with no Stripe-Account header; a connected account is not the platform.
+        account = await self._get_raw("account")
+        balance = await self._get_raw("balance")
+        scope.validate_provider(account, balance)
 
     async def _post(self, path: str, data: dict[str, Any], *, account: str | None = None) -> dict[str, Any]:
         if not self.secret_key: raise RuntimeError("Stripe is not configured")
         # Never enable money movement merely by adding a live API key. The
         # sandbox implementation must still pass real-account release tests.
-        if self.secret_key.startswith(("sk_live_", "rk_live_")):
+        if key_mode(self.secret_key) == "live":
             raise RuntimeError("本番決済は、永続取引台帳・売上分配・返金の実装検証が完了するまで停止しています")
+        await self.verify_financial_scope()
         data = dict(data)
         idempotency_key = str(data.pop("_idempotency_key", ""))
         if not idempotency_key:
@@ -63,6 +81,10 @@ class StripeIntegration:
             result = response.json()
             if not isinstance(result, dict):
                 raise ValueError("Invalid provider object")
+            if self.financial_scope is not None and path in {
+                "checkout/sessions", "transfers", "payouts", "identity/verification_sessions"
+            } and result.get("livemode") is not self.financial_scope.livemode:
+                raise ValueError("Invalid provider environment")
             if path == "account_links":
                 # Stripe Account Links have no provider ID. Validate their
                 # actual shape instead of treating every successful link as
@@ -117,6 +139,13 @@ class StripeIntegration:
         return await self._post("accounts", data)
 
     async def _get(self, path: str, *, account: str | None = None, params=None):
+        await self.verify_financial_scope()
+        result = await self._get_raw(path, account=account, params=params)
+        if self.financial_scope is not None and "livemode" in result and result["livemode"] is not self.financial_scope.livemode:
+            raise FinancialScopeError()
+        return result
+
+    async def _get_raw(self, path: str, *, account: str | None = None, params=None):
         headers = {"Authorization": f"Bearer {self.secret_key}"}
         if self.api_version: headers["Stripe-Version"] = self.api_version
         if account: headers["Stripe-Account"] = account
@@ -191,12 +220,7 @@ class StripeIntegration:
         return await self._post("account_links", {"_idempotency_key":f"account-link-{account_id}-{uuid4()}","account":account_id,"refresh_url":f"{self.base_url}/seller/payments?refresh=1","return_url":f"{self.base_url}/seller/payments?returned=1","type":"account_onboarding"})
 
     async def retrieve_account(self, account_id: str) -> dict[str, Any]:
-        async with httpx.AsyncClient(timeout=20) as client:
-            headers = {"Authorization":f"Bearer {self.secret_key}"}
-            if self.api_version: headers["Stripe-Version"] = self.api_version
-            response = await client.get(f"https://api.stripe.com/v1/accounts/{account_id}", headers=headers)
-        if response.status_code >= 400: raise RuntimeError("Stripe account lookup failed")
-        return response.json()
+        return await self._get(f"accounts/{account_id}")
 
     def checkout_data(self, order: dict[str, Any], destination: str) -> dict[str, Any]:
         """One canonical payload for submission and read-only reconciliation."""

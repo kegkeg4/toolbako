@@ -547,6 +547,60 @@ class PostgresStateStore:
         except Exception as exc:
             raise StorageUnavailable("Database commit failed", diagnostic_code=request_failure_code(exc, "save"), diagnostic_phase="save") from None
 
+    async def assert_financial_scope(self, expected):
+        from .financial_scope import SCOPE_OPERATION_ID, validate_binding
+        if self._connection is None:
+            raise StorageUnavailable("A database request boundary is required")
+        row = await (await self._connection.execute(
+            "select endpoint,request_hash,status,response from toolbako_runtime.stripe_operations where operation_id=%s",
+            (SCOPE_OPERATION_ID,),
+        )).fetchone()
+        validate_binding(row, expected)
+
+    async def bind_empty_financial_scope(self, scope):
+        """Explicit preparation only; never invoked on application startup.
+
+        Use the existing private durable journal for the immutable binding, so
+        no schema migration or deletion is needed. A historical test dataset
+        cannot become live by changing its configuration. Both the snapshot and
+        normalized/journal history must be empty. Same-scope retry is harmless.
+        """
+        from .financial_scope import SCOPE_OPERATION_ID, SCOPE_ENDPOINT, FinancialScopeError, validate_binding
+        if self._connection is None or self._store is None:
+            raise StorageUnavailable("A database request boundary is required")
+        conn = self._connection
+        row = await (await conn.execute(
+            "select endpoint,request_hash,status,response from toolbako_runtime.stripe_operations where operation_id=%s",
+            (SCOPE_OPERATION_ID,),
+        )).fetchone()
+        if row is not None:
+            validate_binding(row, scope)
+            return
+        # Identity and subscription references are also provider/mode specific.
+        fields = ("orders", "payouts", "connected_accounts", "subscriptions",
+                  "identity_applications", "processed_webhook_events", "coupon_redemptions")
+        if any(getattr(self._store, name) for name in fields):
+            raise FinancialScopeError()
+        has_history = await (await conn.execute(
+            "select exists(select 1 from toolbako_runtime.stripe_operations) "
+            "or exists(select 1 from toolbako_runtime.finance_receipts) "
+            "or exists(select 1 from toolbako_runtime.finance_payouts) "
+            "or exists(select 1 from toolbako_runtime.finance_entries) "
+            "or exists(select 1 from toolbako_runtime.finance_allocations)"
+        )).fetchone()
+        if has_history[0]:
+            raise FinancialScopeError()
+        payload = scope.payload()
+        async with conn.transaction():
+            await conn.execute(
+                "insert into toolbako_runtime.stripe_operations(operation_id,endpoint,request_hash,status,response) "
+                "values(%s,%s,%s,'succeeded',%s::jsonb)",
+                (SCOPE_OPERATION_ID, SCOPE_ENDPOINT, content_hash(payload), json.dumps(payload)),
+            )
+            self._store.audit(None, "finance.scope_bound", scope.mode)
+            committed = await self._save(conn)
+        self._accept_commit(committed)
+
     async def begin_operation(self, operation_id: str, endpoint: str, data: dict):
         """Commit both the business reservation and Stripe intent BEFORE I/O.
 
@@ -554,6 +608,9 @@ class PostgresStateStore:
         reconciliation, not automatically retried after Stripe's key TTL.
         """
         from .integrations import StripeOutcomeUnknown
+        from .financial_scope import SCOPE_OPERATION_ID, SCOPE_ENDPOINT
+        if operation_id == SCOPE_OPERATION_ID or endpoint == SCOPE_ENDPOINT:
+            raise OperationConflict("Reserved financial scope record")
         conn = self._connection
         if conn is None:
             raise StorageUnavailable("A database request boundary is required")

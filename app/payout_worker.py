@@ -68,6 +68,8 @@ async def run_step(backend, store, stripe, settings, *, payout_id=None, at=None)
         raise FinanceConflict("振込workerはPostgres接続済みのseparate方式・テスト環境のみ実行できます")
     at = at or datetime.now(timezone.utc)
     async with backend.request(store):
+        # Cached operation recovery must obey the same binding as new API I/O.
+        await stripe.verify_financial_scope()
         candidates = sorted((p for p in store.payouts if p.get("finance_v2")
                              and p["status"] in {"requested", "transferring", "awaiting_funds", "bank_pending", "reversing"}
                              and (not payout_id or p["id"] == payout_id)), key=lambda p: p["created_at"])
@@ -198,9 +200,10 @@ def main():
     from .config import settings
     from .data import DemoStore
     from .database import PostgresStateStore
+    from .financial_scope import configured_scope
     backend = PostgresStateStore(settings.database_url, production=settings.is_deployed)
     stripe = StripeIntegration(settings.stripe_secret_key, settings.site_base_url, api_version=settings.stripe_api_version,
-                               charge_mode=settings.stripe_charge_mode, journal=backend)
+                               charge_mode=settings.stripe_charge_mode, journal=backend, financial_scope=configured_scope(settings))
     try:
         status = asyncio.run(run_step(backend, DemoStore(seed=False), stripe, settings, payout_id=args.payout_id))
         print(f"Sandbox payout step: {status}. No live payment operations are allowed.")

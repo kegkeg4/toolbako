@@ -44,6 +44,7 @@ from .production import readiness_summary
 from .persistence import SQLiteStateStore
 from .database import DatabaseBoundaryMiddleware, PostgresStateStore
 from .integrations import EmailIntegration, StripeIntegration, StripeOutcomeUnknown
+from .financial_scope import configured_scope
 from .files import clamav_scan, validate_delivery_file, encode_thumbnail
 from .security import SessionService, hash_password, verify_password
 from .web import clean_visible_text, safe_http_url, safe_next, slugify
@@ -156,7 +157,7 @@ async def persist_state() -> None:
 # The database boundary commits all requests. The legacy demo middleware only
 # persists successful writes. Never commit a second time after releasing the DB.
 app.state.persist = None if database_store else persist_state
-stripe = StripeIntegration(settings.stripe_secret_key, settings.site_base_url, api_version=settings.stripe_api_version, charge_mode=settings.stripe_charge_mode, journal=database_store)
+stripe = StripeIntegration(settings.stripe_secret_key, settings.site_base_url, api_version=settings.stripe_api_version, charge_mode=settings.stripe_charge_mode, journal=database_store, financial_scope=configured_scope(settings))
 email_service = EmailIntegration(settings.email_api_key, settings.email_from)
 DEFAULT_OG_PATH = generate_site_og()
 TRANSFER_NDA_TEXT = "当事者は独占譲渡案件で開示される非公開情報を案件評価以外に使用せず、第三者へ開示せず、交渉終了時は合理的な範囲で破棄します。法令・裁判所・行政機関により開示が必要な場合を除きます。"

@@ -36,6 +36,10 @@ class Settings:
     trust_proxy_headers: bool = os.getenv("TRUST_PROXY_HEADERS", "false").lower() in {"1", "true", "yes"}
     trusted_proxy_cidrs: tuple[str, ...] = tuple(x.strip() for x in os.getenv("TRUSTED_PROXY_CIDRS", "").split(",") if x.strip())
     stripe_secret_key: str = os.getenv("STRIPE_SECRET_KEY", "")
+    # Optional until a separately reviewed dataset is bound. Supplying these
+    # never enables live writes or automatically rebinds existing test data.
+    stripe_platform_account_id: str = os.getenv("STRIPE_PLATFORM_ACCOUNT_ID", "").strip()
+    stripe_ledger_id: str = os.getenv("STRIPE_LEDGER_ID", "").strip()
     stripe_webhook_secret: str = os.getenv("STRIPE_WEBHOOK_SECRET", "")
     stripe_connect_webhook_secret: str = os.getenv("STRIPE_CONNECT_WEBHOOK_SECRET", "")
     stripe_connect_client_id: str = os.getenv("STRIPE_CONNECT_CLIENT_ID", "")
