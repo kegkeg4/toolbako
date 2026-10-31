@@ -1,0 +1,13 @@
+{% set has_artifact = tool is defined and artifact_ready(tool.instant_artifact|default({})) %}
+<div class="delivery-requirement" data-instant-fields data-artifact-ready="{{ 'true' if has_artifact else 'false' }}">
+  <b>納品方法とファイルの準備</b>
+  <p>「購入後すぐに提供」は、この画面で納品ファイルと導入手順の登録が必要です。「取引ルームで納品」は、購入後にファイルや利用案内を渡すため、事前ファイルは不要です。</p>
+  <p>商品画像・紹介用デモは公開されます。下の納品ファイルは購入者向けに非公開で保管します。</p>
+  <div data-instant-inputs>
+    {% if has_artifact %}<p>検査済みのファイルを登録済みです。差し替える場合だけ選択してください。</p>{% endif %}
+    <label>購入者に渡す納品ファイル（50MBまで）<input type="file" name="artifact_file" data-instant-file></label>
+    <label>購入者向け導入手順<textarea name="artifact_guide" minlength="10" maxlength="1500" rows="4" data-instant-guide>{{ tool.instant_artifact.guide if has_artifact else '' }}</textarea></label>
+    <small>複数ファイルはZIPにまとめてください。登録時に安全検査を行います。ファイル変更後は再審査になります。</small>
+  </div>
+  <noscript><p>即時提供を選ぶ場合、ファイル未登録のまま送信しても登録できません。</p></noscript>
+</div>

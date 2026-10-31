@@ -283,6 +283,7 @@ def context(request: Request, **values):
     values["review_labels"] = REVIEW_LABELS
     values["delivery_upload_ready"] = delivery_upload_available(settings)
     values["instant_ready"] = lambda tool: instant_ready(tool, production=not settings.demo_mode)
+    values["artifact_ready"] = lambda artifact: artifact_ready(artifact, production=not settings.demo_mode)
     values["subscription_checkout_ready"] = settings.demo_mode
     status_labels = {"in_progress":"取引中","awaiting_acceptance":"納品確認待ち","completed":"取引完了","cancel_pending":"キャンセル確認中","cancelled":"キャンセル済み"}
     user = current_user(request)
@@ -505,6 +506,7 @@ async def tool_create(
     monthly_profit: int = Form(0), monthly_cost: int = Form(0), weekly_ops_hours: float = Form(0), handover_days: int = Form(14),
     exclusive_summary: str = Form(""), transfer_rights_agreement: str = Form("no"),
     prohibited_agreement: str = Form(...), thumbnail: UploadFile | None = None,
+    artifact_file: UploadFile | None = File(None), artifact_guide: str = Form(""),
 ):
     user = current_user(request)
     if not user: return RedirectResponse("/login", 303)
@@ -528,13 +530,17 @@ async def tool_create(
         answer = clean_visible_text(faq_answer[index] if index < len(faq_answer) else "", 0, 500, "よくある質問の回答", preserve_lines=True)
         if bool(question) != bool(answer): raise HTTPException(422, "よくある質問は質問と回答をセットで入力してください")
         if question: faq.append({"question":question,"answer":answer})
-    thumbnail_url = await save_thumbnail(thumbnail, slug)
     if price_type == "consultation": fulfillment_type = "custom"
+    if fulfillment_type == "instant" and not (artifact_file and artifact_file.filename):
+        raise HTTPException(422, "購入後すぐに提供する場合は、納品ファイルと導入手順を登録してください。後日渡す商品は「取引ルームで納品」を選んでください")
     transfer_settings = validated_transfer_settings(exclusive_available, exclusive_price_min, transfer_assets, tech_stack, monthly_revenue, monthly_profit, monthly_cost, weekly_ops_hours, handover_days, exclusive_summary, transfer_rights_agreement)
     if transfer_settings["exclusive_available"] and not can_offer_exclusive_transfer(user): raise HTTPException(403, "独占譲渡の出品には本人確認が必要です")
+    artifact = await store_artifact(artifact_file, artifact_guide, settings) if fulfillment_type == "instant" else None
+    thumbnail_url = await save_thumbnail(thumbnail, slug)
     item = store.create({"slug":slug,"name":name,"tagline":tagline,"description_md":description_md,"category":category,"price_type":price_type,"price":price if price_type == "paid" else 0,"distribution":distribution,"fulfillment_type":fulfillment_type,"estimated_delivery_days":estimated_delivery_days,"purchase_notes":purchase_notes,"faq":faq,"demo_url":demo_url,"external_pay_url":"","ai_used":ai_used[:6],"tags":tag_list,"author_name":user["display_name"],"author_username":user["username"],"author_id":user["id"],"author_email":user.get("email"),"thumbnail_url":thumbnail_url,"customization_available":customization_available == "yes" or price_type == "consultation","transfer_review_status":"pending" if transfer_settings["exclusive_available"] else "not_requested",**transfer_settings})
     with store._lock:
         item["purchase_disclosures"] = disclosures
+        if artifact: item["instant_artifact"] = artifact
         record_rights(store, item, user)
     generate_og(slug, name, tagline, user["username"])
     return RedirectResponse(f"/tools/{item['slug']}?created=1", 303)
@@ -1453,6 +1459,7 @@ async def seller_tool_save(
     transfer_assets: list[str] = Form(default=[]), tech_stack: str = Form(""), monthly_revenue: int = Form(0),
     monthly_profit: int = Form(0), monthly_cost: int = Form(0), weekly_ops_hours: float = Form(0), handover_days: int = Form(14),
     exclusive_summary: str = Form(""), transfer_rights_agreement: str = Form("no"), thumbnail: UploadFile | None = None,
+    artifact_file: UploadFile | None = File(None), artifact_guide: str = Form(""),
 ):
     user = current_user(request)
     if not user: raise HTTPException(401)
@@ -1471,6 +1478,11 @@ async def seller_tool_save(
         raise HTTPException(409, "現在は買い切りのみ出品できます。月額プランは今後の対応予定です")
     if supports_subscription == "yes" and not 100 <= subscription_price <= 1_000_000: raise HTTPException(422)
     if tool.get("price_type") == "consultation": fulfillment_type = "custom"
+    upload_instant = fulfillment_type == "instant" and bool(artifact_file and artifact_file.filename)
+    if fulfillment_type == "instant" and not upload_instant and not artifact_ready(tool.get("instant_artifact"), production=not settings.demo_mode):
+        raise HTTPException(422, "購入後すぐに提供する場合は、納品ファイルと導入手順が必要です。「取引ルームで納品」なら事前登録は不要です")
+    if upload_instant and form.get("listing_rights_agreement") != "yes":
+        raise HTTPException(422, "納品ファイルの販売権限と第三者の権利を確認してください")
     if len(faq_question) > 5 or len(faq_answer) > 5: raise HTTPException(422, "よくある質問は5件以内で入力してください")
     faq = []
     for index in range(max(len(faq_question), len(faq_answer))):
@@ -1489,12 +1501,14 @@ async def seller_tool_save(
         transfer_review_status = tool["transfer_review_status"]
     else:
         transfer_review_status = "pending"
+    artifact = await store_artifact(artifact_file, artifact_guide, settings) if upload_instant else None
     was_full = store.tool_active_orders(slug) >= tool.get("capacity", 5)
     thumbnail_url = tool.get("thumbnail_url")
     if thumbnail and thumbnail.filename:
         thumbnail_url = await save_thumbnail(thumbnail, slug)
     with store._lock:
         old_review_content = content_fingerprint(tool)
+        if artifact: tool["instant_artifact"] = artifact
         tool["purchase_disclosures"] = disclosures
         if form.get("listing_rights_agreement") == "yes":
             record_rights(store, tool, user)
@@ -2608,14 +2622,33 @@ async def sync_creator_badges_to_supabase(account: dict, badge_state: dict[str, 
         raise HTTPException(502, "認定情報を保存できませんでした")
 
 
+ADMIN_SECTIONS = {
+    "overview": "ダッシュボード", "tools": "商品・掲載審査", "finance": "売上・振込",
+    "users": "ユーザー管理", "cases": "問い合わせ・紛争", "reports": "通報",
+    "operation-health": "運用状況", "readiness": "公開準備", "audit": "操作履歴",
+}
+
+
 @app.get("/admin", response_class=HTMLResponse)
-async def admin(request: Request):
+async def admin(request: Request, section: str = "overview"):
     user = current_user(request)
     if not is_admin(user): raise HTTPException(403, "管理者のみアクセスできます")
-    users = sorted([{"username":username, **account} for username,account in store.registered_users.items()], key=lambda item:item.get("display_name") or item["username"])
-    recoveries = await payment_recovery_inventory(database_store, store) if database_store else {"items": [], "truncated": False}
-    health = await operation_summary(database_store, settings) if database_store else None
-    return templates.TemplateResponse(request, "admin.html", context(request, tools=store.tools, users=users, reports=store.reports, cases=store.support_cases, audit_logs=store.audit_logs[:50], ops_health=health, readiness=readiness_summary(settings, runtime_database_ready=bool(database_store and await database_store.probe()), runtime_storage_ready=await storage_ready(settings), runtime_security_ready=security_service_readiness()), finance=store.finance_snapshot(ledger=bool(database_store)), finance_controls_ready=settings.demo_mode or sandbox_payouts_ready(settings), payout_labels=PAYOUT_LABELS, payment_recoveries=recoveries, refund_resumptions=refund_resumption_inventory(store), payment_recovery_ready=bool(database_store and sandbox_payouts_ready(settings) and len(set(settings.admin_user_ids)) >= 2)))
+    if section not in ADMIN_SECTIONS: raise HTTPException(404, "管理機能が見つかりません")
+    values = {"admin_sections": ADMIN_SECTIONS, "admin_section": section}
+    if section in {"overview", "tools"}: values["tools"] = store.tools
+    if section in {"overview", "users"}:
+        values["users"] = sorted([{"username":username, **account} for username,account in store.registered_users.items()], key=lambda item:item.get("display_name") or item["username"])
+    if section in {"overview", "reports"}: values["reports"] = store.reports
+    if section in {"overview", "cases"}: values["cases"] = store.support_cases
+    if section == "audit": values["audit_logs"] = store.audit_logs[:50]
+    if section == "operation-health": values["ops_health"] = await operation_summary(database_store, settings) if database_store else None
+    if section == "readiness":
+        values["readiness"] = readiness_summary(settings, runtime_database_ready=bool(database_store and await database_store.probe()), runtime_storage_ready=await storage_ready(settings), runtime_security_ready=security_service_readiness())
+    if section == "finance":
+        values.update(finance=store.finance_snapshot(ledger=bool(database_store)), finance_controls_ready=settings.demo_mode or sandbox_payouts_ready(settings), payout_labels=PAYOUT_LABELS,
+            payment_recoveries=await payment_recovery_inventory(database_store, store) if database_store else {"items": [], "truncated": False},
+            refund_resumptions=refund_resumption_inventory(store), payment_recovery_ready=bool(database_store and sandbox_payouts_ready(settings) and len(set(settings.admin_user_ids)) >= 2))
+    return templates.TemplateResponse(request, "admin.html", context(request, **values))
 
 
 @app.post("/admin/orders/{order_id}/refund-resumption/{action}")
@@ -2639,7 +2672,7 @@ async def admin_resume_refund(request: Request, order_id: str, action: str, prop
         raise
     except (FinanceConflict, RuntimeError):
         raise HTTPException(409, "返金明細の照合・再開を確認できません。重複操作せず運営で詳細確認してください") from None
-    return RedirectResponse("/admin#refund-resumption", 303)
+    return RedirectResponse("/admin?section=finance#refund-resumption", 303)
 
 
 @app.post("/admin/orders/{order_id}/reconcile/{kind}/{action}")
@@ -2663,7 +2696,7 @@ async def admin_reconcile_payment(request: Request, order_id: str, kind: str, ac
             await approve_payment_recovery(database_store, store, stripe, settings, order, kind, user["id"], proposal_id, send_email_safely, extra_id=extra_id)
     except (FinanceConflict, RuntimeError) as exc:
         raise HTTPException(409, str(exc)) from None
-    return RedirectResponse("/admin#payment-recovery", 303)
+    return RedirectResponse("/admin?section=finance#payment-recovery", 303)
 
 
 @app.post("/admin/sellers/{seller_id}/payouts/{action}")
@@ -2682,7 +2715,7 @@ async def admin_seller_payout_hold(request: Request, seller_id: str, action: str
             if payout.get("finance_v2") and payout["seller_id"] == seller_id and payout["status"] == "held" and payout.get("hold_reason") == "運営による振込保留":
                 payout.update(status="requested", hold_reason="")
     store.audit(user["id"], "admin.payout_hold" if paused else "admin.payout_release", seller_id, request.headers.get("x-request-id", ""))
-    return RedirectResponse("/admin#finance", 303)
+    return RedirectResponse("/admin?section=finance", 303)
 
 
 @app.post("/admin/payouts/{payout_id}/cancel")
@@ -2696,10 +2729,10 @@ async def admin_cancel_payout(request: Request, payout_id: str):
     if payout.get("provider_payout_id") or await database_store.operation_result(f"bank-payout-{payout_id}") or payout["status"] in {"bank_pending", "paid", "bank_failed"}:
         raise HTTPException(409, "銀行振込を開始した申請は取り消せません。Stripeの結果照合が必要です")
     if payout["status"] == "cancelled":
-        return RedirectResponse("/admin#finance", 303)
+        return RedirectResponse("/admin?section=finance", 303)
     payout.update(status="reversing", cancellation_requested=True)
     store.audit(user["id"], "payout.cancel_requested", payout_id, request.headers.get("x-request-id", ""))
-    return RedirectResponse("/admin#finance", 303)
+    return RedirectResponse("/admin?section=finance", 303)
 
 
 @app.post("/admin/payouts/{payout_id}/reconcile/{action}")
@@ -2721,7 +2754,7 @@ async def admin_reconcile_payout(request: Request, payout_id: str, action: str, 
             await approve_recovery(database_store, store, stripe, settings, payout, user["id"], proposal_id)
     except (FinanceConflict, RuntimeError) as exc:
         raise HTTPException(409, str(exc)) from None
-    return RedirectResponse("/admin#finance", 303)
+    return RedirectResponse("/admin?section=finance", 303)
 
 
 @app.post("/admin/payouts/{payout_id}/recover-failure/{action}")
@@ -2743,7 +2776,7 @@ async def admin_recover_failed_payout(request: Request, payout_id: str, action: 
             await approve_failed_payout(database_store, store, stripe, settings, payout, user["id"], proposal_id)
     except (FinanceConflict, RuntimeError) as exc:
         raise HTTPException(409, str(exc)) from None
-    return RedirectResponse("/admin#finance", 303)
+    return RedirectResponse("/admin?section=finance", 303)
 
 
 @app.post("/admin/tools/{slug}/toggle")
@@ -2756,13 +2789,15 @@ async def admin_toggle(request: Request, slug: str):
         publishing = not item.get("is_published", True)
         if publishing and item.get("safety_scan",{}).get("status") != "passed":
             raise HTTPException(409, "安全チェック前の商品は公開できません")
+        if publishing and not settings.demo_mode and not instant_ready(item, production=True):
+            raise HTTPException(409, "即時納品ファイルを登録・検査してから公開してください")
         previous_status = item.get("status", "draft")
         item["is_published"] = publishing
         item["status"] = "published" if publishing else "draft"
     if publishing and previous_status != "published":
         store.notify_reopened(slug)
     store.audit(user["id"], "admin.tool_visibility", slug, request.headers.get("x-request-id", ""))
-    return RedirectResponse("/admin", 303)
+    return RedirectResponse("/admin?section=tools", 303)
 
 
 @app.post("/admin/reports/{report_id}/{status}")
@@ -2774,7 +2809,7 @@ async def admin_report_status(request: Request, report_id: str, status: str):
     with store._lock:
         item["status"] = status; item["resolved_at"] = datetime.now(timezone.utc)
     store.audit(user["id"], f"admin.report_{status}", report_id, request.headers.get("x-request-id", ""))
-    return RedirectResponse("/admin#reports",303)
+    return RedirectResponse("/admin?section=reports",303)
 
 
 @app.post("/admin/cases/{case_id}/{status}")
@@ -2790,7 +2825,7 @@ async def admin_case_status(request: Request, case_id: str, status: str):
             if order: order["dispute_status"] = status
     store.notify(item["user_id"], f"お問い合わせの状態が更新されました", f"{item['subject']} · {status}", f"/support?case={case_id}", "security" if item.get("category") in {"security","dispute"} else "general")
     store.audit(user["id"], f"admin.case_{status}", case_id, request.headers.get("x-request-id", ""))
-    return RedirectResponse("/admin#cases",303)
+    return RedirectResponse("/admin?section=cases",303)
 
 
 @app.get("/admin/tools/{slug}/review", response_class=HTMLResponse)
@@ -2799,7 +2834,7 @@ async def admin_tool_review(request: Request, slug: str):
     if not is_admin(user): raise HTTPException(403, "管理者のみアクセスできます")
     item = store.get(slug)
     if not item: raise HTTPException(404)
-    return templates.TemplateResponse(request, "listing_review.html", context(request, tool=item, review_checks=REVIEW_CHECKS, review_token=review_token(item)))
+    return templates.TemplateResponse(request, "listing_review.html", context(request, tool=item, review_checks=REVIEW_CHECKS, review_token=review_token(item), admin_sections=ADMIN_SECTIONS, admin_section="tools"))
 
 
 @app.post("/admin/tools/{slug}/safety/{status}")
@@ -2826,7 +2861,7 @@ async def admin_tool_safety(request: Request, slug: str, status: str, note: str 
             item["is_published"] = False
     store.notify(item["author_id"], f"掲載審査：{REVIEW_LABELS[status]}", f"{item['name']}：{note}", f"/seller/tools/{slug}/edit#listing-review", "security")
     store.audit(user["id"], f"admin.safety_{status}", slug, request.headers.get("x-request-id", ""))
-    return RedirectResponse("/admin#tools",303)
+    return RedirectResponse("/admin?section=tools",303)
 
 
 @app.post("/admin/tools/{slug}/transfer-review/{status}")
@@ -2844,7 +2879,7 @@ async def admin_tool_transfer_review(request: Request, slug: str, status: str):
         item["transfer_review_status"] = status
     store.notify(item["author_id"], f"独占譲渡審査：{labels[status]}", item["name"], f"/seller/tools/{slug}/edit", "security")
     store.audit(user["id"], f"admin.transfer_{status}", slug, request.headers.get("x-request-id", ""))
-    return RedirectResponse("/admin#tools",303)
+    return RedirectResponse("/admin?section=tools",303)
 
 
 @app.post("/admin/users/{username}/{action}")
@@ -2863,7 +2898,7 @@ async def admin_user_status(request: Request, username: str, action: str):
                     tool["status"] = "draft"; tool["is_published"] = False
     if banned: revoke_user_sessions(account["id"])
     store.audit(user["id"], f"admin.user_{action}", username, request.headers.get("x-request-id", ""))
-    return RedirectResponse("/admin#users", 303)
+    return RedirectResponse("/admin?section=users", 303)
 
 
 @app.post("/admin/users/{username}/badge/{badge}/{action}")
@@ -2896,7 +2931,7 @@ async def admin_creator_badge(request: Request, username: str, badge: str, actio
         "general",
     )
     store.audit(user["id"], f"admin.creator_badge_{badge}_{action}", username, request.headers.get("x-request-id", ""))
-    return RedirectResponse("/admin#users", 303)
+    return RedirectResponse("/admin?section=users", 303)
 
 
 @app.get("/about", response_class=HTMLResponse)

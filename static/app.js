@@ -206,3 +206,25 @@ if (recoveryForm) {
 
 const chatMessages = document.querySelector('[data-chat-messages]');
 if (chatMessages) chatMessages.scrollTop = chatMessages.scrollHeight;
+// Instant fulfillment requires a private artifact before a listing can be submitted.
+document.querySelectorAll('[data-instant-fields]').forEach((panel) => {
+  const form = panel.closest('form');
+  const mode = form.querySelector('[name="fulfillment_type"]');
+  const priceType = form.querySelector('[name="price_type"]');
+  const file = panel.querySelector('[data-instant-file]');
+  const guide = panel.querySelector('[data-instant-guide]');
+  const inputs = panel.querySelector('[data-instant-inputs]');
+  if (!mode || !file || !guide) return;
+  const update = () => {
+    const instant = mode.value === 'instant' && priceType?.value !== 'consultation';
+    inputs.hidden = !instant;
+    file.disabled = guide.disabled = !instant;
+    file.required = instant && panel.dataset.artifactReady !== 'true';
+    guide.required = instant && (file.required || file.files.length > 0);
+    file.setCustomValidity(file.files[0]?.size > 50000000 ? '納品ファイルは50MB以下にしてください。' : '');
+  };
+  mode.addEventListener('change', update);
+  priceType?.addEventListener('change', update);
+  file.addEventListener('change', update);
+  update();
+});
