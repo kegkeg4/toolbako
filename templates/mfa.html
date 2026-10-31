@@ -1,9 +1,10 @@
-{% extends "base.html" %}
+{% extends "workspace_base.html" %}
 {% block title %}2段階認証 — ツールバコ{% endblock %}
-{% block page_styles %}<link rel="stylesheet" href="/static/mfa.css?v={{ asset_version }}">{% endblock %}
-{% block content %}
+{% block page_styles %}{{ super() }}<link rel="stylesheet" href="/static/mfa.css?v={{ asset_version }}">{% endblock %}
+{% block workspace_content %}
 <section class="account-page narrow-account mfa-page">
   <div class="account-head"><span class="section-kicker">ACCOUNT SECURITY</span><h1>認証アプリで本人確認</h1><p>管理・売上の操作を守るための追加確認です。確認はこの端末で10分間有効です。</p></div>
+  {% if admin_workspace %}<p class="manage-save-notice" role="status">管理画面の操作を続けるための確認です。認証後は元の管理画面に戻ります。更新・保存ボタンを押した後にこの画面が出た場合、その操作はまだ実行されていません。戻って内容を確認し、再度実行してください。</p>{% endif %}
   <p><strong>この確認ではメールは送信されません。</strong>スマートフォンの認証アプリに表示される6桁コードを使います。<a href="/support#guide-mfa" target="_blank" rel="noopener">認証アプリの使い方を見る（別タブ）</a></p>
   {% if mfa_error %}<p class="form-error" role="alert">{{ mfa_error }}</p>{% endif %}
   {% if enrollment %}
@@ -29,6 +30,6 @@
   <p>管理画面や売上・振込などの重要操作には、認証アプリを使った2段階認証が必要です。通常の会員登録・ログインには必要ありません。</p><p>認証アプリをまだ持っていない場合も、次の画面でインストールから順にご案内します。「認証アプリの登録を始める」を押すと、登録用QRコードと手動入力用のキーが表示されます。</p>
   <form action="/security/mfa/enroll" method="post"><input type="hidden" name="next" value="{{ next }}"><button class="button">認証アプリの登録を始める</button></form>
   {% endif %}
-  <p><a href="/security">セキュリティ設定へ戻る</a> · <a href="/support">認証できない場合の相談</a></p>
+  <p>{% if admin_workspace %}<a href="{{ admin_return_to }}">管理画面へ戻る</a> · <a href="/support" target="_blank" rel="noopener noreferrer">認証できない場合の相談（別タブ）</a>{% else %}<a href="/security">セキュリティ設定へ戻る</a> · <a href="/support">認証できない場合の相談</a>{% endif %}</p>
 </section>
 {% endblock %}

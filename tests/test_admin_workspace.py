@@ -3,6 +3,7 @@ from dataclasses import replace
 
 import pytest
 from html.parser import HTMLParser
+from urllib.parse import urlsplit, parse_qs
 from fastapi.testclient import TestClient
 
 from app import main
@@ -53,6 +54,54 @@ def test_admin_sections_remain_admin_only(workspace):
     actor['user'] = {'id':'ordinary', 'username':'ordinary', 'display_name':'一般会員'}
     for section in main.ADMIN_SECTIONS:
         assert client.get('/admin?section='+section).status_code == 403
+
+
+def test_admin_operation_error_keeps_workspace_and_review_return(workspace):
+    client, store, _ = workspace
+    tool = store.tools[0]
+    response = client.post(f'/admin/tools/{tool["slug"]}/safety/passed', data={'note':'短い'}, follow_redirects=False)
+    assert response.status_code == 422
+    page = Tags(response.text)
+    assert page.has_class('admin-sidebar')
+    assert not page.has_class('site-header')
+    assert 'ツールを探す' not in response.text
+    assert any(a.get('href') == f'/admin/tools/{tool["slug"]}/review' for a in page.tags('a'))
+    assert Tags(client.get('/admin?section=missing').text).has_class('admin-sidebar')
+
+
+def test_admin_refresh_and_blocked_post_keep_destination_without_mutation(workspace, monkeypatch):
+    client, store, _ = workspace
+    monkeypatch.setattr(main, 'settings', replace(main.settings, privileged_mfa_required=True))
+    monkeypatch.setattr(main.mfa, 'recent', lambda request: False)
+    response = client.get('/admin?section=tools', follow_redirects=False)
+    assert response.status_code == 303
+    assert parse_qs(urlsplit(response.headers['location']).query)['next'] == ['/admin?section=tools']
+    tool = store.tools[0]
+    before = deepcopy(tool)
+    response = client.post(f'/admin/tools/{tool["slug"]}/toggle', follow_redirects=False)
+    assert response.status_code == 303
+    assert parse_qs(urlsplit(response.headers['location']).query)['next'] == [f'/admin/tools/{tool["slug"]}/review']
+    assert tool == before
+
+
+def test_admin_mfa_and_wrong_code_keep_shell_but_ordinary_user_does_not(workspace, monkeypatch):
+    from fastapi import HTTPException
+    client, _, actor = workspace
+    monkeypatch.setattr(type(main.settings), 'supabase_ready', property(lambda self: True))
+    async def factors(request): return [{'id':'test-factor', 'status':'verified'}]
+    async def wrong_code(*args): raise HTTPException(400, 'コードを確認してください')
+    monkeypatch.setattr(main.mfa, 'factors', factors)
+    monkeypatch.setattr(main.mfa, 'verify', wrong_code)
+    page = Tags(client.get('/security/mfa', params={'next':'/admin?section=tools'}).text)
+    assert page.has_class('admin-sidebar') and not page.has_class('site-header')
+    assert any(a.get('aria-current') == 'page' and a.get('href') == '/admin?section=tools' for a in page.tags('a'))
+    response = client.post('/security/mfa/verify', data={'next':'/admin?section=tools','factor_id':'test-factor','code':'123456'})
+    assert response.status_code == 400 and Tags(response.text).has_class('admin-sidebar')
+    assert any(i.get('name') == 'next' and i.get('value') == '/admin?section=tools' for i in Tags(response.text).tags('input'))
+    actor['user'] = {'id':'ordinary', 'username':'ordinary', 'display_name':'一般会員'}
+    # A caller-supplied return URL must not grant access or expose an admin shell.
+    assert not Tags(client.get('/security/mfa', params={'next':'/admin'}).text).has_class('admin-sidebar')
+    assert client.get('/admin').status_code == 403
 
 
 def test_review_missing_instant_file_explains_before_action_and_cannot_publish(workspace, monkeypatch):

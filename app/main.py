@@ -11,7 +11,7 @@ import time
 from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from urllib.parse import quote, urlencode, urlparse
+from urllib.parse import quote, urlencode, urlparse, parse_qs
 from xml.sax.saxutils import escape as xml_escape
 
 import httpx
@@ -75,7 +75,9 @@ async def require_privileged_mfa(request: Request):
         return
     user = current_user(request)
     if user and not mfa.recent(request):
-        destination = request.url.path if request.method == "GET" else "/security"
+        destination = str(request.url.path) + (f"?{request.url.query}" if request.url.query else "") if request.method == "GET" else "/security"
+        if request.url.path == "/admin" or request.url.path.startswith("/admin/"):
+            destination, _ = admin_navigation(request.url.path, request.url.query, request.method)
         raise HTTPException(303, "重要操作の前に2段階認証をお願いします", headers={"Location": f"/security/mfa?{urlencode({'next': destination})}"})
 
 
@@ -275,6 +277,21 @@ def seo_metadata(request: Request) -> dict:
     }
 
 
+def admin_navigation(path: str, query: str = "", method: str = "GET") -> tuple[str, str]:
+    """Return a read-only admin destination; never replay a blocked mutation."""
+    parts = path.strip("/").split("/")
+    section = {"tools": "tools", "users": "users", "cases": "cases", "reports": "reports",
+               "orders": "finance", "payouts": "finance", "sellers": "finance"}.get(parts[1] if len(parts) > 1 else "", "overview")
+    if path == "/admin":
+        section = parse_qs(query).get("section", ["overview"])[0]
+        if section not in ADMIN_SECTIONS:
+            section = "overview"
+        return "/admin?" + urlencode({"section": section}), section
+    if len(parts) >= 3 and parts[1] == "tools":
+        return f"/admin/tools/{quote(parts[2], safe='')}/review", "tools"
+    return "/admin?" + urlencode({"section": section}), section
+
+
 def context(request: Request, **values):
     public_view = getattr(request.state, "member_view", None) or getattr(request.state, "public_view", None)
     if public_view is not None:
@@ -287,6 +304,17 @@ def context(request: Request, **values):
     values["subscription_checkout_ready"] = settings.demo_mode
     status_labels = {"in_progress":"取引中","awaiting_acceptance":"納品確認待ち","completed":"取引完了","cancel_pending":"キャンセル確認中","cancelled":"キャンセル済み"}
     user = current_user(request)
+    # Shared error/auth pages must not drop operators into the public-site shell.
+    admin_path = request.url.path
+    admin_query = request.url.query
+    if admin_path.startswith("/security/mfa"):
+        target = urlparse(safe_next(values.get("next", getattr(request.state, "mfa_next", request.query_params.get("next", "/security")))))
+        admin_path, admin_query = target.path, target.query
+    if is_admin(user) and (admin_path == "/admin" or admin_path.startswith("/admin/")):
+        return_to, section = admin_navigation(admin_path, admin_query, request.method)
+        values.update(admin_workspace=True, admin_return_to=return_to)
+        values.setdefault("admin_sections", ADMIN_SECTIONS)
+        values.setdefault("admin_section", section)
     unread_notification_count = sum(1 for item in browsing_store(request).notifications if item.get("user_id") == user["id"] and not item.get("read")) if user else 0
     legal_operator = {"name":settings.legal_business_name,"representative":settings.legal_representative,"address":settings.legal_address,"phone":settings.legal_phone,"contact_on_request":settings.legal_contact_on_request,"email":settings.support_email,"website":settings.legal_website,"invoice_number":settings.legal_invoice_number}
     return {"request": request, "user": user, "admin_access":is_admin(user), "unread_notification_count":unread_notification_count, "categories": CATEGORIES, "ai_options": AI_OPTIONS, "price_labels": PRICE_LABELS, "dist_labels": DIST_LABELS, "status_labels": status_labels, "transfer_asset_labels":TRANSFER_ASSET_LABELS, "transfer_status_labels":TRANSFER_STATUS_LABELS, "site_url": settings.site_base_url, "asset_version":settings.asset_version, "csp_nonce":getattr(request.state, "csp_nonce", ""), "demo_mode":settings.demo_mode, "oauth_providers":settings.enabled_oauth_providers, "email_ready":settings.email_ready, "stripe_ready":settings.stripe_ready, "platform_fee_percent":round(settings.platform_fee_rate * 100, 2), "custom_fee_percent":round(settings.custom_fee_rate * 100, 2), "payout_schedule_label":settings.payout_schedule_label, "payout_minimum":settings.payout_minimum, "payout_fee":settings.payout_fee, "payout_fee_free_threshold":settings.payout_fee_free_threshold, "payout_auto_days":settings.payout_auto_days, "payout_weekday_label":settings.payout_weekday_label, "legal_operator":legal_operator, **seo_metadata(request), **values}
@@ -1930,6 +1958,7 @@ async def mfa_page(request: Request, next: str = "/security"):
 
 @app.post("/security/mfa/enroll", response_class=HTMLResponse)
 async def mfa_enroll(request: Request, next: str = Form("/security")):
+    request.state.mfa_next = safe_next(next)
     try:
         data = await mfa.enroll(request)
     except HTTPException as exc:
@@ -1945,6 +1974,7 @@ async def mfa_enroll(request: Request, next: str = Form("/security")):
 
 @app.post("/security/mfa/verify")
 async def mfa_verify(request: Request, factor_id: str = Form(...), code: str = Form(...), next: str = Form("/security")):
+    request.state.mfa_next = safe_next(next)
     try:
         await mfa.verify(request, factor_id, code.strip())
     except HTTPException as exc:

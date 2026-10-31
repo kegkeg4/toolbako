@@ -1,0 +1,4 @@
+{% extends "admin_base.html" if admin_workspace else "base.html" %}
+{% block content %}{% if admin_workspace %}{{ super() }}{% else %}{{ self.workspace_content() }}{% endif %}{% endblock %}
+{% block admin_content %}{{ self.workspace_content() }}{% endblock %}
+{% block workspace_content %}{% endblock %}
