@@ -206,6 +206,12 @@ if (recoveryForm) {
 
 const chatMessages = document.querySelector('[data-chat-messages]');
 if (chatMessages) chatMessages.scrollTop = chatMessages.scrollHeight;
+// Keep save feedback in view instead of leaving the user at an empty upload input.
+const saveFeedback = document.querySelector('[data-save-feedback]');
+if (saveFeedback) {
+  saveFeedback.focus({preventScroll: true});
+  requestAnimationFrame(() => saveFeedback.scrollIntoView({block: 'start', behavior: 'instant'}));
+}
 // Instant fulfillment requires a private artifact before a listing can be submitted.
 document.querySelectorAll('[data-instant-fields]').forEach((panel) => {
   const form = panel.closest('form');
