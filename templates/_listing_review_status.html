@@ -2,6 +2,9 @@
 <article id="listing-review">
   <b>掲載審査（運営が手動で確認）</b>
   <span class="scan-state">{{ review_labels.get(review.get('status'), '運営の掲載審査待ち') }}</span>
+  {% if not instant_ready(tool) %}
+  <p><b>即時納品ファイルの準備待ちです。</b>「購入後すぐに提供」を選ぶ場合は、納品ファイルと導入手順を登録してください。購入後に個別対応する商品は「取引ルームで納品」に変更して保存できます。</p>
+  {% endif %}
   {% if review.get('status') == 'passed' %}
   <p>掲載審査が承認されました。「公開する」から販売を開始できます。商品説明・画像・価格・納品条件などを変更すると、公開を休止して再審査になります。</p>
   {% elif review.get('status') == 'failed' %}

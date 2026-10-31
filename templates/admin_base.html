@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block body_class %}admin-shell{% endblock %}
+{% block page_styles %}<link rel="stylesheet" href="/static/admin-finance.css?v={{ asset_version }}"><link rel="stylesheet" href="/static/admin-workspace.css?v=20261031-1"><script defer src="/static/admin-workspace.js?v=20261031-1"></script>{% endblock %}
+{% block site_header %}
+<header class="admin-header"><a href="/admin" class="admin-brand"><img src="/static/brand/toolbako-logo-header.png?v=20261024-fb23db15" width="1774" height="887" alt="ツールバコ"><span>運営管理</span></a><div class="admin-account"><span>{{ user.display_name }}</span><a href="/" target="_blank" rel="noopener noreferrer">公開サイトを別タブで確認 ↗</a><form action="/logout" method="post"><button>ログアウト</button></form></div></header>
+{% endblock %}
+{% block content %}
+<div class="admin-workspace"><aside class="admin-sidebar"><p>管理メニュー</p><nav aria-label="運営管理メニュー">{% for key,label in admin_sections.items() %}<a href="/admin?section={{ key }}" {% if admin_section == key %}aria-current="page"{% endif %}>{{ label }}</a>{% endfor %}</nav><small>商品審査・公開と、購入者への納品は別の手続きです。</small></aside><div class="admin-panel">{% block admin_content %}{% endblock %}</div></div>
+{% endblock %}
+{% block site_footer %}<footer class="admin-footer">ツールバコ運営管理 · 合同会社ONE</footer>{% endblock %}

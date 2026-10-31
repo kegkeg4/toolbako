@@ -1,9 +1,9 @@
-{% extends "base.html" %}
+{% extends "admin_base.html" %}
 {% block title %}掲載審査 — {{ tool.name }} — ツールバコ{% endblock %}
-{% block page_styles %}<link rel="stylesheet" href="/static/listing-review.css?v=20261024-1">{% endblock %}
-{% block content %}
+{% block page_styles %}{{ super() }}<link rel="stylesheet" href="/static/listing-review.css?v=20261024-1">{% endblock %}
+{% block admin_content %}
 <section class="simple-suite listing-review-page">
-  <header><a href="/admin#tools">← 運営管理へ</a><h1>商品の掲載審査</h1><p>商品説明と販売条件を手動で確認します。不足する情報は販売者に修正を依頼してください。</p></header>
+  <header><a href="/admin?section=tools">← 運営管理へ</a><h1>商品の掲載審査</h1><p>商品説明と販売条件を手動で確認します。不足する情報は販売者に修正を依頼してください。</p></header>
   <p class="review-scope">この承認は掲載内容の審査です。AIによるコード解析、動作検証、ウイルス検査を実施した扱いにはなりません。購入者に安全性を保証するものでもありません。</p>
   <div class="listing-review-layout">
     <article class="review-product">
@@ -22,12 +22,13 @@
     <aside class="review-decision">
       <h2>確認結果を記録</h2>
       {% if tool.safety_scan.note or tool.safety_scan.previous_note %}<p><b>前回の案内</b></p><div class="review-copy">{{ tool.safety_scan.note or tool.safety_scan.previous_note }}</div>{% endif %}
+      {% if not instant_ready(tool) %}<div class="delivery-requirement" role="status"><b>即時納品ファイルの準備が必要です</b><p>この商品は「購入後すぐに提供」が選択されています。出品者にファイル・導入手順の登録、または「取引ルームで納品」への変更を依頼してください。ファイルが不要な納品方法へ、運営が勝手に変更することはありません。</p><p>今は修正依頼・審査待ちへの変更ができます。</p></div>{% endif %}
       <form action="/admin/tools/{{ tool.slug }}/safety/passed" method="post">
         <input type="hidden" name="token" value="{{ review_token }}">
         <fieldset><legend>承認する場合はすべて確認</legend>{% for key,label in review_checks.items() %}<label class="review-check"><input type="checkbox" name="checks" value="{{ key }}"><span>{{ label }}</span></label>{% endfor %}</fieldset>
         <label for="review-note">審査記録・販売者への案内（必須）</label><textarea id="review-note" name="note" minlength="10" maxlength="2000" rows="7" required placeholder="確認した説明・デモ・利用条件、または不足している情報と修正内容を具体的に入力してください。"></textarea>
         <small>この文章は販売者にも表示されます。秘密情報や個人情報は記載しないでください。</small>
-        <button class="button" type="submit">掲載を承認する</button>
+        <button class="button" type="submit" {% if not instant_ready(tool) %}disabled{% endif %}>{{ "掲載を承認する" if instant_ready(tool) else "納品ファイルの準備待ち" }}</button>
         <button class="outline-button" type="submit" formaction="/admin/tools/{{ tool.slug }}/safety/failed">修正を依頼する</button>
         <button class="outline-button" type="submit" formaction="/admin/tools/{{ tool.slug }}/safety/pending">審査待ちに戻す</button>
       </form>

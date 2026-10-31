@@ -295,7 +295,7 @@ def test_creator_credentials_display_filter_and_admin_controls():
     admin.get('/auth/demo?next=/admin')
     notification_count = len(store.notifications)
     try:
-        console = admin.get('/admin')
+        console = admin.get('/admin?section=users')
         assert console.status_code == 200
         assert 'ユーザー・称号管理' in console.text
         assert '認定を付与' in console.text
@@ -485,9 +485,9 @@ def test_support_case_dispute_and_admin_resolution():
     assert '不審な操作について' in member.get('/support').text
     admin = TestClient(app)
     admin.get('/auth/demo?next=/admin')
-    console = admin.get('/admin')
+    console = admin.get('/admin?section=cases')
     assert console.status_code == 200
-    assert '本番公開チェック' in console.text
+    assert '本番公開チェック' in admin.get('/admin?section=readiness').text
     assert '不審な操作について' in console.text
     store = __import__('app.data', fromlist=['store']).store
     case = next(x for x in store.support_cases if x['subject']=='不審な操作について')
@@ -497,7 +497,7 @@ def test_support_case_dispute_and_admin_resolution():
 def test_admin_finance_dashboard_and_payout_hold():
     admin = TestClient(app)
     admin.get('/auth/demo?next=/admin')
-    console = admin.get('/admin')
+    console = admin.get('/admin?section=finance')
     assert console.status_code == 200
     assert '売上・手数料・振込管理' in console.text
     assert 'ONE販売手数料' in console.text
@@ -1384,7 +1384,8 @@ def test_exclusive_transfer_has_independent_review_gate():
         'weekly_ops_hours':'2', 'handover_days':'21',
         'exclusive_summary':'ソースコードと導入手順を譲渡し、顧客情報および第三者アカウントは対象外とします。',
         'transfer_rights_agreement':'yes', 'prohibited_agreement':'yes',
-    }, follow_redirects=False)
+        'artifact_guide':'この合成ファイルはテスト用です。実際の製品ではありません。',
+    }, files={'artifact_file':('transfer-test.txt', b'synthetic delivery', 'text/plain')}, follow_redirects=False)
     assert created.status_code == 303
     slug = created.headers['location'].split('?')[0].rsplit('/', 1)[-1]
     tool = store.get(slug)
