@@ -209,8 +209,13 @@ if (chatMessages) chatMessages.scrollTop = chatMessages.scrollHeight;
 // Keep save feedback in view instead of leaving the user at an empty upload input.
 const saveFeedback = document.querySelector('[data-save-feedback]');
 if (saveFeedback) {
-  saveFeedback.focus({preventScroll: true});
-  requestAnimationFrame(() => saveFeedback.scrollIntoView({block: 'start', behavior: 'instant'}));
+  const revealSaveFeedback = () => requestAnimationFrame(() => {
+    saveFeedback.focus({preventScroll: true});
+    saveFeedback.scrollIntoView({block: 'start', behavior: 'instant'});
+  });
+  // pageshow runs after the browser restores the previous page's scroll position.
+  if (document.readyState === 'complete') revealSaveFeedback();
+  else window.addEventListener('pageshow', revealSaveFeedback, {once: true});
 }
 // Instant fulfillment requires a private artifact before a listing can be submitted.
 document.querySelectorAll('[data-instant-fields]').forEach((panel) => {
