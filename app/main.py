@@ -1539,7 +1539,8 @@ async def seller_tool_review_request(request: Request, slug: str):
 async def upload_product_artifact(request: Request, slug: str, guide: str = Form(...),
                                   listing_rights_agreement: str = Form(...), artifact_file: UploadFile = File(...)):
     user = current_user(request)
-    if not user: raise HTTPException(401)
+    if not user:
+        raise HTTPException(401, "ログインを確認できなかったため、納品ファイルは保存していません。再ログインして販売管理を開き、ファイルを選び直して保存してください。")
     tool = own_tool(user, slug)
     if listing_rights_agreement != "yes": raise HTTPException(422, "販売権限と第三者の権利を確認してください")
     artifact = await store_artifact(artifact_file, guide, settings)

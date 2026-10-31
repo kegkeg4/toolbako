@@ -57,6 +57,23 @@ def test_upload_permission_and_rights_required(shop):
     assert 'instant_artifact' not in tool
 
 
+def test_expired_session_upload_explains_relogin_without_storing(shop, monkeypatch):
+    client, _, tool, actor, _ = shop
+    before = deepcopy(tool)
+    actor['user'] = None
+
+    async def must_not_store(*args, **kwargs):
+        pytest.fail('Unauthenticated upload reached file storage')
+
+    monkeypatch.setattr(main, 'store_artifact', must_not_store)
+    response = upload(client, tool, content=b'x' * (112 * 1024))
+    assert response.status_code == 401
+    assert 'もう一度ログインしてください' in response.text
+    assert '納品ファイルは保存していません' in response.text
+    assert '/login?next=%2Fseller' in response.text
+    assert tool == before
+
+
 @pytest.mark.parametrize('failure',['scanner_down','malware','scanner_unconfigured','storage_down'])
 def test_production_upload_fails_closed(shop,monkeypatch,failure):
     client, _, tool, _, config=shop

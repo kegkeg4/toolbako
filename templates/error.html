@@ -3,8 +3,8 @@
 {% block content %}
 <section class="error-page" role="alert">
   <span class="section-kicker">REQUEST {{ status_code }}</span>
-  <h1>操作を完了できませんでした</h1>
+  <h1>{% if status_code == 401 %}もう一度ログインしてください{% else %}操作を完了できませんでした{% endif %}</h1>
   <p>{{ error_message }}</p>
-  <div><a class="button ghost" href="/tools">ツールを探す</a><a class="button" href="/">トップへ戻る</a></div>
+  <div>{% if status_code == 401 %}{% if request.url.path.startswith('/seller/') %}<a class="button" href="/login?next=%2Fseller">ログインして販売管理へ</a>{% else %}<a class="button" href="/login">ログインへ</a>{% endif %}{% else %}<a class="button ghost" href="/tools">ツールを探す</a><a class="button" href="/">トップへ戻る</a>{% endif %}</div>
 </section>
 {% endblock %}
