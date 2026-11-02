@@ -3,6 +3,7 @@ from copy import deepcopy
 from dataclasses import replace
 import json
 import os
+from types import SimpleNamespace
 from uuid import uuid4
 
 import psycopg
@@ -47,6 +48,80 @@ def assert_empty(target):
 
 def do_import(target, values=None):
     return imp.import_local_rehearsal(target, *(values or bundle(target)), synthetic_data=True)
+
+
+def test_loopback_published_docker_backend_identity_is_pinned(monkeypatch):
+    config = {"host": "127.0.0.1", "port": "15432"}
+    connection = SimpleNamespace(info=SimpleNamespace(hostaddr="127.0.0.1", port=15432, dbname="postgres"))
+    monkeypatch.setattr(imp, "_server_details", lambda conn: ("172.18.0.2", 5432, conn.info.dbname))
+    identity = imp._server(connection, config, "postgres")
+    assert identity == ("172.18.0.2", 5432)
+    connection.info.dbname = "toolbako_import_" + "a" * 32
+    assert imp._server(connection, config, connection.info.dbname, identity) == identity
+
+
+@pytest.mark.parametrize("backend", [
+    ("172.18.0.3", 5432, "postgres"), ("172.18.0.2", 5433, "postgres"),
+    ("172.18.0.2", 5432, "other_database"), (None, 5432, "postgres"),
+    ("not-an-address", 5432, "postgres"), ("0.0.0.0", 5432, "postgres"),
+    ("224.0.0.1", 5432, "postgres"), ("8.8.8.8", 5432, "postgres"),
+    ("172.18.0.2", 0, "postgres"), ("172.18.0.2", True, "postgres"),
+])
+def test_changed_or_invalid_backend_identity_is_rejected(monkeypatch, backend):
+    connection = SimpleNamespace(info=SimpleNamespace(hostaddr="127.0.0.1", port=15432, dbname="postgres"))
+    monkeypatch.setattr(imp, "_server_details", lambda conn: backend)
+    with pytest.raises(imp.LocalImportError, match="server_identity_mismatch"):
+        imp._server(connection, {"host": "127.0.0.1", "port": "15432"}, "postgres", ("172.18.0.2", 5432))
+
+
+@pytest.mark.parametrize("address", [None, "not-an-address", "0.0.0.0", "224.0.0.1", "8.8.8.8", "::"])
+def test_initial_backend_capture_rejects_untrusted_address(monkeypatch, address):
+    connection = SimpleNamespace(info=SimpleNamespace(hostaddr="127.0.0.1", port=15432, dbname="postgres"))
+    monkeypatch.setattr(imp, "_server_details", lambda conn: (address, 5432, conn.info.dbname))
+    with pytest.raises(imp.LocalImportError, match="server_identity_mismatch"):
+        imp._server(connection, {"host": "127.0.0.1", "port": "15432"}, "postgres")
+
+
+@pytest.mark.parametrize("client", [
+    ("172.18.0.2", 15432, "postgres"), ("127.0.0.1", 5432, "postgres"),
+    ("127.0.0.1", 15432, "other_database"),
+])
+def test_docker_support_does_not_allow_changed_client_endpoint(monkeypatch, client):
+    connection = SimpleNamespace(info=SimpleNamespace(hostaddr=client[0], port=client[1], dbname=client[2]))
+    def forbidden(conn): raise AssertionError("Backend query must not be attempted")
+    monkeypatch.setattr(imp, "_server_details", forbidden)
+    with pytest.raises(imp.LocalImportError, match="client_identity_mismatch"):
+        imp._server(connection, {"host": "127.0.0.1", "port": "15432"}, "postgres")
+
+
+def test_real_pg_lifecycle_with_docker_translated_server_reporting(monkeypatch):
+    dsn = os.environ.get("TEST_POSTGRES_ADMIN_DSN")
+    if not dsn: pytest.skip("Local PostgreSQL required")
+    # Actual CREATE/schema/transaction/replay/drop on local PostgreSQL. Only
+    # backend reporting is simulated; actual Docker acceptance belongs to CI.
+    monkeypatch.setattr(imp, "_server_details", lambda conn: ("172.18.0.2", 5432, conn.info.dbname))
+    config = imp.local_config(dsn)
+    with imp._connect(config) as conn:
+        before = conn.execute("select datname from pg_database order by datname").fetchall()
+    with imp.new_local_target(dsn) as allocated:
+        assert allocated._server_identity == ("172.18.0.2", 5432)
+        values = bundle(allocated)
+        with monkeypatch.context() as scoped:
+            scoped.setattr(imp, "_server_details", lambda conn: ("172.18.0.3", 5432, conn.info.dbname))
+            with pytest.raises(imp.LocalImportError, match="server_identity_mismatch"):
+                do_import(allocated, values)
+        assert_empty(allocated)
+        def fail(*args, **kwargs): raise imp.LocalImportError("synthetic_failure")
+        with monkeypatch.context() as scoped:
+            scoped.setattr(imp, "_write_audit", fail)
+            with pytest.raises(imp.LocalImportError, match="synthetic_failure"):
+                do_import(allocated, values)
+        assert_empty(allocated)
+        assert do_import(allocated, values)["status"] == "synthetic_imported"
+        assert do_import(allocated, values)["status"] == "already_imported"
+    with imp._connect(config) as conn:
+        assert conn.execute("select datname from pg_database order by datname").fetchall() == before
+    assert not allocated._active
 
 
 def test_actual_transactional_import_and_exact_replay_do_not_bind_or_rewrite(target):

@@ -9,6 +9,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import hashlib
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -76,9 +77,30 @@ def _connect(config, database="postgres", *, autocommit=False):
         raise LocalImportError("local_connection_failed") from None
 
 
-def _server(conn, config, database):
-    row = conn.execute("select host(inet_server_addr()),inet_server_port(),current_database()").fetchone()
-    _require(row == (config["host"], int(config["port"]), database), "server_identity_mismatch")
+def _server_details(conn):
+    return conn.execute("select host(inet_server_addr()),inet_server_port(),current_database()").fetchone()
+
+
+def _server(conn, config, database, expected=None):
+    # A loopback-published Docker service has a different backend IP/port.
+    # Keep the *client* endpoint numeric-loopback-only and pin the backend
+    # identity observed before CREATE across initialization/import/cleanup.
+    _require(config.get("host") in {"127.0.0.1", "::1"}
+             and conn.info.hostaddr == config["host"]
+             and conn.info.port == int(config["port"])
+             and conn.info.dbname == database, "client_identity_mismatch")
+    row = _server_details(conn)
+    _require(type(row) is tuple and len(row) == 3 and row[2] == database
+             and type(row[0]) is str and type(row[1]) is int and 1 <= row[1] <= 65535, "server_identity_mismatch")
+    try:
+        address = ipaddress.ip_address(row[0])
+    except ValueError:
+        raise LocalImportError("server_identity_mismatch") from None
+    _require((address.is_loopback or address.is_private)
+             and not address.is_unspecified and not address.is_multicast, "server_identity_mismatch")
+    identity = (str(address), row[1])
+    _require(expected is None or identity == expected, "server_identity_mismatch")
+    return identity
 
 
 def _schema_signature(conn):
@@ -118,16 +140,17 @@ class LocalTarget:
     _config: dict = field(repr=False)
     _nonce: str = field(repr=False)
     _oid: int = field(repr=False)
+    _server_identity: tuple = field(repr=False)
     _active: bool = field(default=True, repr=False)
 
 
 def _target_identity(conn, target):
     _require(type(target) is LocalTarget and target._active and target in _OWNED_TARGETS, "target_not_owned")
     _require(re.fullmatch(r"toolbako_import_[a-f0-9]{32}", target.database_name) is not None, "target_not_owned")
-    _server(conn, target._config, target.database_name)
+    _server(conn, target._config, target.database_name, target._server_identity)
     row = conn.execute("select oid::bigint,shobj_description(oid,'pg_database') from pg_database where datname=current_database()").fetchone()
     _require(row == (target._oid, "toolbako-local-import:" + target._nonce), "target_not_owned")
-    expected = value_hash((target._config["host"], int(target._config["port"]), target.database_name, target._oid, target._nonce))
+    expected = value_hash((target._config["host"], int(target._config["port"]), target._server_identity, target.database_name, target._oid, target._nonce))
     _require(expected == target.fingerprint, "target_not_owned")
 
 
@@ -144,19 +167,20 @@ def new_local_target(admin_dsn):
     target = None
     created = False
     oid = None
+    server_identity = None
     try:
         with _connect(config, autocommit=True) as admin:
-            _server(admin, config, "postgres")
+            server_identity = _server(admin, config, "postgres")
             admin.execute(sql.SQL("create database {} template template0").format(sql.Identifier(name)))
             created = True
             oid = admin.execute("select oid::bigint from pg_database where datname=%s", (name,)).fetchone()[0]
             admin.execute(sql.SQL("comment on database {} is {}").format(sql.Identifier(name), sql.Literal("toolbako-local-import:" + nonce)))
         with _connect(config, name) as conn:
-            _server(conn, config, name)
+            _server(conn, config, name, server_identity)
             conn.execute(Path(__file__).with_name("runtime_schema.sql").read_text(encoding="utf-8"))
             signature = _schema_signature(conn)
-        fingerprint = value_hash((config["host"], int(config["port"]), name, oid, nonce))
-        target = LocalTarget(name, fingerprint, signature, config, nonce, oid)
+        fingerprint = value_hash((config["host"], int(config["port"]), server_identity, name, oid, nonce))
+        target = LocalTarget(name, fingerprint, signature, config, nonce, oid, server_identity)
         _OWNED_TARGETS.add(target)
         yield target
     except psycopg.Error:
@@ -166,7 +190,7 @@ def new_local_target(admin_dsn):
             # OID is captured immediately after CREATE. Never use a wildcard or
             # reuse a database whose identity has changed since allocation.
             with _connect(config, autocommit=True) as admin:
-                _server(admin, config, "postgres")
+                _server(admin, config, "postgres", server_identity)
                 row = admin.execute("select oid::bigint from pg_database where datname=%s", (name,)).fetchone()
                 _require(row == (oid,), "cleanup_target_changed")
                 admin.execute(sql.SQL("drop database {} with (force)").format(sql.Identifier(name)))
