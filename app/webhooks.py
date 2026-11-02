@@ -131,12 +131,14 @@ class StripeWebhookGuardMiddleware:
 class StripeWebhookService(StripeWebhookValidator):
     """Validate and apply Stripe events atomically within one app process."""
 
-    def __init__(self, settings: Any, store: Any, email_sender: EmailSender, *, journal=None, provider=None):
+    def __init__(self, settings: Any, store: Any, email_sender: EmailSender, *, journal=None, provider=None,
+                 paid_out_refund_reconciler=None):
         super().__init__(settings, durable=bool(journal))
         self.store = store
         self.email_sender = email_sender
         self.journal = journal
         self.provider = provider
+        self.paid_out_refund_reconciler = paid_out_refund_reconciler
 
     async def handle(self, request: Request) -> dict[str, bool]:
         payload = bytearray()
@@ -178,7 +180,8 @@ class StripeWebhookService(StripeWebhookValidator):
             attempt = await self.journal.operation_result(f"bank-payout-{payout['id']}")
             if attempt and attempt["status"] == "succeeded":
                 state["recovered_payout_id"] = attempt["response"].get("id")
-        if self.journal and state["event_type"] == "refund.updated" and state.get("order"):
+        if (self.journal and state["event_type"] == "refund.updated" and state.get("order")
+                and not state.get("paid_out_refund_handled")):
             order, extra = state["order"], state.get("extra")
             refund_target = extra or order
             if not refund_target.get("refund_reference"):
@@ -235,6 +238,31 @@ class StripeWebhookService(StripeWebhookValidator):
 
     async def _refresh_provider_state(self, event, state):
         kind, obj = state["event_type"], state["obj"]
+        if kind in {"refund.updated", "charge.refunded"}:
+            order = state.get("order")
+            paid_allocation = bool(order) and any(
+                p.get("finance_v2") and (p.get("status") == "paid" or p.get("paid_at"))
+                and any(a.get("order_id") == order["id"] for a in p.get("allocations", []))
+                for p in self.store.payouts)
+            special = ("paid_out_case_id" in state["metadata"] or "ledger_id" in state["metadata"]
+                       or (order is not None and "paid_out_refund_case" in order) or paid_allocation)
+            if special:
+                # The legacy Sandbox endpoint also receives these events. Never
+                # convert a buyer refund after payout into a seller-refund ledger
+                # entry, even when markers are empty or reconciliation is absent.
+                if self.paid_out_refund_reconciler is None or self.journal is None or self.provider is None:
+                    raise HTTPException(503, "paid-out refund reconciliation unavailable")
+                try:
+                    result = await self.paid_out_refund_reconciler(event, self.store, self.journal,
+                        self.provider, self.provider.financial_scope)
+                except FinanceConflict:
+                    raise HTTPException(409, "paid-out refund evidence does not match") from None
+                except RuntimeError:
+                    raise HTTPException(503, "paid-out refund reconciliation unavailable") from None
+                if result is not True:
+                    raise HTTPException(503, "paid-out refund reconciliation unavailable")
+                state["paid_out_refund_handled"] = True
+                return
         if kind == "account.updated":
             state["account"] = next((a for a in self.store.connected_accounts.values() if a.get("account_id") == obj.get("id")), None)
             if not state["account"]: return
@@ -290,6 +318,8 @@ class StripeWebhookService(StripeWebhookValidator):
         return {"obj": obj, "metadata": metadata, "event_type": event_type, "paid_checkout_event": paid_checkout_event, "order": order, "provider_subscription_id": provider_subscription_id, "subscription": subscription, "extra": extra, "application": application, "payout": payout}
 
     def _validate(self, event_id: str, event: dict[str, Any], state: dict[str, Any], request_id: str) -> None:
+        if state.get("paid_out_refund_handled"):
+            return
         obj = state["obj"]
         metadata = state["metadata"]
         event_type = state["event_type"]
@@ -374,6 +404,8 @@ class StripeWebhookService(StripeWebhookValidator):
                 raise HTTPException(400, "connected account does not match")
 
     def _apply(self, event: dict[str, Any], state: dict[str, Any]) -> list[EmailMessage]:
+        if state.get("paid_out_refund_handled"):
+            return []
         obj = state["obj"]
         metadata = state["metadata"]
         event_type = state["event_type"]

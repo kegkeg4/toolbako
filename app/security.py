@@ -53,10 +53,11 @@ def verify_password(password: str, salt_hex: str | None, expected_hash: str | No
 class SessionService:
     """Keep signed-cookie contents opaque while storing revocable sessions server-side."""
 
-    def __init__(self, store: Any, max_age_seconds: int, *, demo_erasure=False):
+    def __init__(self, store: Any, max_age_seconds: int, *, demo_erasure=False, claim_policy=None):
         self.store = store
         self.max_age_seconds = max_age_seconds
         self.demo_erasure = demo_erasure
+        self.claim_policy = claim_policy
 
     def establish(self, request: Request, user: dict[str, Any]) -> dict[str, Any]:
         if account_erased_or_erasing(self.store, user["id"]):
@@ -135,11 +136,13 @@ class SessionService:
             # Provider verification can finish in a webhook, after this session
             # was created. Read the authoritative result on every request.
             identity = self.store.identity_applications.get(user["id"])
-            if identity:
+            if identity and not (self.claim_policy and self.claim_policy.requires_live()):
                 user["identity_status"] = identity.get("status", "not_started")
                 user["is_verified"] = user["identity_status"] == "verified"
             user.setdefault("is_verified", False)
             user.setdefault("identity_status", "verified" if user.get("is_verified") else "not_started")
             user.setdefault("email_verified", True)
             user.setdefault("phone_verified", False)
+            if self.claim_policy and self.claim_policy.requires_live():
+                user = self.claim_policy.annotate(user, self.store)
         return user

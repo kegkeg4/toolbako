@@ -45,10 +45,14 @@ from .persistence import SQLiteStateStore
 from .database import DatabaseBoundaryMiddleware, PostgresStateStore
 from .integrations import EmailIntegration, StripeIntegration, StripeOutcomeUnknown
 from .financial_scope import configured_scope
+from .live_identity import LiveClaimPolicy
 from .files import clamav_scan, validate_delivery_file, encode_thumbnail
 from .security import SessionService, hash_password, verify_password
 from .web import clean_visible_text, safe_http_url, safe_next, slugify
 from .webhooks import StripeWebhookService, StripeWebhookGuardMiddleware
+from .live_webhooks import LiveWebhookDispatcherMiddleware, build_live_webhook_handler
+from .paid_out_refund_execution import reconcile_paid_out_refund_notification
+from .paid_out_refund_routes import create_paid_out_refund_router, paid_out_refund_inventory
 from .mfa import SupabaseMFA, is_privileged_path, totp_qr_image
 from .finance import FinanceConflict, PAYOUT_LABELS, balance as ledger_balance, request_payout
 from .payout_worker import sandbox_payouts_ready
@@ -108,11 +112,14 @@ def security_service_readiness():
     return {name: status["ready"] for name, status in security_service_snapshot()["services"].items()}
 
 
+claim_policy = LiveClaimPolicy(lambda: settings)
 database_store = PostgresStateStore(settings.database_url, production=settings.is_deployed, reuse_connections=True) if settings.database_url else None
 app = FastAPI(title="ツールバコ", description="AIツールの共有・発見プラットフォーム", version="0.1.0", dependencies=[Depends(require_privileged_mfa)], lifespan=lifespan)
 app.add_middleware(GZipMiddleware, minimum_size=500, compresslevel=6)
 if database_store or settings.is_production:
-    app.add_middleware(DatabaseBoundaryMiddleware, backend=database_store, store=store, public_reads=True, member_reads=not settings.demo_mode, session_max_age=settings.session_max_age)
+    app.add_middleware(DatabaseBoundaryMiddleware, backend=database_store, store=store, public_reads=True, member_reads=not settings.demo_mode, session_max_age=settings.session_max_age, claim_policy=claim_policy)
+# These two live paths own the same backend boundary inside the existing guards.
+app.add_middleware(LiveWebhookDispatcherMiddleware, application_state=app.state, settings=settings)
 # Signed-cookie validation must precede the owner-scoped DB projection.
 app.add_middleware(SessionMiddleware, secret_key=settings.session_secret, session_cookie="toolbako_session", same_site="lax", https_only=settings.site_base_url.startswith("https"), max_age=settings.session_max_age)
 app.add_middleware(StripeWebhookGuardMiddleware, settings=settings)
@@ -141,7 +148,7 @@ for restored_username, restored_account in store.registered_users.items():
     restored_account.setdefault("founding_member_since", restored_account.get("created_at") if demo_credential else None)
     restored_account.setdefault("is_certified_creator", demo_credential)
     restored_account.setdefault("certified_creator_since", restored_account.get("created_at") if demo_credential else None)
-session_service = SessionService(store, settings.session_max_age, demo_erasure=settings.demo_mode)
+session_service = SessionService(store, settings.session_max_age, demo_erasure=settings.demo_mode, claim_policy=claim_policy)
 mfa = SupabaseMFA(settings, session_service)
 
 
@@ -158,6 +165,9 @@ async def persist_state() -> None:
 # persists successful writes. Never commit a second time after releasing the DB.
 app.state.persist = None if database_store else persist_state
 stripe = StripeIntegration(settings.stripe_secret_key, settings.site_base_url, api_version=settings.stripe_api_version, charge_mode=settings.stripe_charge_mode, journal=database_store, financial_scope=configured_scope(settings))
+app.state.live_webhook_handler = build_live_webhook_handler(
+    settings, store, database_store, stripe,
+    paid_out_refund_reconciler=reconcile_paid_out_refund_notification)
 email_service = EmailIntegration(settings.email_api_key, settings.email_from)
 DEFAULT_OG_PATH = generate_site_og()
 TRANSFER_NDA_TEXT = "当事者は独占譲渡案件で開示される非公開情報を案件評価以外に使用せず、第三者へ開示せず、交渉終了時は合理的な範囲で破棄します。法令・裁判所・行政機関により開示が必要な場合を除きます。"
@@ -211,12 +221,7 @@ PROFILE_CACHE_FIELDS = (
 
 def creator_badges_for(username: str) -> dict[str, object]:
     account = store.registered_users.get(username) or {}
-    return {
-        "is_founding_member": bool(account.get("is_founding_member")),
-        "founding_member_since": account.get("founding_member_since"),
-        "is_certified_creator": bool(account.get("is_certified_creator")),
-        "certified_creator_since": account.get("certified_creator_since"),
-    }
+    return claim_policy.badges(account, store)
 
 
 def profile_badge_values(profile: dict) -> dict[str, object]:
@@ -386,11 +391,13 @@ def own_tool(user: dict, slug: str) -> dict:
 
 def identity_verified(user: dict | None) -> bool:
     if not user: return False
+    if claim_policy.requires_live(): return claim_policy.eligibility(store, user.get("id")).identity.eligible
     if user.get("is_verified") or user.get("identity_status") == "verified": return True
     return identity_verified_by_id(user["id"])
 
 
 def identity_verified_by_id(user_id: str) -> bool:
+    if claim_policy.requires_live(): return claim_policy.eligibility(store, user_id).identity.eligible
     application = store.identity_applications.get(user_id)
     if application and application.get("status") == "verified": return True
     account = next((item for item in store.registered_users.values() if item.get("id") == user_id), None)
@@ -421,6 +428,10 @@ def validated_transfer_settings(
 
 def is_admin(user: dict | None) -> bool:
     return bool(user and (user["id"] in settings.admin_user_ids or (settings.demo_mode and user["username"] == "demo_creator")))
+
+
+app.include_router(create_paid_out_refund_router(
+    lambda: (database_store, store, stripe, settings, mfa), current_user, is_admin))
 
 
 async def save_thumbnail(upload: UploadFile | None, slug: str) -> str | None:
@@ -1073,7 +1084,7 @@ async def payouts(request: Request):
 @app.post("/payouts")
 async def payout_request(request: Request, amount: int = Form(...), request_key: str = Form("")):
     user=current_user(request)
-    if not user or not user.get("is_verified"): raise HTTPException(403,"本人確認が必要です")
+    if not user or not (identity_verified(user) if claim_policy.requires_live() else user.get("is_verified")): raise HTTPException(403,"本人確認が必要です")
     if not settings.demo_mode and not sandbox_payouts_ready(settings):
         raise HTTPException(409,"本番の振込は公開前検証中です。実際の銀行振込はまだ開始されません")
     balance = available_balance(user["id"])
@@ -1216,7 +1227,9 @@ async def download_delivery_file(request: Request, order_id: str, file_id: str):
     if not order or not order.get("delivery"): raise HTTPException(404)
     item = next((x for x in order["delivery"].get("files",[]) if x["id"]==file_id and x.get("scan_status")=="passed"),None)
     if not item: raise HTTPException(404)
-    if user["id"] == order["buyer_id"] and (order.get("payment_status", "paid" if settings.demo_mode else None) != "paid" or order.get("refund_status") or order.get("status") == "cancelled"):
+    # A paid-out case starts only after both parties accept cancellation. Its
+    # buyer result is separate from the immutable original payment/refund facts.
+    if user["id"] == order["buyer_id"] and (order.get("payment_status", "paid" if settings.demo_mode else None) != "paid" or order.get("refund_status") or order.get("status") == "cancelled" or "paid_out_refund_case" in order):
         raise HTTPException(404)
     if user["id"] == order["buyer_id"] and order.get("billing_type") == "subscription":
         subscription = next((x for x in store.subscriptions if x.get("order_id") == order_id), None)
@@ -1417,7 +1430,7 @@ async def seller_dashboard(request: Request):
     own_tools = [x for x in store.tools if x.get("author_id") == user["id"]]
     orders = sorted([x for x in store.orders if x["seller_id"] == user["id"]], key=lambda item:item["updated_at"], reverse=True)
     completed = [x for x in orders if x["status"] == "completed"]
-    rank = store.creator_rank(user["username"], user.get("is_verified", False))
+    rank = store.creator_rank(user["username"], identity_verified(user) if claim_policy.requires_live() else user.get("is_verified", False))
     action_orders = [item for item in orders if item["status"] == "in_progress" or (item["status"] == "cancel_pending" and item.get("cancel_requested_by") != user["id"])]
     account = store.registered_users.get(user["username"], {})
     transfer_inquiries = sorted([item for item in store.transfer_inquiries if item["seller_id"] == user["id"]], key=lambda item:item["updated_at"], reverse=True)
@@ -1853,6 +1866,8 @@ async def start_identity_verification(request: Request):
         return RedirectResponse("/verification?unavailable=1",303)
     application = store.identity_applications.get(user["id"])
     if application and application.get("status") == "verified":
+        if claim_policy.requires_live() and not identity_verified(user):
+            return RedirectResponse("/verification?review_required=1",303)
         return RedirectResponse("/verification",303)
     if application and application.get("creation_review_required"):
         return RedirectResponse("/verification?processing=1",303)
@@ -1912,7 +1927,7 @@ async def nda(request: Request):
     user = current_user(request)
     if not user: return RedirectResponse("/login?next=/nda", 303)
     application = store.identity_applications.get(user["id"])
-    can_sign = bool(user.get("is_verified") or (application and application.get("status") == "verified"))
+    can_sign = identity_verified(user) if claim_policy.requires_live() else bool(user.get("is_verified") or (application and application.get("status") == "verified"))
     return templates.TemplateResponse(request, "nda.html", context(request, signed=user["id"] in store.nda_signatures, can_sign=can_sign))
 
 
@@ -1921,7 +1936,8 @@ async def sign_nda(request: Request, agree: str = Form(...)):
     user = current_user(request)
     if not user or agree != "yes": raise HTTPException(422)
     application = store.identity_applications.get(user["id"])
-    if not user.get("is_verified") and not (application and application.get("status") == "verified"):
+    can_sign = identity_verified(user) if claim_policy.requires_live() else bool(user.get("is_verified") or (application and application.get("status") == "verified"))
+    if not can_sign:
         raise HTTPException(403, "機密保持契約には本人確認が必要です")
     with store._lock:
         store.nda_signatures.add(user["id"])
@@ -2093,7 +2109,7 @@ async def login_submit(request: Request, email: str = Form(...), password: str =
         session_user.update(profile_badge_values(profile))
         with store._lock:
             entry = store.registered_users.setdefault(session_user["username"], {})
-            entry.update({key:session_user.get(key) for key in PROFILE_CACHE_FIELDS})
+            claim_policy.cache_profile(entry, session_user, PROFILE_CACHE_FIELDS)
     else:
         entry = next(({"username":username,**data} for username,data in store.registered_users.items() if data.get("email")==email),None)
         if not verify_password(password, entry and entry.get("password_salt"), entry and entry.get("password_hash")):
@@ -2318,7 +2334,7 @@ async def auth_callback(request: Request, code: str = "", state: str = "", next:
     establish_session(request, session_user)
     with store._lock:
         entry = store.registered_users.setdefault(session_user["username"], {})
-        entry.update({key:session_user.get(key) for key in PROFILE_CACHE_FIELDS})
+        claim_policy.cache_profile(entry, session_user, PROFILE_CACHE_FIELDS)
     store.audit(session_user["id"], "account.oauth_logged_in", session_user["username"], request.headers.get("x-request-id", ""))
     mfa.attach_tokens(request, token_data)
     await persist_state()
@@ -2364,7 +2380,10 @@ def creator_snapshot(username: str) -> tuple[dict, list[dict], list[dict]] | Non
         1 for order in store.orders if order.get("seller_username") == username and order.get("status") == "completed"
     )
     verification = account and store.identity_applications.get(account.get("id"))
-    verified = username == "demo_creator" or bool(verification and verification.get("status") == "verified")
+    if claim_policy.requires_live():
+        verified = bool(account and identity_verified_by_id(account.get("id")))
+    else:
+        verified = username == "demo_creator" or bool(verification and verification.get("status") == "verified")
     fallback_name = items[0]["author_name"] if items else username
     profile_data = {
         "username": username,
@@ -2685,6 +2704,7 @@ async def admin(request: Request, section: str = "overview"):
     if section == "finance":
         values.update(finance=store.finance_snapshot(ledger=bool(database_store)), finance_controls_ready=settings.demo_mode or sandbox_payouts_ready(settings), payout_labels=PAYOUT_LABELS,
             payment_recoveries=await payment_recovery_inventory(database_store, store) if database_store else {"items": [], "truncated": False},
+            paid_out_refunds=paid_out_refund_inventory(store, settings, database_store),
             refund_resumptions=refund_resumption_inventory(store), payment_recovery_ready=bool(database_store and sandbox_payouts_ready(settings) and len(set(settings.admin_user_ids)) >= 2))
     return templates.TemplateResponse(request, "admin.html", context(request, **values))
 
@@ -2950,7 +2970,7 @@ async def admin_creator_badge(request: Request, username: str, badge: str, actio
 
     enabled = action == "grant"
     changed_at = datetime.now(timezone.utc)
-    candidate = creator_badges_for(username)
+    candidate = claim_policy.raw_badges(account)
     if badge == "founding":
         candidate["is_founding_member"] = enabled
         candidate["founding_member_since"] = changed_at if enabled else None
@@ -3030,7 +3050,8 @@ async def deployment_health():
                         status_code=200 if connected else 503, headers={"Cache-Control": "no-store"})
 
 
-stripe_webhook_service = StripeWebhookService(settings, store, send_email_safely, journal=database_store, provider=stripe)
+stripe_webhook_service = StripeWebhookService(settings, store, send_email_safely, journal=database_store, provider=stripe,
+                                            paid_out_refund_reconciler=reconcile_paid_out_refund_notification)
 
 
 @app.post("/webhooks/stripe")

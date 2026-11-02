@@ -184,7 +184,7 @@ class PostgresStateStore:
         self._public_slots = asyncio.BoundedSemaphore(2)
         self._public_connections = []
 
-    async def public_view(self, *, catalog=False):
+    async def public_view(self, *, catalog=False, live_claims=False):
         from .public_read import PublicView
         projection = "'[]'::jsonb, '{}'::jsonb"
         if catalog:
@@ -201,16 +201,20 @@ class PostgresStateStore:
                     'certified_creator_since', value->'certified_creator_since'))
                   from jsonb_each(s.payload->'registered_users')), '{}'::jsonb)
             """
-        return await self._read_view(projection, (), "", lambda row: PublicView(decode_value(row[2]), decode_value(row[3])))
+        if live_claims:
+            if catalog:
+                projection = projection.replace("jsonb_build_object(\n", "jsonb_build_object(\n'id',value->'id','is_banned',value->'is_banned',\n", 1)
+            projection += ", coalesce((select jsonb_agg(item) from jsonb_array_elements(s.payload->'audit_logs') item where item->>'action'='live.claims.reviewed'),'[]'::jsonb)"
+        return await self._read_view(projection, (), "", lambda row: PublicView(decode_value(row[2]), decode_value(row[3]), decode_value(row[4]) if live_claims else []))
 
-    async def member_view(self, sid, path):
+    async def member_view(self, sid, path, *, live_claims=False):
         from .member_read import MemberView, member_projection, MEMBER_READ_PATHS
         if path not in MEMBER_READ_PATHS or not isinstance(sid, str) or not 0 < len(sid) <= 128:
             raise ValueError("Invalid member read")
         joins = """ left join lateral (select s.payload->'account_sessions'->%s::text as record) a on true
           left join lateral (select a.record->'user'->>'id' as uid,
                             a.record->'user'->>'username' as username) u on true """
-        return await self._read_view(member_projection(path), (sid, sid), joins,
+        return await self._read_view(member_projection(path, live_claims=live_claims), (sid, sid), joins,
                                      lambda row: MemberView(decode_value(row[2])))
 
     async def _read_view(self, projection, params, joins, build):
@@ -698,12 +702,13 @@ class PostgresStateStore:
 
 
 class DatabaseBoundaryMiddleware(BaseHTTPMiddleware):
-    def __init__(self, app, *, backend, store, public_reads=False, member_reads=False, session_max_age=0):
+    def __init__(self, app, *, backend, store, public_reads=False, member_reads=False, session_max_age=0, claim_policy=None):
         super().__init__(app)
         self.backend, self.store = backend, store
         self.public_reads = public_reads
         self.member_reads = member_reads
         self.session_max_age = session_max_age
+        self.claim_policy = claim_policy
 
     async def dispatch(self, request, call_next):
         if request.url.path.startswith("/static/") or request.url.path in {"/healthz", "/readyz", "/deploymentz"}:
@@ -718,13 +723,15 @@ class DatabaseBoundaryMiddleware(BaseHTTPMiddleware):
             from .public_read import anonymous_read, CATALOG_PATHS
             if self.public_reads and anonymous_read(request):
                 try:
-                    view = await self.backend.public_view(catalog=request.url.path in CATALOG_PATHS)
+                    claim_options = {"live_claims": True} if self.claim_policy and self.claim_policy.requires_live() else {}
+                    view = await self.backend.public_view(catalog=request.url.path in CATALOG_PATHS, **claim_options)
                 except StorageUnavailable as exc:
                     if exc.diagnostic_code != "state_uninitialized":
                         raise
                     # A freshly migrated deployment still initializes EMPTY
                     # state through the existing serialized write boundary.
                 else:
+                    view.claim_policy = self.claim_policy
                     request.state.public_view = view
                     # Connection released before rendering. No store restore/save,
                     # expiry sweep or authentication occurs on this anonymous view.
@@ -733,7 +740,8 @@ class DatabaseBoundaryMiddleware(BaseHTTPMiddleware):
             if self.member_reads and member_read(request):
                 from .security import SessionService
                 try:
-                    view = await self.backend.member_view(request.session["sid"], request.url.path)
+                    claim_options = {"live_claims": True} if self.claim_policy and self.claim_policy.requires_live() else {}
+                    view = await self.backend.member_view(request.session["sid"], request.url.path, **claim_options)
                 except StorageUnavailable as exc:
                     if exc.diagnostic_code != "state_uninitialized":
                         raise
@@ -741,7 +749,8 @@ class DatabaseBoundaryMiddleware(BaseHTTPMiddleware):
                     # The existing session validator checks expiry, revocation,
                     # account identity, bans, erasure and authoritative identity.
                     # Invalid sessions still use the original cleanup boundary.
-                    sessions = SessionService(view, self.session_max_age)
+                    view.claim_policy = self.claim_policy
+                    sessions = SessionService(view, self.session_max_age, claim_policy=self.claim_policy)
                     original_session = dict(request.session)
                     if sessions.current(request):
                         request.state.member_view = view

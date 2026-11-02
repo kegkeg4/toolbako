@@ -1,0 +1,45 @@
+{% set paid_refunds = paid_out_refunds|default({'ready': false, 'execute_ready': false, 'truncated': false, 'items': []}) %}
+<details id="paid-out-refund" class="finance-details">
+  <summary>振込後の購入者への返金を確認する</summary>
+  <p>合同会社ONEが用意する返金原資と元の決済を確認します。販売者からの回収は別に管理し、自動引落し・自動相殺はしません。</p>
+  {% if request is defined and request.query_params.get('paid_out_refund_saved') == '1' %}<p role="status">返金の確認内容を保存しました。購入者への返金完了は下の状態をご確認ください。</p>{% endif %}
+  {% if not paid_refunds.ready %}<p class="control-unavailable">対象の決済口座と取引台帳の接続を確認後に操作できます。</p>{% endif %}
+  {% if not paid_refunds.execute_ready %}<p>本番の返金実行は停止中です。表示や確認記録の保存だけでは返金されません。</p>{% endif %}
+  {% if paid_refunds.truncated %}<p role="alert">100件まで表示しています。残りも運営で確認してください。</p>{% endif %}
+  {% for item in paid_refunds['items'] %}
+  <article class="finance-flow-note">
+    <b>{{ item.tool_name }} · {{ item.order_id[:8] }} · ¥{{ '{:,}'.format(item.amount) }}</b>
+    {% set case = item.case %}
+    {% if not case and paid_refunds.ready %}
+    <form method="post" action="/admin/orders/{{ item.order_id }}/paid-out-refund/open">
+      <label>ONEの返金原資の管理番号<input name="reserve_id" required maxlength="100" autocomplete="off"></label>
+      <label>確保した返金原資（円）<input name="reserve_amount" type="number" min="{{ item.amount }}" required></label>
+      <label>別途回収として確認する金額（円）<input name="seller_recovery_amount" type="number" min="0" max="{{ item.amount }}" required></label>
+      <small>管理番号の記録に加え、Stripeの利用可能残高も照合します。口座番号や秘密情報を入力しないでください。</small>
+      <button>原資と振込済みの記録を照合して保存</button>
+    </form>
+    {% elif case %}
+    {% set labels = {'opened':'原資確認済み', 'submitting':'要求済み・結果確認中', 'unknown':'結果不明・再送禁止', 'held':'保留', 'awaiting_confirmation':'Stripeの結果確認待ち', 'awaiting_review':'通知受信済み・返金の照合待ち', 'buyer_refunded':'購入者への返金完了'} %}
+    <strong>{{ labels.get(case.status, '確認が必要です') }}</strong>
+    <small>購入者への返金確認額 ¥{{ '{:,}'.format(case.buyer_refund.confirmed|default(0)) }} ／ 販売者からの回収は別途対応</small>
+    {% if paid_refunds.ready and case.status != 'buyer_refunded' %}
+      {% set proposal = case.proposal or {} %}
+      {% if proposal and proposal.id not in case.consumed_proposals %}
+        <small>確認者 {{ proposal.proposed_by }} · 別の管理者の追加認証と30分以内の承認が必要です。</small>
+        {% if proposal.proposed_by != user.id and (proposal.action == 'reconcile' or paid_refunds.execute_ready) %}
+        <form method="post" action="/admin/orders/{{ item.order_id }}/paid-out-refund/approve">
+          <input type="hidden" name="proposal_id" value="{{ proposal.id }}">
+          <button data-confirm="元決済・原資・振込記録を再照合します。表示中の{{ '既存返金の確認' if proposal.action == 'reconcile' else 'テスト返金' }}を承認しますか？">別の管理者として{{ '既存返金の照合' if proposal.action == 'reconcile' else 'テスト返金' }}を承認</button>
+        </form>
+        {% endif %}
+      {% endif %}
+      {% if case.status in ['unknown', 'awaiting_confirmation', 'submitting', 'awaiting_review'] %}
+      <form method="post" action="/admin/orders/{{ item.order_id }}/paid-out-refund/propose"><input type="hidden" name="review_action" value="reconcile"><button>既存返金を照会する（再送しません）</button></form>
+      {% elif case.status == 'opened' and paid_refunds.execute_ready %}
+      <form method="post" action="/admin/orders/{{ item.order_id }}/paid-out-refund/propose"><input type="hidden" name="review_action" value="execute"><button>テスト返金の実行前確認を記録</button></form>
+      {% endif %}
+    {% endif %}
+    {% endif %}
+  </article>
+  {% else %}<p>振込後に双方のキャンセル合意を記録した、返金確認待ちの取引はありません。</p>{% endfor %}
+</details>

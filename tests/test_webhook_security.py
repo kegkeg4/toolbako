@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from app.config import Settings
 from app.data import DemoStore
 from app.webhooks import StripeWebhookService
+from test_finance import order as make_order
 
 
 @pytest.fixture
@@ -106,6 +107,47 @@ def test_invalid_json_encoding_or_depth_returns_client_error(webhook, raw):
     client, store, _ = webhook
     assert deliver(client, raw=raw).status_code == 400
     assert not store.processed_webhook_events
+
+
+@pytest.mark.parametrize("kind", ["refund.updated", "charge.refunded"])
+@pytest.mark.parametrize("marker", ["case", "empty_case", "metadata", "empty_metadata", "ledger", "paid", "paid_history", "unresolved"])
+def test_legacy_paid_out_refund_without_reconciler_is_not_applied_or_claimed(webhook, kind, marker):
+    client, store, _ = webhook
+    order = make_order(id="order-refund", payment_reference="pi_refund", refund_reference="re_refund")
+    store.orders.append(order)
+    metadata = {"order_id": order["id"]}
+    if marker in {"case", "empty_case"}: order["paid_out_refund_case"] = {} if marker == "case" else None
+    if marker in {"metadata", "empty_metadata", "unresolved"}: metadata["paid_out_case_id"] = "" if marker == "empty_metadata" else "case_one"
+    if marker == "ledger": metadata["ledger_id"] = ""
+    if marker in {"paid", "paid_history"}:
+        store.payouts.append({"finance_v2": True, "status": "paid" if marker == "paid" else "failed",
+            "paid_at": "known-paid-history" if marker == "paid_history" else None,
+            "allocations": [{"order_id": order["id"]}]})
+    if marker == "unresolved": store.orders.clear()
+    event = {"id": "evt_block_paid", "type": kind, "livemode": False, "data": {"object": {
+        "id": "re_refund" if kind == "refund.updated" else "ch_refund", "status": "succeeded",
+        "amount": 1000, "amount_refunded": 1000, "currency": "jpy", "payment_intent": "pi_refund", "metadata": metadata}}}
+    before = deepcopy((store.orders, store.payouts, store.notifications))
+    assert deliver(client, event).status_code == 503
+    assert (store.orders, store.payouts, store.notifications) == before
+    assert not store.processed_webhook_events
+
+
+@pytest.mark.parametrize("kind", ["refund.updated", "charge.refunded"])
+def test_legacy_unpaid_out_sandbox_refund_keeps_existing_behavior(webhook, kind):
+    client, store, service = webhook
+    order = make_order(id="order-refund", payment_reference="pi_refund", refund_reference="re_refund")
+    store.orders.append(order)
+    messages = []
+    async def capture(*args): messages.append(args); return True
+    service.email_sender = capture
+    event = {"id": "evt_generic_refund", "type": kind, "livemode": False, "data": {"object": {
+        "id": "re_refund" if kind == "refund.updated" else "ch_refund", "status": "succeeded", "amount": 1000,
+        "amount_refunded": 1000, "currency": "jpy", "payment_intent": "pi_refund", "metadata": {"order_id": order["id"]}}}}
+    assert deliver(client, event).status_code == 200
+    assert order["refund_status"] == "completed" and order["primary_refunded_amount"] == 1000
+    assert "paid_out_refund_case" not in order and event["id"] in store.processed_webhook_events
+    assert messages  # captured locally only, preserving legacy notification behavior
 
 
 def test_signature_with_non_ascii_input_is_rejected_without_exception(webhook):

@@ -30,10 +30,13 @@ class MemberView(PublicView):
         self._lock = RLock()
 
     def badges_for(self, username):
-        return self.public_badges.get(username) or {}
+        account = self.public_badges.get(username) or {}
+        if self.claim_policy:
+            return self.claim_policy.badges(account, self)
+        return account
 
 
-def member_projection(path):
+def member_projection(path, *, live_claims=False):
     """SQL fragments are application constants; identity is parameterized."""
     catalog = path in {'/', '/tools', '/favorites'}
     tools = """coalesce((select jsonb_agg(item)
@@ -47,6 +50,8 @@ def member_projection(path):
         'is_certified_creator',value->'is_certified_creator',
         'certified_creator_since',value->'certified_creator_since'))
         from jsonb_each(s.payload->'registered_users')), '{}'::jsonb)""" if catalog else "'{}'::jsonb"
+    if live_claims and catalog:
+        badges = badges.replace("jsonb_build_object(\n", "jsonb_build_object(\n'id',value->'id','is_banned',value->'is_banned',\n", 1)
     def own_rows(field, key='user_id', needed=True):
         if not needed:
             return "'[]'::jsonb"
@@ -65,6 +70,7 @@ def member_projection(path):
         *(["'orders',coalesce((select jsonb_agg(item) from jsonb_array_elements(s.payload->'orders') item where item->>'buyer_id'=u.uid and item->>'status'='completed'),'[]'::jsonb)"] if path == '/library' else []),
         "'tools'," + tools,
         "'public_badges'," + badges,
+        *(["'audit_logs',coalesce((select jsonb_agg(item) from jsonb_array_elements(s.payload->'audit_logs') item where item->>'action'='live.claims.reviewed'),'[]'::jsonb)"] if live_claims else []),
         "'likes',jsonb_build_object('__type__','set','value',coalesce((select jsonb_agg(item) from jsonb_array_elements(s.payload->'likes'->'value') item where item->'value'->>0=u.uid),'[]'::jsonb))" if path == '/favorites' else "'likes',jsonb_build_object('__type__','set','value','[]'::jsonb)",
         "'favorite_folders',case when u.uid is null then '{}'::jsonb else jsonb_build_object(u.uid,coalesce(s.payload->'favorite_folders'->u.uid,'[]'::jsonb)) end" if path == '/favorites' else "'favorite_folders','{}'::jsonb",
         "'favorite_assignments',coalesce((select jsonb_object_agg(key,value) from jsonb_each(s.payload->'favorite_assignments') where split_part(key,'␟',1)=u.uid),'{}'::jsonb)" if path == '/favorites' else "'favorite_assignments','{}'::jsonb",

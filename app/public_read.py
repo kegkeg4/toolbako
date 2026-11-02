@@ -1,5 +1,5 @@
 """Fresh, request-local anonymous views; never a financial/session cache."""
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .data import DemoStore
 
@@ -22,10 +22,15 @@ def anonymous_read(request):
 class PublicView:
     tools: list
     registered_users: dict
+    audit_logs: list = field(default_factory=list, repr=False)
+    claim_policy: object = field(default=None, repr=False)
 
     # Reuse the exact publication/filter/sort rules without a mutable DemoStore.
     list_tools = DemoStore.list_tools
     get_public = DemoStore.get_public
 
     def badges_for(self, username):
-        return self.registered_users.get(username) or {}
+        account = self.registered_users.get(username) or {}
+        if self.claim_policy:
+            return self.claim_policy.badges(account, self)
+        return account

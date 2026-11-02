@@ -104,7 +104,7 @@ def _server(conn, config, database, expected=None):
 
 
 def _schema_signature(conn):
-    """Capture columns, ACL/RLS, keys, indexes, triggers and immutable function."""
+    """Capture columns, ACL/RLS policies, keys, indexes and trigger functions."""
     tables = conn.execute("""select c.relname,c.relrowsecurity,c.relforcerowsecurity,
         coalesce(c.relacl,acldefault('r',c.relowner))::text
         from pg_class c join pg_namespace n on n.oid=c.relnamespace
@@ -121,6 +121,11 @@ def _schema_signature(conn):
             join pg_class c on c.oid=k.conrelid join pg_namespace n on n.oid=c.relnamespace
             where n.nspname='toolbako_runtime' order by c.relname,k.conname""",
         "select indexname,indexdef from pg_indexes where schemaname='toolbako_runtime' order by indexname",
+        """select c.relname,p.polname,p.polpermissive,p.polcmd,p.polroles::text,
+            pg_get_expr(p.polqual,p.polrelid),pg_get_expr(p.polwithcheck,p.polrelid)
+            from pg_policy p join pg_class c on c.oid=p.polrelid
+            join pg_namespace n on n.oid=c.relnamespace
+            where n.nspname='toolbako_runtime' order by c.relname,p.polname""",
         """select c.relname,t.tgname,t.tgenabled,pg_get_triggerdef(t.oid)
             from pg_trigger t join pg_class c on c.oid=t.tgrelid join pg_namespace n on n.oid=c.relnamespace
             where n.nspname='toolbako_runtime' and not t.tgisinternal order by c.relname,t.tgname""",
