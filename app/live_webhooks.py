@@ -20,6 +20,7 @@ from .finance import FinanceConflict
 from .live_setup_plan import CONNECT_EVENTS, PLATFORM_EVENTS, STRIPE_API_VERSION
 from .payment_source_proof import payment_source_proof
 from .request_limits import WEBHOOK_BODY_LIMIT
+from .stripe_bank_proof import bank_payout_proof
 from .webhooks import StripeWebhookService
 
 
@@ -107,18 +108,12 @@ class LiveStripeWebhookService(StripeWebhookService):
 
     def _validate_payout(self, obj, state, event):
         payout = state["payout"]
-        _require(isinstance(obj, dict) and obj.get("object") == "payout"
-                 and _reference(obj.get("id"), "po")
-                 and (not payout.get("provider_payout_id") or obj["id"] == payout["provider_payout_id"])
-                 and payout.get("account_id") == event["account"]
-                 and obj.get("livemode") is True and obj.get("currency") == "jpy"
-                 and _amount(obj.get("amount"), payout.get("net_amount"))
-                 and isinstance(obj.get("metadata"), dict) and obj["metadata"].get("payout_id") == payout["id"]
-                 and obj.get("status") in {"pending", "in_transit", "paid", "failed", "canceled"}
-                 and obj.get("automatic") is False and obj.get("method") == "standard"
-                 and obj.get("type") == "bank_account")
-        if obj.get("arrival_date") is not None:
-            _require(type(obj["arrival_date"]) is int and 0 < obj["arrival_date"] <= 253402214400)
+        try:
+            bank_payout_proof(obj, expected_mode="live", account_id=payout.get("account_id"),
+                response_account_id=event["account"], amount=payout.get("net_amount"), currency="jpy",
+                metadata={"payout_id": payout["id"]}, payout_id=payout.get("provider_payout_id") or None)
+        except FinanceConflict:
+            raise HTTPException(400, "live notification does not match") from None
 
     async def _source_payment(self, state, payment_id, *, dispute=False):
         _require(_reference(payment_id, "pi"))

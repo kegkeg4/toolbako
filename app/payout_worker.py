@@ -7,9 +7,11 @@ import argparse
 import asyncio
 from datetime import datetime, timezone
 
+from .database import content_hash
 from .finance import FinanceConflict, receipts
 from .integrations import StripeIntegration, StripeOutcomeUnknown
 from .payment_source_proof import payment_source_proof
+from .stripe_bank_proof import allocation_transfer_proof, bank_payout_proof
 
 
 def sandbox_payouts_ready(settings):
@@ -33,6 +35,20 @@ def verify_bank_payout(payout, remote):
             or remote.get("currency") != "jpy" or remote.get("amount") != payout["net_amount"]
             or (remote.get("metadata") or {}).get("payout_id") != payout["id"]):
         raise FinanceConflict("銀行振込の参照・金額が一致しません")
+
+
+def _sandbox_bank_proof(payout, remote):
+    return bank_payout_proof(remote, expected_mode="test", account_id=payout["account_id"],
+        response_account_id=payout["account_id"], amount=payout["net_amount"], currency="jpy",
+        metadata={"payout_id": payout["id"]}, payout_id=payout.get("provider_payout_id"))
+
+
+def _sandbox_transfer_proof(payout, allocation, remote):
+    return allocation_transfer_proof(remote, expected_mode="test", account_id=payout["account_id"],
+        source_charge=allocation.get("source_charge"), amount=allocation["transfer_amount"], currency="jpy",
+        transfer_group=f"order-{allocation['order_id']}",
+        metadata={"payout_id": payout["id"], "allocation_id": allocation["id"]},
+        transfer_id=allocation.get("transfer_id"))
 
 
 def apply_bank_status(payout, remote):
@@ -91,6 +107,7 @@ async def run_step(backend, store, stripe, settings, *, payout_id=None, at=None)
 async def _step(backend, store, stripe, payout):
     if payout["status"] == "bank_pending":
         remote = await stripe.retrieve_payout(payout["provider_payout_id"], payout["account_id"])
+        _sandbox_bank_proof(payout, remote)
         apply_bank_status(payout, remote)
         return
     # Recover a crash between Stripe's successful response and snapshot commit.
@@ -99,9 +116,17 @@ async def _step(backend, store, stripe, payout):
     if bank_attempt:
         if bank_attempt["status"] != "succeeded":
             raise StripeOutcomeUnknown(f"bank-payout-{payout['id']}")
+        # Payout has no account field: a cached response needs the original
+        # authenticated request's account, not only matching response metadata.
+        operation = await backend.operation_details(f"bank-payout-{payout['id']}")
+        expected_request = {"amount": str(payout["net_amount"]), "currency": "jpy", "method": "standard",
+                            "metadata[payout_id]": payout["id"], "_stripe_account": payout["account_id"]}
+        if (not operation or operation["status"] != "succeeded" or operation["endpoint"] != "payouts"
+                or operation["request_hash"] != content_hash(expected_request)):
+            raise FinanceConflict("銀行振込の元要求・口座を確認できません")
         remote = bank_attempt["response"]
-        payout["provider_payout_id"] = remote["id"]
-        verify_bank_payout(payout, remote)
+        proof = _sandbox_bank_proof(payout, remote)
+        payout["provider_payout_id"] = proof["id"]
         payout["status"] = "bank_pending"
         return
     for allocation in payout["allocations"]:
@@ -112,10 +137,7 @@ async def _step(backend, store, stripe, payout):
             if attempt["status"] != "succeeded":
                 raise StripeOutcomeUnknown(f"allocation-{allocation['id']}")
             result = attempt["response"]
-            if (not str(result.get("id", "")).startswith("tr_") or result.get("amount") != allocation["transfer_amount"]
-                    or result.get("currency") != "jpy" or result.get("destination") != payout["account_id"]
-                    or not allocation.get("source_charge") or result.get("source_transaction") != allocation["source_charge"]):
-                raise FinanceConflict("分配結果の復元に失敗しました")
+            _sandbox_transfer_proof(payout, allocation, result)
             allocation["transfer_id"] = result["id"]
     # Cancellation intent survives review/recovery. Never resume a bank payout
     # just because an uncertain transfer was successfully reconciled.
@@ -160,10 +182,7 @@ async def _step(backend, store, stripe, payout):
         payout["status"] = "transferring"
         allocation["source_charge"] = charge["id"]
         result = await stripe.create_allocation_transfer(payout, allocation, charge["id"])
-        if (not str(result.get("id", "")).startswith("tr_") or result.get("amount") != allocation["transfer_amount"]
-                or result.get("currency") != "jpy" or result.get("destination") != payout["account_id"]
-                or result.get("source_transaction") != charge["id"]):
-            raise FinanceConflict("Stripe分配結果が一致しません")
+        _sandbox_transfer_proof(payout, allocation, result)
         allocation["transfer_id"] = result["id"]
         return  # One financial mutation per invocation, durable checkpoint.
 
@@ -180,8 +199,8 @@ async def _step(backend, store, stripe, payout):
         payout["status"] = "awaiting_funds"
         return
     result = await stripe.create_bank_payout(payout)
-    payout["provider_payout_id"] = result["id"]
-    verify_bank_payout(payout, result)
+    proof = _sandbox_bank_proof(payout, result)
+    payout["provider_payout_id"] = proof["id"]
     payout["status"] = "bank_pending"
     # Only a subsequent signed event or authenticated GET confirms settlement.
     if type(result.get("arrival_date")) is int:

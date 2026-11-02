@@ -75,7 +75,11 @@ class Provider:
             self.transfers += 1
             if self.timeout_transfer:
                 raise httpx.ReadTimeout("test-only simulated timeout", request=request)
-            return httpx.Response(200, json={"id": "tr_finance", "amount": int(data["amount"]), "currency": "jpy", "destination": data["destination"], "source_transaction": data["source_transaction"]})
+            return httpx.Response(200, json={"id": "tr_finance", "object": "transfer", "livemode": False,
+                "amount": int(data["amount"]), "currency": "jpy", "destination": data["destination"],
+                "source_transaction": data["source_transaction"], "transfer_group": data["transfer_group"],
+                "metadata": {"payout_id": data["metadata[payout_id]"], "allocation_id": data["metadata[allocation_id]"]},
+                "reversed": False, "amount_reversed": 0})
         if path == "/v1/balance":
             assert request.headers["Stripe-Account"] == "acct_seller"
             return httpx.Response(200, json={"object": "balance", "available": [{"currency": "jpy", "amount": self.balance}]})
@@ -95,7 +99,9 @@ class Provider:
         raise AssertionError(f"Unexpected provider request: {request.method} {path}")
 
     def bank_object(self):
-        return {"id": "po_finance", "currency": "jpy", "amount": 690, "metadata": self.payout_metadata, "status": self.payout_status}
+        return {"id": "po_finance", "object": "payout", "livemode": False, "currency": "jpy", "amount": 690,
+                "metadata": self.payout_metadata, "status": self.payout_status,
+                "automatic": False, "method": "standard", "type": "bank_account"}
 
 
 @pytest.fixture

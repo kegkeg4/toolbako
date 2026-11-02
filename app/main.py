@@ -60,7 +60,7 @@ from .reconciliation import propose_recovery, approve_recovery
 from .payout_recovery import propose_failed_payout, approve_failed_payout
 from .payment_reconciliation import KINDS as PAYMENT_RECOVERY_KINDS, payment_recovery_inventory, propose_payment_recovery, approve_payment_recovery
 from .refund_resumption import refund_resumption_inventory, propose_refund_resumption, approve_refund_resumption
-from .deployment_check import configuration_checks
+from .deployment_check import deployment_database_check
 from .supabase_api import supabase_headers
 from .object_storage import SupabaseObjectStorage, ObjectStorageError, storage_ready, delivery_upload_available
 from .operations import operation_summary
@@ -3044,8 +3044,7 @@ async def readiness():
 async def deployment_health():
     # Allows a secure DB/Auth staging build to start before money movement is
     # approved. /readyz remains the independent, strict public launch verdict.
-    configured = all(configuration_checks(settings).values())
-    connected = configured and bool(database_store and await database_store.probe())
+    connected = await deployment_database_check(settings, database_store)
     return JSONResponse({"status": "ok" if connected else "unavailable", "live_payments_enabled": False},
                         status_code=200 if connected else 503, headers={"Cache-Control": "no-store"})
 

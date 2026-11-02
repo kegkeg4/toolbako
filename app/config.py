@@ -36,6 +36,9 @@ class Settings:
     trust_proxy_headers: bool = os.getenv("TRUST_PROXY_HEADERS", "false").lower() in {"1", "true", "yes"}
     trusted_proxy_cidrs: tuple[str, ...] = tuple(x.strip() for x in os.getenv("TRUSTED_PROXY_CIDRS", "").split(",") if x.strip())
     stripe_secret_key: str = os.getenv("STRIPE_SECRET_KEY", "")
+    # Exact opt-in only. This permits connection verification of a separately
+    # bound live dataset, never Stripe mutations or payment activation.
+    stripe_connection_mode: str = os.getenv("STRIPE_CONNECTION_MODE", "sandbox")
     # Optional until a separately reviewed dataset is bound. Supplying these
     # never enables live writes or automatically rebinds existing test data.
     stripe_platform_account_id: str = os.getenv("STRIPE_PLATFORM_ACCOUNT_ID", "").strip()
@@ -129,7 +132,7 @@ class Settings:
 
     @property
     def stripe_ready(self) -> bool:
-        return bool(self.stripe_secret_key and self.stripe_webhook_secret and self.stripe_connect_webhook_secret and self.stripe_connect_client_id)
+        return self.stripe_connection_mode == "sandbox" and bool(self.stripe_secret_key and self.stripe_webhook_secret and self.stripe_connect_webhook_secret and self.stripe_connect_client_id)
 
     @property
     def email_ready(self) -> bool:

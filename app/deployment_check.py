@@ -9,16 +9,113 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from urllib.parse import urlparse
 
 import httpx
 
 from .config import Settings
-from .database import PostgresStateStore
+from .database import PostgresStateStore, SCHEMA_VERSION
+from .financial_scope import configured_scope, validate_binding, SCOPE_OPERATION_ID
 from .supabase_api import supabase_headers
 
 logger = logging.getLogger(__name__)
+
+# Initial connection-only cutover is deliberately limited to the separately
+# approved runtime DB. Auth and file storage remain on the original project.
+# Expanding these targets needs its own reviewed cutover, not a key swap.
+LIVE_DATABASE_PROJECT = "xijdnqnsuhuciqyygnkg"
+LIVE_AUTH_STORAGE_URL = "https://xnjzgfaasbemffgorvnj.supabase.co"
+LIVE_PLATFORM_ACCOUNT = "acct_1Ty4WnIogL39waUY"
+LIVE_DATABASE_ENDPOINTS = {
+    (f"db.{LIVE_DATABASE_PROJECT}.supabase.co", "postgres"),
+    ("aws-0-ap-northeast-1.pooler.supabase.com", f"postgres.{LIVE_DATABASE_PROJECT}"),
+}
+
+
+def _live_database_config(settings: Settings) -> dict:
+    """Reject implicit/rerouted targets. Never return this dict in diagnostics."""
+    from psycopg.conninfo import conninfo_to_dict
+    config = conninfo_to_dict(settings.database_url)
+    allowed = {"host", "port", "dbname", "user", "password", "sslmode", "sslrootcert"}
+    if (set(config) - allowed or any(name.startswith("PG") for name in os.environ)
+            or (config.get("host"), config.get("user")) not in LIVE_DATABASE_ENDPOINTS
+            or config.get("port") != "5432" or config.get("dbname") != "postgres"
+            or config.get("sslmode") != "verify-full" or not config.get("password")):
+        raise ValueError("connection_stage_target_unverified")
+    return config
+
+
+def _live_configuration_verified(settings: Settings) -> bool:
+    try:
+        scope = configured_scope(settings)
+        return bool(
+            settings.stripe_connection_mode == "live_read_only"
+            and re.fullmatch(r"rk_live_[A-Za-z0-9]+", settings.stripe_secret_key)
+            and scope is not None and scope.mode == "live"
+            and scope.platform_account == LIVE_PLATFORM_ACCOUNT
+            and settings.stripe_charge_mode == "separate"
+            and settings.supabase_url == LIVE_AUTH_STORAGE_URL
+            and settings.storage_provider == "supabase"
+            and settings.supabase_private_bucket and settings.supabase_image_bucket
+            and _live_database_config(settings)
+        )
+    except Exception:
+        # Parsing can quote credentials. No exception text, DSN, or chaining.
+        return False
+
+
+async def _live_database_checks(settings: Settings, backend) -> dict[str, bool]:
+    """One fresh, read-only session proves schema/snapshot and exact binding.
+
+    No request() boundary: it could initialize an absent marketplace snapshot.
+    No Stripe call: this is also used by the operational health endpoint.
+    """
+    result = {"database_schema": False, "database_target_verified": False,
+              "financial_scope_bound": False}
+    try:
+        if not _live_configuration_verified(settings) or backend.dsn != settings.database_url:
+            return result
+        config = _live_database_config(settings)
+        scope = configured_scope(settings)
+        async with asyncio.timeout(7):
+            async with await backend.connect() as conn:
+                if (conn.info.host != config["host"] or conn.info.user != config["user"]
+                        or conn.info.port != 5432 or conn.info.dbname != "postgres"
+                        or conn.pgconn.ssl_in_use is not True):
+                    return result
+                result["database_target_verified"] = True
+                await conn.execute("set default_transaction_read_only = on")
+                row = await (await conn.execute(
+                    "select v.version,s.revision,o.endpoint,o.request_hash,o.status,o.response "
+                    "from toolbako_runtime.schema_version v "
+                    "left join toolbako_runtime.marketplace_state s on s.singleton "
+                    "left join toolbako_runtime.stripe_operations o on o.operation_id=%s "
+                    "where v.singleton", (SCOPE_OPERATION_ID,),
+                )).fetchone()
+                if (not row or row[0] != SCHEMA_VERSION or type(row[1]) is not int or row[1] < 0):
+                    return result
+                result["database_schema"] = True
+                validate_binding(row[2:], scope)
+                result["financial_scope_bound"] = True
+    except Exception:
+        # Probe failure is a false verdict, never an automatic bind/retry/write.
+        pass
+    return result
+
+
+async def deployment_database_check(settings: Settings, backend) -> bool:
+    """Operational DB health, not provider readiness or approval to sell.
+
+    The explicitly selected live connection stage additionally checks the
+    current target/binding. Stripe outages and 429s are not liveness failures.
+    """
+    if backend is None or not all(configuration_checks(settings).values()):
+        return False
+    if settings.stripe_connection_mode == "live_read_only":
+        return all((await _live_database_checks(settings, backend)).values())
+    return bool(await backend.probe())
 
 
 def _auth_error_category(response: httpx.Response) -> str:
@@ -115,7 +212,7 @@ def database_configuration_diagnostics(settings: Settings) -> dict[str, bool]:
 def configuration_checks(settings: Settings) -> dict[str, bool]:
     endpoint = urlparse(settings.supabase_url)
     site = urlparse(settings.site_base_url)
-    return {
+    results = {
         "server_environment": settings.environment in {"staging", "production"},
         "demo_disabled": not settings.demo_mode,
         "https_site": site.scheme == "https" and bool(site.hostname)
@@ -138,19 +235,50 @@ def configuration_checks(settings: Settings) -> dict[str, bool]:
         # Live money movement remains a separately reviewed, code-blocked step.
         "no_live_stripe_key": not settings.stripe_secret_key.startswith(("sk_live_", "rk_live_")),
     }
+    if settings.stripe_connection_mode == "live_read_only":
+        # Do not mislabel a live key as absent. This static configuration flag
+        # alone is never used as connection or scope evidence.
+        del results["no_live_stripe_key"]
+        results["live_read_only_configuration"] = _live_configuration_verified(settings)
+    else:
+        results["stripe_connection_mode"] = settings.stripe_connection_mode == "sandbox"
+    return results
 
 
 async def connection_checks(settings: Settings) -> dict[str, bool]:
     results = configuration_checks(settings)
     results.update(database_schema=False, auth_api=False, profile_api=False,
                    badge_api=False, anonymous_profiles_denied=False)
+    live_stage = settings.stripe_connection_mode == "live_read_only"
+    if live_stage:
+        results.update(database_target_verified=False, financial_scope_bound=False,
+                       live_stripe_connection_verified=False)
     if not all(configuration_checks(settings).values()):
         return results
 
     # Apply production TLS requirements in staging too. probe is read-only and
     # checks the required runtime schema version; it never auto-migrates/seeds.
     backend = PostgresStateStore(settings.database_url, production=True)
-    results["database_schema"] = await backend.probe()
+    if live_stage:
+        results.update(await _live_database_checks(settings, backend))
+        if not all(results[name] for name in ("database_schema", "database_target_verified", "financial_scope_bound")):
+            return results
+        from .stripe_live_connection_check import inspect_connection
+        try:
+            # Provider evidence is pre-deploy only, never on every health poll.
+            # Uses the ACTIVE key: pending-key success cannot prove this runtime.
+            async with asyncio.timeout(25):
+                proof = await inspect_connection(settings.stripe_secret_key, settings.stripe_platform_account_id)
+            results["live_stripe_connection_verified"] = (
+                proof.get("connection_verified") is True and proof.get("platform_matches") is True
+                and proof.get("mode") == "live" and proof.get("read_only") is True
+                and proof.get("payments_activated") is False)
+        except Exception:
+            pass
+        if not results["live_stripe_connection_verified"]:
+            return results
+    else:
+        results["database_schema"] = await backend.probe()
     anon_headers = supabase_headers(settings.supabase_anon_key)
     server_headers = supabase_headers(settings.supabase_service_role_key)
     profile_columns = (
@@ -223,7 +351,7 @@ def main() -> int:
     print(json.dumps({"connection_preflight_passed": passed, "checks": results,
                       "database_configuration": diagnostics,
                       "live_payments_enabled": False,
-                      "notice": "Read-only DB/Auth checks only; not launch approval."}))
+                      "notice": "Read-only connection checks only; not launch or payment approval."}))
     return 0 if passed else 1
 
 
