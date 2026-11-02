@@ -211,10 +211,12 @@ def test_only_exact_reviewed_endpoint_role_pairs_are_accepted(host, user):
 
 class IdentityConnection:
     def __init__(self, **updates):
+        ssl_in_use = updates.pop("ssl_in_use", True)
         values = dict(host=transfer.TARGET_SESSION_HOST, user=transfer.TARGET_SESSION_USER,
-                      port=5432, dbname="postgres", ssl_in_use=True)
+                      port=5432, dbname="postgres")
         values.update(updates)
         self.info = SimpleNamespace(**values)
+        self.pgconn = SimpleNamespace(ssl_in_use=ssl_in_use)
         self.queries = []
 
     def execute(self, query):
@@ -243,6 +245,25 @@ def test_actual_connection_identity_rejects_endpoint_or_project_drift_before_sql
     with pytest.raises(transfer.TransferError, match="target_connection_mismatch"):
         transfer._connection_identity(conn)
     assert not conn.queries
+
+
+def test_real_psycopg_transport_api_rejects_unencrypted_connection_before_identity_sql(target):
+    with local._connect(target._config, target.database_name) as conn:
+        # Exercise the installed psycopg/libpq object, not a made-up SSL field
+        # on ConnectionInfo. The owned localhost test connection disables TLS.
+        assert isinstance(conn, psycopg.Connection)
+        assert isinstance(conn.info, psycopg.ConnectionInfo)
+        assert isinstance(conn.pgconn, psycopg.pq.PGconn)
+        assert type(conn.pgconn.ssl_in_use) is bool
+        assert conn.pgconn.ssl_in_use is False
+
+        # Supply only reviewed endpoint metadata to reach the transport guard;
+        # the transport remains the actual unencrypted local PG connection.
+        probe = IdentityConnection()
+        probe.pgconn = conn.pgconn
+        with pytest.raises(transfer.TransferError, match="target_connection_mismatch"):
+            transfer._connection_identity(probe)
+        assert not probe.queries
 
 
 def test_session_pooler_identity_cannot_reuse_old_direct_fingerprint():

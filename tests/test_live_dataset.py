@@ -2,6 +2,8 @@
 from copy import deepcopy
 from datetime import datetime, timezone
 import json
+from pathlib import Path
+import re
 
 import pytest
 
@@ -54,6 +56,83 @@ def test_all_persistence_fields_classified_and_type_roundtrip_is_preserved():
     assert decode_value(json.loads(json.dumps(encode_value(candidate)))) == candidate
     assert isinstance(candidate["tools"][0]["created_at"], datetime)
     assert isinstance(candidate["likes"], set) and all(isinstance(pair, tuple) for pair in candidate["likes"])
+
+
+def test_runtime_store_collection_contract_and_transfer_nda_history_are_preserved():
+    from app.data import DemoStore
+
+    runtime = DemoStore(seed=False)
+    source = {field: deepcopy(getattr(runtime, field)) for field in STATE_FIELDS}
+    expected = ld.empty_state()
+    assert {field: type(value) for field, value in source.items()} == {
+        field: type(value) for field, value in expected.items()}
+    # Use the actual list contract, including a nonempty historical acceptance.
+    # It is acknowledged/excluded, never converted or removed from the source.
+    source["transfer_nda_acceptances"].append({
+        "inquiry_id": "synthetic-inquiry", "user_id": "synthetic-user",
+        "version": "synthetic-version", "accepted_at": datetime(2026, 1, 1, tzinfo=timezone.utc)})
+    _, manifest = artificial_fixture()
+    manifest["users"] = {}
+    manifest["tools"] = {}
+    refresh(source, manifest)
+    original = deepcopy(source)
+    result = ld.prepare_candidate(source, manifest)
+    assert source == original
+    assert decode_value(json.loads(json.dumps(encode_value(source)))) == original
+    assert type(result.candidate["transfer_nda_acceptances"]) is list
+    assert result.candidate["transfer_nda_acceptances"] == []
+    assert result.report["counts"]["transfer_nda_acceptances"] == {
+        "source": 1, "candidate": 0, "excluded": 1}
+
+
+def test_transfer_nda_wrong_collection_type_is_rejected_without_coercion():
+    state, manifest = artificial_fixture()
+    state["transfer_nda_acceptances"] = set()
+    refresh(state, manifest)
+    before = deepcopy(state)
+    with pytest.raises(ld.DatasetValidationError, match="invalid_collection_type"):
+        ld.prepare_candidate(state, manifest)
+    assert state == before and type(state["transfer_nda_acceptances"]) is set
+
+
+def test_runtime_created_product_without_thumbnail_keeps_none_and_defaults():
+    from app.data import DemoStore
+    from app.product_disclosures import record_rights
+
+    state, manifest = artificial_fixture()
+    original_tool = state["tools"][0]
+    runtime = DemoStore(seed=False)
+    # main.tool_create passes save_thumbnail(None, slug) == None to this
+    # existing creation method; let the method supply its actual defaults.
+    tool = runtime.create({key: deepcopy(original_tool[key]) for key in (
+        "slug", "name", "tagline", "description_md", "author_id", "author_username",
+        "author_name", "price", "price_type", "distribution", "fulfillment_type",
+        "instant_artifact")} | {"thumbnail_url": None})
+    record_rights(runtime, tool, state["registered_users"]["sample_seller"])
+    tool["safety_scan"] = deepcopy(original_tool["safety_scan"])
+    state["tools"] = runtime.tools
+    state["legal_consents"] = runtime.legal_consents
+    refresh(state, manifest, review=True)
+    before = deepcopy(state)
+    result = ld.prepare_candidate(state, manifest)
+    assert state == before
+    assert result.candidate["tools"][0] == before["tools"][0] | {"like_count": 1}
+    assert result.candidate["tools"][0]["thumbnail_url"] is None
+    assert result.candidate["tools"][0]["rights_confirmation"] == tool["rights_confirmation"]
+
+
+@pytest.mark.parametrize("field,value", [
+    ("name", None), ("author_email", None), ("demo_url", None),
+    ("thumbnail_url", 0), ("thumbnail_url", {}), ("thumbnail_url", []),
+])
+def test_optional_thumbnail_does_not_relax_other_text_or_thumbnail_types(field, value):
+    state, manifest = artificial_fixture()
+    state["tools"][0][field] = value
+    refresh(state, manifest, review=True)
+    before = deepcopy(state)
+    with pytest.raises(ld.DatasetValidationError):
+        ld.prepare_candidate(state, manifest)
+    assert state == before
 
 
 @pytest.mark.parametrize("field", STATE_FIELDS)
@@ -136,6 +215,50 @@ def test_identity_provenance_is_not_inferred_from_profile_flag(fault):
     refresh(state, manifest)
     before = deepcopy(state)
     with pytest.raises(ld.DatasetValidationError):
+        ld.prepare_candidate(state, manifest)
+    assert state == before
+
+
+def test_supabase_profile_default_is_preserved_without_granting_identity():
+    root = Path(__file__).resolve().parents[1]
+    defaults = set()
+    for filename in ("schema.sql", "bootstrap_runtime_auth.sql"):
+        schema = (root / "supabase" / filename).read_text(encoding="utf-8")
+        match = re.search(r"identity_status\s+text\s+not\s+null\s+default\s+'([^']+)'", schema)
+        assert match is not None
+        defaults.add(match.group(1))
+    assert defaults == {"unverified"}
+
+    state, manifest = artificial_fixture()
+    for row in state["registered_users"].values():
+        row.update(is_verified=False, identity_status=next(iter(defaults)))
+    refresh(state, manifest)
+    before, before_manifest = deepcopy(state), deepcopy(manifest)
+    result = ld.prepare_candidate(state, manifest)
+    assert result.candidate["registered_users"] == before["registered_users"]
+    assert all(not row["is_verified"] and row["identity_status"] == "unverified"
+               for row in result.candidate["registered_users"].values())
+    assert result.candidate["identity_applications"] == {}
+    for uid, security in before["security_settings"].items():
+        assert result.candidate["security_settings"][uid]["two_factor"] == security["two_factor"]
+    assert state == before and manifest == before_manifest
+
+
+@pytest.mark.parametrize("status,verified,with_proof", [
+    ("unverified", True, False), ("unverified", True, True),
+    ("unverified", False, True), ("verified", False, False),
+    ("pending", False, False), ("rejected", False, False),
+])
+def test_unverified_default_does_not_allow_contradictions_or_other_statuses(status, verified, with_proof):
+    state, manifest = artificial_fixture()
+    state["registered_users"]["sample_seller"].update(identity_status=status, is_verified=verified)
+    if with_proof:
+        manifest["users"]["sample_seller"]["identity_evidence"] = {
+            "mode": "live", "platform_account": manifest["target"]["platform_account"],
+            "evidence_sha256": "a" * 64}
+    refresh(state, manifest)
+    before = deepcopy(state)
+    with pytest.raises(ld.DatasetValidationError, match="identity_provenance_required"):
         ld.prepare_candidate(state, manifest)
     assert state == before
 

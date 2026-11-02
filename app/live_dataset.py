@@ -18,9 +18,9 @@ from .listing_review import REVIEW_CHECKS, content_fingerprint
 from .persistence import STATE_FIELDS
 
 
-LIST_FIELDS = frozenset("tools reports orders conversations transfer_inquiries reviews buyer_reviews notifications requests payouts subscriptions coupons support_cases audit_logs account_deletions legal_consents".split())
+LIST_FIELDS = frozenset("tools reports orders conversations transfer_inquiries transfer_nda_acceptances reviews buyer_reviews notifications requests payouts subscriptions coupons support_cases audit_logs account_deletions legal_consents".split())
 DICT_FIELDS = frozenset("favorite_folders favorite_assignments notification_preferences identity_applications nda_records security_settings registered_users connected_accounts account_sessions".split())
-SET_FIELDS = frozenset("likes transfer_nda_acceptances blocks update_followers creator_follows reopen_waiters nda_signatures coupon_redemptions processed_webhook_events".split())
+SET_FIELDS = frozenset("likes blocks update_followers creator_follows reopen_waiters nda_signatures coupon_redemptions processed_webhook_events".split())
 CARRY_FIELDS = frozenset("tools registered_users likes favorite_folders favorite_assignments notification_preferences blocks update_followers creator_follows reopen_waiters security_settings legal_consents".split())
 MANUAL_FIELDS = frozenset("reports conversations requests support_cases account_deletions coupons nda_signatures nda_records".split())
 ARCHIVE_FIELDS = frozenset("orders payouts subscriptions connected_accounts identity_applications processed_webhook_events coupon_redemptions reviews buyer_reviews transfer_inquiries transfer_nda_acceptances notifications account_sessions audit_logs".split())
@@ -179,7 +179,9 @@ def _user(username, row, evidence, target):
     _require(evidence["record_sha256"] == value_hash(row) and evidence["auth_user_id"] == row["id"], "provenance_mismatch")
     verified = row.get("is_verified", False)
     status = row.get("identity_status", "verified" if verified else "not_started")
-    _require(status in {"verified", "not_started"} and verified == (status == "verified"), "identity_provenance_required")
+    # public.profiles defaults to "unverified"; keep that explicit status
+    # unchanged. It grants no identity claim and still requires a false flag.
+    _require(status in {"verified", "not_started", "unverified"} and verified == (status == "verified"), "identity_provenance_required")
     proof = evidence["identity_evidence"]
     if verified:
         _keys(proof, {"mode", "platform_account", "evidence_sha256"}, {"mode", "platform_account", "evidence_sha256"})
@@ -229,6 +231,9 @@ def _tool(row, evidence, users):
     _uuid(row["id"])
     for key, value in row.items():
         if key in TOOL_TEXT:
+            # save_thumbnail() returns None when no product image was chosen.
+            if key == "thumbnail_url" and value is None:
+                continue
             _text(value)
         elif key in TOOL_INTS:
             _require(type(value) is int and value >= 0, "invalid_type")

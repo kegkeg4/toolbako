@@ -78,7 +78,7 @@ def target_config(dsn, password):
 
 def _connection_identity(conn):
     _require((conn.info.host, conn.info.user) in _TARGET_ENDPOINTS and conn.info.port == 5432
-             and conn.info.dbname == "postgres" and conn.info.ssl_in_use,
+             and conn.info.dbname == "postgres" and conn.pgconn.ssl_in_use is True,
              "target_connection_mismatch")
     row = conn.execute("select current_database(),(select oid::bigint from pg_database where datname=current_database())").fetchone()
     _require(row and row[0] == "postgres" and type(row[1]) is int, "target_database_mismatch")
