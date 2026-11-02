@@ -64,8 +64,13 @@ class Provider:
             return httpx.Response(200, json={"id": "acct_seller", "country": "JP", "default_currency": "jpy", "payouts_enabled": True,
                 "details_submitted": True, "capabilities": {"transfers": "active"}, "settings": {"payouts": {"schedule": {"interval": self.interval}}}})
         if path == "/v1/payment_intents/pi_finance":
-            return httpx.Response(200, json={"id": "pi_finance", "livemode": False, "status": "succeeded", "currency": "jpy", "amount_received": 1000,
-                "transfer_group": "order-order_finance", "latest_charge": {"id": "ch_finance", "livemode": False, "payment_intent": "pi_finance", "paid": True, "amount_refunded": 1000 if self.refunded else 0, "disputed": False}})
+            return httpx.Response(200, json={"id": "pi_finance", "object": "payment_intent", "livemode": False,
+                "status": "succeeded", "currency": "jpy", "amount": 1000, "amount_received": 1000,
+                "transfer_group": "order-order_finance", "latest_charge": {
+                    "id": "ch_finance", "object": "charge", "livemode": False, "payment_intent": "pi_finance",
+                    "paid": True, "captured": True, "status": "succeeded", "currency": "jpy",
+                    "amount": 1000, "amount_captured": 1000,
+                    "amount_refunded": 1000 if self.refunded else 0, "disputed": False}})
         if path == "/v1/transfers":
             self.transfers += 1
             if self.timeout_transfer:
