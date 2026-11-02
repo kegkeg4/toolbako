@@ -1442,10 +1442,16 @@ async def seller_payment_settings(request: Request):
     if account and settings.stripe_ready and not settings.demo_mode:
         try:
             remote = await stripe.retrieve_account(account["account_id"])
-            account.update({"charges_enabled":bool(remote.get("charges_enabled")),"payouts_enabled":bool(remote.get("payouts_enabled")),"details_submitted":bool(remote.get("details_submitted"))})
+            from .connect_status import account_status
+            account.update(account_status(remote, account["account_id"]))
+            account.pop("sync_error", None)
         except RuntimeError:
             account["sync_error"] = True
-    return templates.TemplateResponse(request,"seller_payments.html",context(request,account=account,stripe_ready=settings.stripe_ready))
+    return templates.TemplateResponse(request,"seller_payments.html",context(
+        request, account=account, stripe_ready=settings.stripe_ready,
+        onboarding_refresh=request.query_params.get("refresh") == "1",
+        onboarding_returned=request.query_params.get("returned") == "1",
+    ))
 
 
 @app.post("/seller/payments/onboard")
