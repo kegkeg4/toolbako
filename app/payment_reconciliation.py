@@ -13,6 +13,7 @@ from .database import content_hash
 from .finance import FinanceConflict, RESERVED
 from .payment_state import apply_checkout_payment, apply_checkout_expiry, apply_refund_payment
 from .payout_worker import sandbox_payouts_ready
+from .payment_source_proof import payment_source_proof
 
 
 KINDS = {"checkout": "購入決済", "extra": "追加支払い", "refund": "購入分の返金", "refund_extra": "追加支払いの返金"}
@@ -84,30 +85,16 @@ async def sandbox_payment_proof(stripe, order, extra, payment_id, amount, *, ref
     if not isinstance(payment_id, str) or not payment_id.startswith("pi_"):
         raise FinanceConflict("元決済の識別情報を確認できません")
     payment = await stripe.retrieve_payment(payment_id)
-    if (payment.get("id") != payment_id or payment.get("object") != "payment_intent"
-            or payment.get("livemode") is not False or payment.get("status") != "succeeded"
-            or type(payment.get("amount")) is not int or payment["amount"] != amount
-            or type(payment.get("amount_received")) is not int or payment["amount_received"] != amount
-            or payment.get("currency") != "jpy" or not payment_metadata_matches(payment.get("metadata"), order, extra)
-            or payment.get("transfer_group") != f"order-{order['id']}"
-            or payment.get("transfer_data") is not None or payment.get("application_fee_amount") is not None
-            or payment.get("on_behalf_of") is not None):
+    proof = payment_source_proof(payment, payment_id=payment_id, amount=amount,
+                                order_id=order["id"], expected_mode="test", allow_refunded=refund)
+    if not payment_metadata_matches(payment.get("metadata"), order, extra):
         raise FinanceConflict("元決済の金額・環境・注文が一致しません")
-    charge = payment.get("latest_charge")
-    if (not isinstance(charge, dict) or charge.get("object") != "charge"
-            or not isinstance(charge.get("id"), str) or not charge["id"].startswith("ch_")
-            or charge.get("livemode") is not False or charge.get("payment_intent") != payment_id
-            or type(charge.get("amount")) is not int or charge["amount"] != amount
-            or type(charge.get("amount_captured")) is not int or charge["amount_captured"] != amount
-            or charge.get("currency") != "jpy" or charge.get("paid") is not True
-            or charge.get("captured") is not True or charge.get("status") != "succeeded"
-            or charge.get("disputed") is not False or charge.get("transfer_group") != f"order-{order['id']}"
-            or type(charge.get("amount_refunded")) is not int or not 0 <= charge["amount_refunded"] <= amount
-            or (not refund and (charge["amount_refunded"] != 0 or charge.get("refunded") is not False))):
+    charge = payment["latest_charge"]
+    if (charge.get("transfer_group") != f"order-{order['id']}"
+            or (not refund and charge.get("refunded") is not False)):
         raise FinanceConflict("元請求の入金・返金・異議申し立てを確認できません")
     # Never retain a PaymentIntent client_secret or payer details in a proposal.
-    return {"id": payment_id, "amount": amount, "charge": charge["id"],
-            "amount_refunded": charge["amount_refunded"], "status": payment["status"]}
+    return proof
 
 
 async def _inspect(backend, store, stripe, order, kind, extra_id, at):

@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 
 from .finance import FinanceConflict, receipts
 from .integrations import StripeIntegration, StripeOutcomeUnknown
+from .payment_source_proof import payment_source_proof
 
 
 def sandbox_payouts_ready(settings):
@@ -19,26 +20,12 @@ def sandbox_payouts_ready(settings):
 
 def verify_source_payment(payment, fact, *, source_charge=None):
     """Use the same source proof before allocation and before bank payout."""
-    charge = payment.get("latest_charge") or {}
-    if (payment.get("id") != fact["id"] or payment.get("object") != "payment_intent"
-            or payment.get("livemode") is not False
-            or payment.get("status") != "succeeded" or payment.get("currency") != "jpy"
-            or type(payment.get("amount")) is not int or payment["amount"] != fact["amount"]
-            or type(payment.get("amount_received")) is not int or payment["amount_received"] != fact["amount"]
-            or payment.get("transfer_data") or payment.get("on_behalf_of")
-            or payment.get("transfer_group") != f"order-{fact['order_id']}"
-            or not isinstance(charge, dict) or charge.get("object") != "charge"
-            or not str(charge.get("id", "")).startswith("ch_")
-            or charge.get("livemode") is not False or charge.get("payment_intent") != fact["id"]
-            or charge.get("paid") is not True or charge.get("captured") is not True
-            or charge.get("status") != "succeeded" or charge.get("currency") != "jpy"
-            or type(charge.get("amount")) is not int or charge["amount"] != fact["amount"]
-            or type(charge.get("amount_captured")) is not int or charge["amount_captured"] != fact["amount"]
-            or type(charge.get("amount_refunded")) is not int or charge["amount_refunded"] != 0
-            or charge.get("disputed") is not False
-            or (source_charge is not None and charge["id"] != source_charge)):
-        raise FinanceConflict("分配元の決済・注文・元Chargeの一致を確認できません")
-    return charge
+    try:
+        payment_source_proof(payment, payment_id=fact["id"], amount=fact["amount"],
+                             order_id=fact["order_id"], expected_mode="test", source_charge=source_charge)
+    except FinanceConflict:
+        raise FinanceConflict("分配元の決済・注文・元Chargeの一致を確認できません") from None
+    return payment["latest_charge"]
 
 
 def verify_bank_payout(payout, remote):
