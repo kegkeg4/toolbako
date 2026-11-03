@@ -19,34 +19,127 @@ jobs:
         shell: bash
         run: |
           python3 - <<'PY'
-          import json, os, time, urllib.request
+          import json, os, re, subprocess, tempfile, time
           from datetime import datetime, timezone
-          class NoRedirect(urllib.request.HTTPRedirectHandler):
-              def redirect_request(self, *args, **kwargs):
-                  return None
-          client = urllib.request.build_opener(NoRedirect)
-          outcomes = []
-          for attempt in range(3):
-              outcomes = []
-              for path in ('/healthz', '/deploymentz'):
-                  try:
-                      request = urllib.request.Request('https://toolbako.onellc-ai.com' + path,
-                          headers={'User-Agent': 'Toolbako-independent-health/1'})
-                      with client.open(request, timeout=15) as response:
-                          payload = json.loads(response.read(8193))
-                          healthy = response.status == 200 and payload.get('status') == 'ok'
-                  except Exception:
-                      healthy = False
-                  outcomes.append({'endpoint': path, 'healthy': healthy})
-              if all(row['healthy'] for row in outcomes):
-                  break
-              if attempt < 2:
-                  time.sleep(20)
-          healthy = all(row['healthy'] for row in outcomes)
-          print(json.dumps({'healthy': healthy, 'attempts': attempt + 1, 'checks': outcomes}))
-          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as output:
-              output.write('Toolbako external availability: ' + ('healthy' if healthy else 'FAILED') + '\n')
-              output.write(datetime.now(timezone.utc).isoformat() + '\n')
-              output.write('This checks service reachability and deployment prerequisites, not payment launch approval.\n')
-          raise SystemExit(0 if healthy else 1)
+          from pathlib import Path
+
+          ENDPOINTS = ('/healthz', '/deploymentz')
+          # Numeric write-out fields only. Never use %{json}, URL/IP, headers,
+          # error text or response bodies in workflow output.
+          WRITE_OUT = '\n'.join('%{' + field + '}' for field in (
+              'http_code', 'time_namelookup', 'time_connect', 'time_appconnect',
+              'time_pretransfer', 'time_starttransfer', 'time_total'))
+
+          def metrics(raw):
+              fields = raw.decode('ascii').splitlines()
+              if (len(fields) != 7 or not re.fullmatch(r'\d{3}', fields[0])
+                      or any(not re.fullmatch(r'\d{1,2}(?:\.\d{1,9})?', v) for v in fields[1:])):
+                  raise ValueError('invalid_metrics')
+              status, values = int(fields[0]), tuple(float(v) for v in fields[1:])
+              if (status != 0 and not 100 <= status <= 599) or any(v > 20 for v in values):
+                  raise ValueError('invalid_metrics')
+              dns, tcp, tls, ready, first, total = values
+              def elapsed(end, start):
+                  return round((end - start) * 1000, 3) if end > 0 and end >= start else None
+              timings = {'dns_ms': round(dns * 1000, 3) if dns > 0 or tcp > 0 else None,
+                         'tcp_ms': elapsed(tcp, dns), 'tls_ms': elapsed(tls, tcp),
+                         'first_byte_ms': elapsed(first, ready) if status else None,
+                         'body_ms': elapsed(total, first) if status and first > 0 else None,
+                         'total_ms': round(total * 1000, 3)}
+              return status, values, timings
+
+          def failure_category(code, status, values):
+              dns, tcp, tls, ready, first, total = values
+              if code == 28:
+                  # Last completed curl phase, not proof of an underlying cause.
+                  # Zero DNS/TCP values cannot distinguish DNS from TCP timeout.
+                  return ('body_transfer_timeout' if status and first > 0 else 'request_or_first_byte_timeout' if tls > 0
+                          else 'tls_phase_timeout' if tcp > 0 else 'tcp_phase_timeout' if dns > 0
+                          else 'connection_phase_timeout')
+              if code:
+                  return {5: 'proxy_resolution_failed', 6: 'dns_resolution_failed',
+                          7: 'tcp_connect_failed', 35: 'tls_handshake_failed',
+                          51: 'tls_verification_failed', 60: 'tls_verification_failed',
+                          77: 'tls_ca_unavailable', 63: 'response_too_large',
+                          18: 'response_incomplete', 52: 'empty_response',
+                          55: 'request_send_failed', 56: 'response_receive_failed'}.get(code, 'transport_failed')
+              return 'redirect_rejected' if 300 <= status <= 399 else 'http_status_unexpected' if status != 200 else 'ok'
+
+          def check_endpoint(path):
+              if path not in ENDPOINTS:
+                  raise ValueError('endpoint_not_allowed')
+              row = {'endpoint': path, 'healthy': False, 'status': None,
+                     'category': 'monitor_error', 'timings': None,
+                     'started_at_utc': datetime.now(timezone.utc).isoformat()}
+              try:
+                  with tempfile.TemporaryDirectory(prefix='toolbako-health-') as folder:
+                      body_file = Path(folder) / 'response'
+                      # --disable must be first: ignore curlrc. No inherited
+                      # proxy/credential/CA overrides, redirects or curl retries.
+                      command = ['curl', '--disable', '--silent', '--http1.1',
+                                 '--proto', '=https', '--noproxy', '*', '--max-redirs', '0',
+                                 '--retry', '0', '--connect-timeout', '15', '--max-time', '15',
+                                 '--max-filesize', '8192', '--user-agent', 'Toolbako-independent-health/1',
+                                 '--output', str(body_file), '--write-out', WRITE_OUT,
+                                 'https://toolbako.onellc-ai.com' + path]
+                      result = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                          stderr=subprocess.DEVNULL, timeout=20, check=False,
+                          env={'PATH': os.defpath, 'LANG': 'C', 'LC_ALL': 'C'})
+                      status, values, timings = metrics(result.stdout)
+                      row.update(status=status, timings=timings,
+                                 category=failure_category(result.returncode, status, values))
+                      if row['category'] == 'ok':
+                          with body_file.open('rb') as source:
+                              body = source.read(8193)
+                          if len(body) > 8192:
+                              row['category'] = 'response_too_large'
+                          else:
+                              try:
+                                  payload = json.loads(body)
+                                  row['healthy'] = isinstance(payload, dict) and payload.get('status') == 'ok'
+                                  row['category'] = 'ok' if row['healthy'] else 'health_json_mismatch'
+                              except (ValueError, UnicodeError):
+                                  row['category'] = 'health_json_invalid'
+              except subprocess.TimeoutExpired:
+                  row['category'] = 'monitor_process_timeout'
+              except FileNotFoundError:
+                  row['category'] = 'monitor_dependency_or_output_missing'
+              except (ValueError, UnicodeError):
+                  row['category'] = 'monitor_metrics_invalid'
+              except Exception:
+                  row['category'] = 'monitor_error'
+              return row
+
+          def run_checks():
+              history = []
+              for attempt in range(3):
+                  outcomes = [check_endpoint(path) for path in ENDPOINTS]
+                  history.append({'attempt': attempt + 1, 'checks': outcomes})
+                  print(json.dumps(history[-1], allow_nan=False), flush=True)
+                  if all(row['healthy'] for row in outcomes):
+                      break
+                  if attempt < 2:
+                      time.sleep(20)
+              healthy = all(row['healthy'] for row in outcomes)
+              failed = sum(not row['healthy'] for item in history for row in item['checks'])
+              return {'healthy': healthy, 'attempts': len(history), 'checks': outcomes,
+                      'failed_checks': failed, 'recovered': healthy and failed > 0, 'history': history}
+
+          def main():
+              report = run_checks()
+              print(json.dumps(report, allow_nan=False), flush=True)
+              try:
+                  with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as output:
+                      output.write('Toolbako external availability: ' + ('healthy' if report['healthy'] else 'FAILED') + '\n')
+                      output.write(datetime.now(timezone.utc).isoformat() + '\n')
+                      output.write('Failed checks retained: ' + str(report['failed_checks']) + '\n')
+                      output.write('Earlier failures remain in JSON history even after recovery.\n')
+                      output.write('Timeout phase labels are inferred, not a root-cause determination; measurements are from this GitHub runner.\n')
+                      output.write('This checks service reachability and deployment prerequisites, not payment launch approval.\n')
+              except (OSError, KeyError):
+                  pass  # Diagnostic JSON remains available; no exception/path echo.
+              return 0 if report['healthy'] else 1
+
+          if __name__ == '__main__':
+              raise SystemExit(main())
           PY
