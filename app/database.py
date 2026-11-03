@@ -186,6 +186,9 @@ class PostgresStateStore:
 
     async def public_view(self, *, catalog=False, live_claims=False):
         from .public_read import PublicView
+        # Anonymous information/login pages never render creator claims and
+        # have no authenticated identity to annotate. Do not load their audit.
+        projected_claims = bool(live_claims and catalog)
         projection = "'[]'::jsonb, '{}'::jsonb"
         if catalog:
             projection = """
@@ -201,11 +204,11 @@ class PostgresStateStore:
                     'certified_creator_since', value->'certified_creator_since'))
                   from jsonb_each(s.payload->'registered_users')), '{}'::jsonb)
             """
-        if live_claims:
+        if projected_claims:
             if catalog:
                 projection = projection.replace("jsonb_build_object(\n", "jsonb_build_object(\n'id',value->'id','is_banned',value->'is_banned',\n", 1)
             projection += ", coalesce((select jsonb_agg(item) from jsonb_array_elements(s.payload->'audit_logs') item where item->>'action'='live.claims.reviewed'),'[]'::jsonb)"
-        return await self._read_view(projection, (), "", lambda row: PublicView(decode_value(row[2]), decode_value(row[3]), decode_value(row[4]) if live_claims else []))
+        return await self._read_view(projection, (), "", lambda row: PublicView(decode_value(row[2]), decode_value(row[3]), decode_value(row[4]) if projected_claims else []))
 
     async def member_view(self, sid, path, *, live_claims=False):
         from .member_read import MemberView, member_projection, MEMBER_READ_PATHS

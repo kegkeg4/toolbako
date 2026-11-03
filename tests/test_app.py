@@ -686,8 +686,8 @@ def test_session_cookie_is_opaque_and_private_pages_are_not_cached():
     assert 'opaque@example.com' not in cookie and 'Cookie利用者' not in cookie
     private = member.get('/mypage')
     assert 'no-store' in private.headers['cache-control']
-    assert private.headers['vary'] == 'Cookie'
-    static = member.get('/static/app.js')
+    assert 'Cookie' in private.headers['vary']
+    static = member.get('/static/app.js?v=release-test')
     assert 'immutable' in static.headers['cache-control']
     public_home = TestClient(app).get('/')
     assert public_home.headers['cache-control'].startswith('public, max-age=60')
@@ -873,7 +873,7 @@ def test_store_concurrency_caps_orders_contracts_and_payouts():
         assert sum(pool.map(buy, range(10))) == 2
 
     owner = {'id':'request-owner','display_name':'依頼者','username':'request_owner'}
-    request_item = fresh.create_request(owner, {'title':'競合確認','category':'開発者ツール','detail':'同時選択を防ぐ','budget_min':1000,'budget_max':5000,'deadline':'2026-08-01'})
+    request_item = fresh.create_request(owner, {'title':'競合確認','category':'開発者ツール','detail':'同時選択を防ぐ','budget_min':1000,'budget_max':5000,'deadline':(date.today()+timedelta(days=14)).isoformat()})
     applications = []
     for index in range(2):
         applicant = {'id':f'applicant-{index}','display_name':f'応募者{index}','username':f'applicant_{index}'}

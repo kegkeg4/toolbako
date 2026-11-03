@@ -175,7 +175,14 @@ class ProductionGuardMiddleware(BaseHTTPMiddleware):
         if security_path.startswith(("/mypage","/orders/","/messages","/seller","/admin","/settings","/security","/verification","/library","/payouts","/purchases","/subscriptions","/notifications","/updates","/account/","/auth/","/checkout/","/transfer-inquiries/")) or security_path in {"/login", "/signup", "/forgot-password", "/healthz", "/readyz", "/deploymentz"}:
             response.headers["Cache-Control"] = "no-store, private"
         elif security_path.startswith("/static/"):
-            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+            if request.method not in {"GET", "HEAD"} or response.status_code not in {200, 304}:
+                # A failed deploy/missing asset must recover on the next visit.
+                response.headers["Cache-Control"] = "no-store"
+            elif request.query_params.get("v"):
+                response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+            else:
+                # Stable URLs can change between releases; retain ETag/304 reuse.
+                response.headers["Cache-Control"] = "public, max-age=0, must-revalidate"
         elif request.cookies.get("toolbako_session") or "toolbako_session=" in response.headers.get("set-cookie", ""):
             response.headers["Cache-Control"] = "no-store, private"
         elif request.method in {"GET", "HEAD"} and response.status_code == 200:
@@ -185,5 +192,7 @@ class ProductionGuardMiddleware(BaseHTTPMiddleware):
             elif content_type.startswith(("application/xml", "text/plain")):
                 response.headers["Cache-Control"] = "public, max-age=300, stale-while-revalidate=600"
         if request.cookies.get("toolbako_session") or "toolbako_session=" in response.headers.get("set-cookie", ""):
-            response.headers["Vary"] = "Cookie"
+            varied = {value.strip().lower() for value in response.headers.get("Vary", "").split(",")}
+            if "cookie" not in varied and "*" not in varied:
+                response.headers.add_vary_header("Cookie")
         return response

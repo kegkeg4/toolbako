@@ -11,6 +11,7 @@ from .product_disclosures import purchase_snapshot
 from .product_artifacts import artifact_ready, instant_ready
 from copy import deepcopy
 from .payout_policy import RESERVED_PAYOUT_STATUSES, payout_fee, scheduled_payout_date
+from .request_deadlines import accepting_applications, request_today
 
 CATEGORIES = ["業務効率化", "文章・ライティング", "画像・デザイン", "開発者ツール", "マーケティング", "学習・教育", "エンタメ・ネタ", "データ分析", "その他"]
 AI_OPTIONS = ["Claude", "ChatGPT", "Gemini", "Codex", "Copilot", "その他"]
@@ -140,8 +141,8 @@ class DemoStore:
         self.favorite_folders: dict[str, list[dict[str, Any]]] = {}
         self.favorite_assignments: dict[str, str] = {}
         self.requests: list[dict[str, Any]] = [
-            {"id":"req-001","title":"飲食店の予約電話を要約するAIツール","category":"業務効率化","detail":"録音データから日時・人数・要望を抽出し、スプレッドシートへ記録したいです。","budget_min":30000,"budget_max":80000,"deadline":"2026-07-28","owner_id":"buyer-sample","owner_name":"小さな食堂","status":"open","applications":3,"application_list":[],"created_at":now-timedelta(hours=5)},
-            {"id":"req-002","title":"自社商品のSNS投稿文を作る社内ツール","category":"マーケティング","detail":"商品情報からX・Instagram用の投稿案を生成。ブランドトーンを学習させたいです。","budget_min":50000,"budget_max":120000,"deadline":"2026-07-25","owner_id":"buyer-sample2","owner_name":"KADO商店","status":"open","applications":5,"application_list":[],"created_at":now-timedelta(days=1)},
+            {"id":"req-001","title":"飲食店の予約電話を要約するAIツール","category":"業務効率化","detail":"録音データから日時・人数・要望を抽出し、スプレッドシートへ記録したいです。","budget_min":30000,"budget_max":80000,"deadline":(request_today()+timedelta(days=14)).isoformat(),"owner_id":"buyer-sample","owner_name":"小さな食堂","status":"open","applications":3,"application_list":[],"created_at":now-timedelta(hours=5)},
+            {"id":"req-002","title":"自社商品のSNS投稿文を作る社内ツール","category":"マーケティング","detail":"商品情報からX・Instagram用の投稿案を生成。ブランドトーンを学習させたいです。","budget_min":50000,"budget_max":120000,"deadline":(request_today()+timedelta(days=7)).isoformat(),"owner_id":"buyer-sample2","owner_name":"KADO商店","status":"open","applications":5,"application_list":[],"created_at":now-timedelta(days=1)},
         ]
         self.blocks: set[tuple[str,str]] = set()
         self.reopen_waiters: set[tuple[str,str]] = set()
@@ -902,7 +903,7 @@ class DemoStore:
     def submit_application(self, request_id: str, user: dict[str, Any], message: str, amount: int, delivery_days: int) -> tuple[dict[str, Any], bool]:
         with self._lock:
             item = next((candidate for candidate in self.requests if candidate["id"] == request_id), None)
-            if not item or item["status"] != "open" or item["owner_id"] == user["id"]:
+            if not item or not accepting_applications(item) or item["owner_id"] == user["id"]:
                 raise ValueError("not applicable")
             owner_username = item.get("owner_username") or self.username_for_id(item["owner_id"]) or ""
             if self.blocked_between(user["id"], user["username"], item["owner_id"], owner_username): raise ValueError("blocked")

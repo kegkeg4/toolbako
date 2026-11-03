@@ -1,5 +1,6 @@
 """Approved standard fee and preservation of already quoted order terms."""
 from dataclasses import replace
+from datetime import timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -93,7 +94,7 @@ def test_custom_orders_and_their_extras_keep_the_agreed_rate(purchase, monkeypat
         proposal = store.create_proposal(conversation["id"], "Custom work", "Test", 1000, 3)
         order = store.buy_proposal(buyer, conversation["id"], proposal["id"])
     else:
-        request = store.create_request(buyer, {"title": "Custom work"})
+        request = store.create_request(buyer, {"title": "Custom work", "deadline":(data.request_today()+timedelta(days=14)).isoformat()})
         seller = {"id": "fee-test-seller", "username": "fee_seller", "display_name": "Seller"}
         store.submit_application(request["id"], seller, "Test", 1000, 3)
         _, _, order = store.contract_request(buyer, request["id"], request["application_list"][0]["id"], payment_pending=True)

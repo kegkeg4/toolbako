@@ -20,7 +20,7 @@
 {% endblock %}
 
 {% block category_nav %}
-<nav class="market-category-nav" aria-label="カテゴリから探す"><div><a href="/tools">☷ カテゴリから探す</a>{% for c in categories[:8] %}<a href="/tools?category={{ c }}">{{ c }}</a>{% endfor %}<a href="/tools">その他</a></div></nav>
+<nav class="market-category-nav" aria-label="カテゴリから探す"><div><a href="/tools">☷ カテゴリから探す</a>{% for c in categories[:8] %}<a href="/tools?category={{ c }}">{{ c }}</a>{% endfor %}<a href="/tools?category=その他">その他</a></div></nav>
 {% endblock %}
 
 {% block content %}
@@ -51,7 +51,7 @@
           {% for tool in trending[:3] %}
           <a href="/tools/{{ tool.slug }}">
             <span class="showcase-thumb thumb-{{ tool.accent }}">{{ tool.name[:1] }}</span>
-            <span><b>{{ tool.name }}</b><small>{{ tool.tagline }}</small><em>★ {{ tool.rating }}　{{ tool.sales_count }}件販売</em></span>
+            <span><b>{{ tool.name }}</b><small>{{ tool.tagline }}</small><em>★ {{ tool.rating if tool.rating else '新着' }}　{{ tool.sales_count }}件販売</em></span>
             <strong>{% if tool.price_type == 'paid' %}¥{{ '{:,}'.format(tool.price) }}{% else %}{{ price_labels[tool.price_type] }}{% endif %}</strong>
           </a>
           {% else %}

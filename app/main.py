@@ -76,6 +76,7 @@ from .account_lifecycle import deletion_hold
 from .listing_review import REVIEW_CHECKS, REVIEW_LABELS, content_fingerprint, review_token, reopen_review
 from .product_disclosures import DISCLOSURE_FIELDS, PERMISSION_LABELS, RIGHTS_STATEMENT, parse_disclosures, record_rights, display_disclosures
 from .product_artifacts import artifact_ready, instant_ready, store_artifact, download_scope
+from .request_deadlines import accepting_applications, request_today
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -909,7 +910,15 @@ async def purchases(request: Request):
     if not user: return RedirectResponse("/login?next=/purchases", 303)
     await sweep_due_orders()
     orders = [x for x in store.orders if x["buyer_id"] == user["id"]]
-    return templates.TemplateResponse(request, "purchases.html", context(request, orders=orders))
+    # History can outlive a product listing (or originate from a custom job).
+    # Offer product DM only when /messages/start can actually accept that item.
+    messageable_slugs = {
+        tool["slug"] for tool in store.tools
+        if not tool.get("is_removed") and tool.get("is_published", True)
+        and tool.get("status", "published") == "published" and tool["author_id"] != user["id"]
+        and not store.blocked_between(user["id"], user["username"], tool["author_id"], tool["author_username"])
+    }
+    return templates.TemplateResponse(request, "purchases.html", context(request, orders=orders, messageable_slugs=messageable_slugs))
 
 
 @app.get("/mypage", response_class=HTMLResponse)
@@ -927,8 +936,13 @@ async def mypage(request: Request, tab: str = "overview"):
     favorites_count = sum(1 for uid,_ in store.likes if uid == user["id"])
     following_count = sum(1 for uid,_ in store.update_followers if uid == user["id"])
     unread_count = sum(1 for x in store.notifications if x["user_id"] == user["id"] and not x["read"])
-    next_actions = [x for x in buying if x["status"] == "awaiting_acceptance"] + [x for x in selling if x["status"] == "in_progress"]
-    metrics = {"spent":sum(x["amount"] for x in buying if x["status"] != "cancelled"),"earned":sum(x["amount"]-x["platform_fee"] for x in selling if x["status"] == "completed"),"sales":sum(1 for x in selling if x["status"] == "completed"),"rating":rating}
+    # Checkout reserves an in-progress order before payment is confirmed.
+    # Keep reservations in history, but never report them as paid work/revenue.
+    paid_default = "paid" if settings.demo_mode else None
+    paid_buying = [x for x in buying if x.get("payment_status", paid_default) == "paid"]
+    paid_selling = [x for x in selling if x.get("payment_status", paid_default) == "paid"]
+    next_actions = [x for x in paid_buying if x["status"] == "awaiting_acceptance"] + [x for x in paid_selling if x["status"] == "in_progress"]
+    metrics = {"spent":sum(x["amount"] for x in paid_buying if x["status"] != "cancelled"),"earned":sum(x["amount"]-x["platform_fee"] for x in paid_selling if x["status"] == "completed"),"sales":sum(1 for x in paid_selling if x["status"] == "completed"),"rating":rating}
     return templates.TemplateResponse(request,"mypage.html",context(request,tab=tab,buying=buying,selling=selling,reviews=reviews,buyer_feedback=buyer_feedback,rating=rating,breakdown=breakdown,favorites_count=favorites_count,following_count=following_count,unread_count=unread_count,next_actions=next_actions,metrics=metrics))
 
 
@@ -1029,7 +1043,7 @@ async def notification_settings_save(request: Request, messages: str = Form(""),
 @app.get("/requests", response_class=HTMLResponse)
 async def requests_list(request: Request, category: str = ""):
     category = category if category in CATEGORIES else ""
-    items = [x for x in store.requests if x["status"] == "open" and (not category or x["category"] == category)]
+    items = [x for x in store.requests if accepting_applications(x) and (not category or x["category"] == category)]
     viewer = current_user(request)
     if viewer:
         items = [item for item in items if not item.get("owner_username") or not store.blocked_between(viewer["id"], viewer["username"], item["owner_id"], item["owner_username"])]
@@ -1050,7 +1064,7 @@ async def request_create(request: Request, title: str = Form(...), category: str
     detail = clean_visible_text(detail, 10, 3000, "依頼内容", preserve_lines=True)
     try: deadline_date = datetime.strptime(deadline, "%Y-%m-%d").date()
     except ValueError as exc: raise HTTPException(422, "募集期限を正しい日付で入力してください") from exc
-    today = datetime.now(timezone.utc).date()
+    today = request_today()
     if category not in CATEGORIES or terms_agreement != "yes" or not 1000 <= budget_min <= budget_max <= 10_000_000 or not today <= deadline_date <= today + timedelta(days=365): raise HTTPException(422)
     item = store.create_request(user,{"title":title,"category":category,"detail":detail,"budget_min":budget_min,"budget_max":budget_max,"deadline":deadline})
     store.notify(user["id"],"募集を公開しました",item["title"],f"/requests/{item['id']}", "requests")
@@ -1063,7 +1077,7 @@ async def request_detail(request: Request, request_id: str):
     if not item: raise HTTPException(404)
     viewer = current_user(request)
     if viewer and item.get("owner_username") and store.blocked_between(viewer["id"], viewer["username"], item["owner_id"], item["owner_username"]): raise HTTPException(404)
-    return templates.TemplateResponse(request, "request_detail.html", context(request, job=item))
+    return templates.TemplateResponse(request, "request_detail.html", context(request, job=item, applications_open=accepting_applications(item)))
 
 
 @app.post("/requests/{request_id}/apply")
@@ -1071,7 +1085,7 @@ async def request_apply(request: Request, request_id: str, message: str = Form(.
     user = current_user(request)
     if not user: return RedirectResponse("/login", 303)
     item = next((candidate for candidate in store.requests if candidate["id"] == request_id), None)
-    if not item or item["status"] != "open" or item["owner_id"] == user["id"]: raise HTTPException(403)
+    if not item or not accepting_applications(item) or item["owner_id"] == user["id"]: raise HTTPException(403, "この募集は現在応募を受け付けていません")
     message = clean_visible_text(message, 10, 1000, "応募メッセージ", preserve_lines=True)
     if not 100 <= amount <= 10_000_000 or not 1 <= delivery_days <= 120: raise HTTPException(422)
     try: item, created = store.submit_application(request_id, user, message, amount, delivery_days)

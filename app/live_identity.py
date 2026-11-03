@@ -271,12 +271,19 @@ class LiveClaimPolicy:
     def registry(self, store, scope):
         if scope is None or scope.mode != "live":
             return None
-        try:
-            return review_registry(getattr(store, "audit_logs", []), scope,
-                                   self.settings_provider().admin_user_ids,
-                                   now=datetime.now(timezone.utc))
-        except ClaimEvidenceError:
-            return None
+        reviewers = self.settings_provider().admin_user_ids
+        def build(events):
+            try:
+                return review_registry(events, scope, reviewers, now=datetime.now(timezone.utc))
+            except ClaimEvidenceError:
+                return None
+        from .public_read import PublicView
+        if isinstance(store, PublicView):
+            # Only fresh, owner-scoped/anonymous projections reuse parsing.
+            # The shared mutable store and financial callers remain uncached.
+            reviewer_key = tuple(reviewers) if type(reviewers) in (tuple, list, set, frozenset) else None
+            return store.claim_registry((self, scope, reviewer_key, review_registry), build)
+        return build(getattr(store, "audit_logs", []))
 
     def eligibility(self, store, user_id):
         account = next((row for row in store.registered_users.values() if row.get("id") == user_id), {})

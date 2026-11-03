@@ -49,12 +49,33 @@ document.addEventListener('invalid', (event) => {
   }
 }, true);
 
+const pendingSubmissions = new Map();
+window.addEventListener('pageshow', () => {
+  // Browser back/forward restores the previous DOM, including disabled controls.
+  for (const pending of pendingSubmissions.values()) {
+    if (!pending.disabledByUs) continue;
+    pending.submitter.disabled = pending.wasDisabled;
+    if (pending.wasBusy === null) pending.submitter.removeAttribute('aria-busy');
+    else pending.submitter.setAttribute('aria-busy', pending.wasBusy);
+  }
+  pendingSubmissions.clear();
+});
+
 document.addEventListener('submit', (event) => {
+  if (event.defaultPrevented) return;
   const form = event.target;
-  const actionPath = new URL(form.action || location.href, location.href).pathname;
+  const previous = pendingSubmissions.get(form);
+  if (previous && !previous.event.defaultPrevented) {
+    event.preventDefault();
+    return;
+  }
+  pendingSubmissions.delete(form);
+  const submitter = event.submitter;
+  const action = submitter?.getAttribute('formaction') || form.action || location.href;
+  const actionPath = new URL(action, location.href).pathname;
   const automaticConfirmations = [
     [/\/actions\/accept$/, '納品を承諾して取引を完了します。内容を十分に確認しましたか？'],
-    [/\/actions\/cancel_accept$/, 'キャンセルに合意し、対象の決済を返金します。続けますか？'],
+    [/\/actions\/cancel_accept$/, 'キャンセルに合意します。返金は運営の確認・承認後に実行されます。続けますか？'],
     [/\/subscriptions\/[^/]+\/cancel$/, '次回の定期更新を停止します。続けますか？'],
     [/\/payouts$/, '表示された金額で振込を申請します。金額を確認しましたか？'],
     [/\/applications\/[^/]+\/select$/, 'この提案を採用し、表示金額の決済へ進みます。続けますか？'],
@@ -69,10 +90,21 @@ document.addEventListener('submit', (event) => {
   if (form.matches('.compare-picker')) {
     form.querySelector('[name=slugs]').value = [...form.querySelectorAll('[name=pick]')].map((x) => x.value).filter(Boolean).join(',');
   }
-  const submitter = event.submitter;
-  if (submitter && !submitter.dataset.allowRepeat) {
-    window.setTimeout(() => { submitter.disabled = true; submitter.setAttribute('aria-busy', 'true'); }, 0);
-  }
+  const method = (submitter?.getAttribute('formmethod') || form.method || 'get').toLowerCase();
+  if (method !== 'post' || submitter?.dataset.allowRepeat) return;
+  const pending = {event, submitter, wasDisabled: submitter?.disabled,
+    wasBusy: submitter?.getAttribute('aria-busy'), disabledByUs: false};
+  pendingSubmissions.set(form, pending);
+  // Defer disabling so a named submit button is still included in the request.
+  window.setTimeout(() => {
+    if (pendingSubmissions.get(form) !== pending) return;
+    if (event.defaultPrevented) { pendingSubmissions.delete(form); return; }
+    if (submitter) {
+      submitter.disabled = true;
+      submitter.setAttribute('aria-busy', 'true');
+      pending.disabledByUs = true;
+    }
+  }, 0);
 });
 
 document.addEventListener('click', (event) => {
@@ -100,17 +132,43 @@ function updatePriceField(form) {
 
 document.querySelectorAll('[data-tool-form]').forEach(updatePriceField);
 
-function updateCheckout(root) {
+let yenFormatter;
+function yen(value) {
+  yenFormatter ||= new Intl.NumberFormat('ja-JP');
+  return `¥${yenFormatter.format(value)}`;
+}
+
+function checkoutSelection(root) {
   const form = root?.querySelector('[data-checkout-form]');
-  if (!form) return;
+  if (!form) return null;
   const selectedPlan = form.querySelector('[name="billing_type"]:checked') || form.querySelector('[name="billing_type"]');
   const base = Number(selectedPlan?.dataset.basePrice || root.dataset.oneTime || 0);
-  const options = [...form.querySelectorAll('[data-option-price]:checked')].reduce((sum, item) => sum + Number(item.dataset.optionPrice || 0), 0);
+  const selectedOptions = [...form.querySelectorAll('[data-option-price]:checked')];
+  const options = selectedOptions.reduce((sum, item) => sum + Number(item.dataset.optionPrice || 0), 0);
   const subtotal = base + options;
   const coupon = form.querySelector('[data-coupon]')?.value.trim().toUpperCase() || '';
-  const localDemoDiscount = root.dataset.demo === 'true' && coupon === 'WELCOME10' ? Math.min(Math.round(subtotal * .1), 1000) : 0;
-  const discount = localDemoDiscount || (coupon && coupon === root.dataset.couponCode ? Number(root.dataset.couponDiscount || 0) : 0);
-  const yen = (value) => `¥${new Intl.NumberFormat('ja-JP').format(value)}`;
+  const fingerprint = JSON.stringify([selectedPlan?.value || '', base, coupon,
+    selectedOptions.map(item => [item.value, item.dataset.optionPrice]).sort((a, b) => a[0].localeCompare(b[0]))]);
+  return {form, selectedPlan, base, options, subtotal, coupon, fingerprint};
+}
+
+function clearCoupon(root) {
+  delete root.dataset.couponCode;
+  delete root.dataset.couponDiscount;
+  delete root.dataset.couponFingerprint;
+}
+
+const couponChangedMessage = '購入内容を変更したため、クーポンをもう一度適用してください。';
+function updateCheckout(root) {
+  const selection = checkoutSelection(root);
+  if (!selection) return;
+  const {form, selectedPlan, base, options, subtotal, coupon, fingerprint} = selection;
+  if (root.dataset.couponFingerprint && root.dataset.couponFingerprint !== fingerprint) {
+    clearCoupon(root);
+    const feedback = form.querySelector('[data-coupon-feedback]');
+    if (feedback) feedback.textContent = couponChangedMessage;
+  }
+  const discount = coupon && coupon === root.dataset.couponCode && fingerprint === root.dataset.couponFingerprint ? Number(root.dataset.couponDiscount || 0) : 0;
   root.querySelector('[data-summary-base]').textContent = yen(base);
   root.querySelector('[data-summary-options]').textContent = yen(options);
   root.querySelector('[data-options-row]').hidden = options === 0;
@@ -123,11 +181,15 @@ function updateCheckout(root) {
 }
 
 document.querySelectorAll('[data-checkout]').forEach(updateCheckout);
-document.addEventListener('input', (event) => { const root = event.target.closest('[data-checkout]'); if (root) updateCheckout(root); });
-document.addEventListener('change', (event) => { const root = event.target.closest('[data-checkout]'); if (root) updateCheckout(root); });
+document.addEventListener('input', (event) => {
+  if (event.target.matches('[data-coupon]')) updateCheckout(event.target.closest('[data-checkout]'));
+});
+document.addEventListener('change', (event) => {
+  if (event.target.matches('[name="billing_type"], [data-option-price], [data-coupon]')) updateCheckout(event.target.closest('[data-checkout]'));
+});
 document.addEventListener('click', async (event) => {
   const button = event.target.closest('[data-apply-coupon]');
-  if (!button) return;
+  if (!button || button.disabled) return;
   const root = button.closest('[data-checkout]');
   const form = button.closest('form');
   const input = form?.querySelector('[data-coupon]');
@@ -139,20 +201,29 @@ document.addEventListener('click', async (event) => {
   }
   button.disabled = true;
   feedback.textContent = 'クーポンを確認しています…';
+  const selection = checkoutSelection(root);
   const payload = new FormData(form);
   payload.set('slug', root.dataset.slug || '');
+  payload.set('code', code);
   try {
     const response = await fetch('/api/coupons/preview', {method:'POST', body:payload, credentials:'same-origin'});
     const result = await response.json();
+    if (checkoutSelection(root)?.fingerprint !== selection.fingerprint) {
+      feedback.textContent = couponChangedMessage;
+      return;
+    }
     if (!response.ok) throw new Error(result.detail || 'クーポンを確認できません');
+    if (result.code !== code || !Number.isSafeInteger(result.discount) || result.discount < 0 || result.discount > selection.subtotal) {
+      throw new Error('クーポンを確認できません。もう一度お試しください。');
+    }
     root.dataset.couponCode = result.code;
     root.dataset.couponDiscount = String(result.discount);
+    root.dataset.couponFingerprint = selection.fingerprint;
     input.value = result.code;
-    feedback.textContent = result.discount ? `クーポンを適用しました（¥${new Intl.NumberFormat('ja-JP').format(result.discount)}割引）` : 'このコードには割引がありません。';
+    feedback.textContent = result.discount ? `クーポンを適用しました（${yen(result.discount)}割引）` : 'このコードには割引がありません。';
   } catch (error) {
-    delete root.dataset.couponCode;
-    delete root.dataset.couponDiscount;
-    feedback.textContent = error.message || 'クーポンを確認できません。';
+    clearCoupon(root);
+    feedback.textContent = checkoutSelection(root)?.fingerprint !== selection.fingerprint ? couponChangedMessage : error.message || 'クーポンを確認できません。';
   } finally {
     button.disabled = false;
     updateCheckout(root);
