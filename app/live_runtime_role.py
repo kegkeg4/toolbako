@@ -60,6 +60,51 @@ def _policies(table):
     return result
 
 
+def _membership_shape(rows, postgres, server_version):
+    """Accept only the reviewed runtime edge and PG16+ creator-admin edges.
+
+    A non-superuser CREATEROLE gets an automatic, non-inheriting/non-SET
+    ADMIN grant from the bootstrap superuser (OID 10) on each role it creates.
+    This is administration by the already trusted postgres operator, never
+    membership of the application role in postgres or an extra group.
+    """
+    _require(isinstance(postgres, tuple) and len(postgres) == 3)
+    creator_oid, superuser, createrole = postgres
+    _require(type(creator_oid) is int and creator_oid > 0
+             and type(superuser) is bool and type(createrole) is bool
+             and (superuser or createrole) and type(server_version) is int)
+    if server_version < 160000:
+        _require(rows == [(RUNTIME_GROUP, RUNTIME_ROLE, False)])
+        return
+    expected = {(RUNTIME_GROUP, RUNTIME_ROLE, False, True, True, creator_oid)}
+    if not superuser:
+        expected.update((role, "postgres", True, False, False, 10)
+                        for role in (RUNTIME_GROUP, RUNTIME_ROLE))
+    _require(len(rows) == len(expected) and set(rows) == expected)
+
+
+async def verify_runtime_memberships(conn):
+    """Check the exact operator-created membership graph without granting it."""
+    postgres = await (await conn.execute(
+        "select oid,rolsuper,rolcreaterole from pg_catalog.pg_roles where rolname='postgres'"
+    )).fetchone()
+    if conn.info.server_version >= 160000 and postgres is not None and postgres[1] is False:
+        # PostgreSQL emits these automatic ADMIN grants as its bootstrap
+        # superuser. The Supabase bootstrap role is supabase_admin (OID 10).
+        bootstrap = await (await conn.execute(
+            "select oid,rolsuper from pg_catalog.pg_roles where oid=10"
+        )).fetchone()
+        _require(bootstrap == (10, True))
+    extra = ",m.inherit_option,m.set_option,m.grantor" if conn.info.server_version >= 160000 else ""
+    rows = await (await conn.execute(
+        "select parent.rolname,child.rolname,m.admin_option" + extra + " from pg_catalog.pg_auth_members m "
+        "join pg_catalog.pg_roles parent on parent.oid=m.roleid "
+        "join pg_catalog.pg_roles child on child.oid=m.member "
+        "where parent.rolname in (%s,%s) or child.rolname in (%s,%s)",
+        (RUNTIME_ROLE, RUNTIME_GROUP, RUNTIME_ROLE, RUNTIME_GROUP))).fetchall()
+    _membership_shape(rows, postgres, conn.info.server_version)
+
+
 async def verify_runtime_role(conn):
     """Verify actual SQL identity and effective rights. Call in READ ONLY mode.
 
@@ -77,13 +122,7 @@ async def verify_runtime_role(conn):
             (RUNTIME_ROLE, False, True, False, False, True, False, False),
             (RUNTIME_GROUP, False, False, False, False, False, False, False),
         })
-        memberships = await (await conn.execute(
-            "select parent.rolname,child.rolname,m.admin_option from pg_catalog.pg_auth_members m "
-            "join pg_catalog.pg_roles parent on parent.oid=m.roleid "
-            "join pg_catalog.pg_roles child on child.oid=m.member "
-            "where parent.rolname in (%s,%s) or child.rolname in (%s,%s)",
-            (RUNTIME_ROLE, RUNTIME_GROUP, RUNTIME_ROLE, RUNTIME_GROUP))).fetchall()
-        _require(memberships == [(RUNTIME_GROUP, RUNTIME_ROLE, False)])
+        await verify_runtime_memberships(conn)
         database = await (await conn.execute(
             "select has_database_privilege(current_database(),'CONNECT'),"
             "has_database_privilege(current_database(),'CREATE'),"

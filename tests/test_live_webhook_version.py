@@ -5,13 +5,15 @@ or real PostgreSQL durability. Outbound Stripe requests must remain on Clover.
 """
 from copy import deepcopy
 from dataclasses import replace
+from datetime import datetime, timezone
 import time
 
 import pytest
 
 from app.config import Settings
-from app.database import snapshot
+from app.database import content_hash, snapshot
 from app.integrations import StripeIntegration
+from app.live_checkout import checkout_request_data, session_receipt
 from app.live_setup_plan import (
     CONNECT_EVENTS, PLATFORM_EVENTS, STRIPE_API_VERSION, SetupPlanError,
     build_live_setup_plan, inspect_endpoint_configuration,
@@ -20,7 +22,7 @@ from app.live_webhooks import build_live_webhook_handler
 from test_live_webhooks import (
     CONNECT_PATH, CONNECT_SECRET, PLATFORM_PATH, SECRET, SCOPE,
     MemoryBoundary, ProviderResponses, account_current, build_app,
-    checkout_evidence, configuration, deliver, event, mock_memory_bank_validation, payout_evidence,
+    checkout, checkout_evidence, configuration, deliver, event, mock_memory_bank_validation, payout_evidence,
     scoped_refund_evidence, seed,
 )
 from test_payment_source_proof import source
@@ -48,6 +50,10 @@ def environment(monkeypatch, version=DAHLIA):
     provider = StripeIntegration(settings.stripe_secret_key, settings.site_base_url,
         charge_mode="separate", api_version=settings.stripe_api_version,
         journal=backend, financial_scope=SCOPE)
+    key, data = checkout_request_data(provider, SCOPE, store.orders[0])
+    backend.operations[key] = {"endpoint": "checkout/sessions", "request_hash": content_hash(data),
+        "status": "succeeded", "created_at": datetime.fromtimestamp(100, timezone.utc),
+        "response": session_receipt(checkout())}
     handler = build_live_webhook_handler(settings, store, backend, provider)
     assert handler is not None
     return build_app(handler, settings), store, backend, provider, responses, handler

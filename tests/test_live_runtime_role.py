@@ -20,6 +20,7 @@ from app.live_runtime_role import RUNTIME_GROUP, RuntimeRoleError, verify_runtim
 
 ROOT = Path(__file__).resolve().parents[1]
 SCOPE = FinancialScope("live", "acct_1Ty4WnIogL39waUY", "56387c08-fdb4-4dd7-b63f-aeae34b6de54")
+SYNTHETIC_ROLE_PASSWORD = "synthetic-runtime-role-only"
 
 
 def run(coro):
@@ -38,7 +39,14 @@ def admin_config():
         # Never adopt/delete a pre-existing role. The suite owns both new names.
         assert not conn.execute("select 1 from pg_roles where rolname in (%s,%s)", (RUNTIME_ROLE, RUNTIME_GROUP)).fetchall()
         conn.execute((ROOT / "deploy/runtime-role/roles.sql").read_text())
-        conn.execute(sql.SQL("alter role {} login").format(sql.Identifier(RUNTIME_ROLE)))
+        # Local Windows uses trust while CI uses host SCRAM. Give only this
+        # disposable role a known synthetic password; production roles.sql
+        # deliberately keeps NOLOGIN/PASSWORD NULL for the operator handoff.
+        conn.execute("set password_encryption='scram-sha-256'")
+        conn.execute(sql.SQL("alter role {} login password {}").format(
+            sql.Identifier(RUNTIME_ROLE), sql.Literal(SYNTHETIC_ROLE_PASSWORD)))
+        assert conn.execute("select rolpassword like 'SCRAM-SHA-256$%%' from pg_authid where rolname=%s",
+                            (RUNTIME_ROLE,)).fetchone() == (True,)
     try:
         yield config
     finally:
@@ -63,7 +71,7 @@ def database(admin_config):
             # default PUBLIC TEMP. Production SQL itself does not revoke it.
             conn.execute(sql.SQL("revoke temporary on database {} from public").format(sql.Identifier(name)))
             conn.execute((ROOT / "deploy/runtime-role/grants.sql").read_text())
-        config = {**admin_config, "dbname": name, "user": RUNTIME_ROLE}
+        config = {**admin_config, "dbname": name, "user": RUNTIME_ROLE, "password": SYNTHETIC_ROLE_PASSWORD}
         yield name, config, admin_config
     finally:
         with local._connect(admin_config, autocommit=True) as conn:
