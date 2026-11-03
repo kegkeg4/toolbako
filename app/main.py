@@ -3208,7 +3208,9 @@ async def admin_creator_badge(request: Request, username: str, badge: str, actio
 @app.get("/tokushoho", response_class=HTMLResponse)
 async def static_page(request: Request):
     slug = request.url.path.strip("/")
-    return templates.TemplateResponse(request, "static_page.html", context(request, page=slug))
+    return templates.TemplateResponse(request, "static_page.html", context(
+        request, page=slug, legal_live_checkout=checkout_configuration_ready(settings),
+        legal_live_payouts=live_payout_requests_ready(settings)))
 
 
 @app.get("/sitemap.xml")
