@@ -380,17 +380,22 @@ def test_new_template_does_not_show_actions_when_recovery_disabled(
     if execution_ready is not None:
         context["refund_execution_ready"] = execution_ready
     html = env.get_template("_admin_finance.html").render(**context)
+    # Paid-out refunds have their own independent execution-stop notice.
+    # Inspect only this ordinary-refund panel when checking its operation flag.
+    _, separator, panel = html.partition('<details id="refund-resumption"')
+    assert separator
+    panel = panel.split("</details>", 1)[0]
     enabled = recovery_ready if execution_ready is None else execution_ready
     assert "<script>private</script>" not in html
-    assert ("/refund-resumption/approve" in html) is (enabled and actor != proposal["proposed_by"])
-    assert ("/refund-resumption/propose" in html) is enabled
-    assert ("/refund-inspection" in html) is inspection_available
-    assert ("返金実行は停止中です。" in html) is (not enabled)
-    assert "結果不明の返金は再送しません。" in html
+    assert ("/refund-resumption/approve" in panel) is (enabled and actor != proposal["proposed_by"])
+    assert ("/refund-resumption/propose" in panel) is enabled
+    assert ("/refund-inspection" in panel) is inspection_available
+    assert ("返金実行は停止中です。" in panel) is (not enabled)
+    assert "結果不明の返金は再送しません。" in panel
     if enabled and actor != proposal["proposed_by"]:
-        assert "別の管理者として返金を承認" in html
+        assert "別の管理者として返金を承認" in panel
     if actor == proposal["proposed_by"]:
-        assert "別の管理者による承認を待っています" in html
+        assert "別の管理者による承認を待っています" in panel
 
 
 @pytest.mark.parametrize("status", ["awaiting_approval", "processing", "pending", "partial", "review", "completed"])
