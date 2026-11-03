@@ -4,7 +4,9 @@ No routes are installed by importing this module. The factory stays disabled
 for the active test configuration. The dispatcher belongs inside the existing
 host/security/body-limit middleware and outside DatabaseBoundaryMiddleware;
 it owns the same backend's request/commit boundary for these two paths only.
-No Stripe writes or emails are performed here.
+No Stripe writes or email API calls are performed here. An explicitly enabled
+future-event gate can enqueue existing transaction messages in the same bound
+database commit; it never replays older events or starts a delivery worker.
 """
 from copy import deepcopy
 import asyncio
@@ -51,17 +53,28 @@ def _metadata_matches(value, order, extra):
             and (value.get("extra_id") == extra["id"] if extra else "extra_id" not in value))
 
 
-async def _no_mail(*args):
-    raise RuntimeError("live notification email delivery is disabled")
-
-
 class LiveStripeWebhookService(StripeWebhookService):
     """Reuse existing state transitions after stronger live provider evidence."""
 
     def __init__(self, settings, store, *, backend, provider, kind, paid_out_refund_reconciler=None):
-        super().__init__(settings, store, _no_mail, journal=backend, provider=provider)
+        super().__init__(settings, store, self._enqueue_mail, journal=backend, provider=provider)
         self.kind = kind
         self.paid_out_refund_reconciler = paid_out_refund_reconciler
+
+    def _mail_enabled_for(self, event):
+        # Missing/malformed activation configuration only suppresses email;
+        # it must not prevent an otherwise valid payment from being recorded.
+        since = getattr(self.settings, "live_transaction_emails_since", 0)
+        return (getattr(self.settings, "live_transaction_emails_enabled", False) is True
+                and type(since) is int and since > 0
+                and type(event.get("created")) is int and event["created"] >= since
+                and self.settings.email_ready)
+
+    async def _enqueue_mail(self, recipient, subject, body):
+        # Called by the shared handler only after the event was claimed. This
+        # appends to its active DB boundary, never EmailIntegration/Resend. The
+        # handler's single save commits event, state, audit and outbox together.
+        self.journal.enqueue_email(recipient, self.settings.email_from, subject, body)
 
     def validate_event(self, payload, signature):
         event = super().validate_event(payload, signature)
@@ -302,6 +315,11 @@ class LiveStripeWebhookService(StripeWebhookService):
             applied["event_type"] = "checkout.session.completed" if applied["paid_checkout_event"] else "checkout.session.expired"
         messages = super()._apply(event, applied)
         if messages:
+            if self._mail_enabled_for(event):
+                messages = [message for message in messages if message[0]]
+                if messages:
+                    self.store.audit(None, "webhook.email_queued", f"{event['id']}:{len(messages)}")
+                return messages
             self.store.audit(None, "webhook.email_suppressed", f"{event['id']}:{len(messages)}")
         return []
 

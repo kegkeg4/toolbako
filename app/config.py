@@ -13,6 +13,13 @@ def _strict_operation_flag(name: str) -> bool:
     return value == "true"
 
 
+def _strict_notification_epoch() -> int:
+    value = os.getenv("LIVE_TRANSACTION_EMAILS_SINCE", "0")
+    if not value.isascii() or not value.isdecimal():
+        raise ValueError("Invalid transaction notification start time")
+    return int(value)
+
+
 @dataclass(frozen=True)
 class Settings:
     environment: str = os.getenv("APP_ENV", "development").lower()
@@ -74,6 +81,9 @@ class Settings:
     stripe_connect_accounts_v2: bool = os.getenv("STRIPE_CONNECT_ACCOUNTS_V2", "false").lower() in {"1", "true", "yes"}
     email_api_key: str = os.getenv("EMAIL_API_KEY", "")
     email_from: str = os.getenv("EMAIL_FROM", "")
+    # Opt-in for new verified live events only. Never replay the old queue.
+    live_transaction_emails_enabled: bool = _strict_operation_flag("LIVE_TRANSACTION_EMAILS_ENABLED")
+    live_transaction_emails_since: int = _strict_notification_epoch()
     support_email: str = os.getenv("SUPPORT_EMAIL", "")
     sentry_dsn: str = os.getenv("SENTRY_DSN", "")
     # Only the operating entity is decided. Keep unverified legal contact details
@@ -113,6 +123,11 @@ class Settings:
     account_erasure_policy_revision: str = os.getenv("ACCOUNT_ERASURE_POLICY_REVISION", "").strip()
 
     def __post_init__(self) -> None:
+        if (type(self.live_transaction_emails_enabled) is not bool
+                or type(self.live_transaction_emails_since) is not int
+                or self.live_transaction_emails_since < 0
+                or self.live_transaction_emails_enabled and self.live_transaction_emails_since == 0):
+            raise ValueError("Invalid transaction notification configuration")
         if any(type(value) is not bool for value in (
                 self.stripe_live_checkout_enabled, self.stripe_live_refunds_enabled, self.stripe_live_payouts_enabled)):
             raise ValueError("Invalid financial operation boolean configuration")

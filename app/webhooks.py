@@ -167,7 +167,7 @@ class StripeWebhookService(StripeWebhookValidator):
                 if scope.mode == "live":
                     # Event data/version are fixed at creation, independent of
                     # the version used for this authenticated retrieval.
-                    immutable_fields += ("api_version",)
+                    immutable_fields += ("api_version", "created")
                 if (remote.get("account", event.get("account")) != event.get("account")
                         or any(remote.get(key) != event.get(key) for key in immutable_fields)):
                     raise FinancialScopeError()

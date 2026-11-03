@@ -123,6 +123,61 @@ def test_live_execute_proposal_is_rejected_before_service_or_provider(http_route
     assert "本番の返金実行はまだ開始していません" in response.text
 
 
+@pytest.mark.parametrize("mode,enabled,allowed", [
+    ("sandbox", True, False), ("live_read_only", True, False),
+    ("live_setup_only", True, False), ("live_financial", False, False),
+    ("live_financial", True, True), ("unknown", True, False),
+])
+def test_live_execute_route_uses_same_explicit_stage_and_refund_flag_as_service(
+        http_route, mode, enabled, allowed):
+    http_route.settings = replace(http_route.settings, stripe_secret_key="rk_live_synthetic",
+        stripe_connection_mode=mode, stripe_live_refunds_enabled=enabled)
+    inventory = routes.paid_out_refund_inventory(http_route.store, http_route.settings, http_route.backend)
+    assert inventory["execute_ready"] is allowed
+    response = http_route.client.post(URL + "propose", data={"review_action": "execute"}, follow_redirects=False)
+    assert response.status_code == (303 if allowed else 409)
+    assert http_route.calls == ([("propose", {"action": "execute"})] if allowed else [])
+
+
+@pytest.mark.parametrize("flag", [1, "true", None])
+def test_malformed_live_refund_flag_cannot_open_execute_route(http_route, flag):
+    http_route.settings = replace(http_route.settings, stripe_secret_key="rk_live_synthetic",
+        stripe_connection_mode="live_financial")
+    object.__setattr__(http_route.settings, "stripe_live_refunds_enabled", flag)
+    response = http_route.client.post(URL + "propose", data={"review_action": "execute"})
+    assert response.status_code == 409 and not http_route.calls
+
+
+@pytest.mark.parametrize("fault,status", [("one_admin", 409), ("no_backend", 409), ("no_mfa", 303), ("not_admin", 403)])
+def test_live_execute_flag_never_bypasses_existing_authorization(http_route, fault, status):
+    http_route.settings = replace(http_route.settings, stripe_secret_key="rk_live_synthetic",
+        stripe_connection_mode="live_financial", stripe_live_refunds_enabled=True)
+    if fault == "one_admin": http_route.settings = replace(http_route.settings, admin_user_ids=(ADMIN1, ADMIN1))
+    elif fault == "no_backend": http_route.backend = None
+    elif fault == "no_mfa": http_route.store.account_sessions["sid-" + ADMIN1].pop("mfa_verified_at")
+    headers = {"x-synthetic-user": "member"} if fault == "not_admin" else {}
+    response = http_route.client.post(URL + "propose", data={"review_action": "execute"}, headers=headers, follow_redirects=False)
+    assert response.status_code == status and not http_route.calls
+
+
+def test_live_execute_forwards_actual_mfa_request_and_rejects_service_failure(http_route, monkeypatch):
+    from app.finance import FinanceConflict
+    http_route.settings = replace(http_route.settings, stripe_secret_key="rk_live_synthetic",
+        stripe_connection_mode="live_financial", stripe_live_refunds_enabled=True)
+    seen = []
+    async def guarded(backend, store, stripe, settings, mfa, request, order_id, *, action):
+        assert backend is http_route.backend and store is http_route.store and stripe is http_route.stripe
+        assert settings is http_route.settings and mfa is http_route.mfa
+        assert request.method == "POST" and mfa.sessions.current(request)["id"] == ADMIN1
+        assert mfa.recent(request) and order_id == "order-one" and action == "execute"
+        seen.append(True)
+        raise FinanceConflict("synthetic-private-source-proof")
+    monkeypatch.setattr(routes, "propose_paid_out_refund_action", guarded)
+    response = http_route.client.post(URL + "propose", data={"review_action": "execute"})
+    assert response.status_code == 409 and seen == [True]
+    assert "synthetic-private-source-proof" not in response.text and "location" not in response.headers
+
+
 def test_live_reconciliation_proposal_can_reach_the_guarded_service(http_route):
     http_route.settings = replace(http_route.settings, stripe_secret_key="rk_live_synthetic")
     response = http_route.client.post(URL + "propose", data={"review_action": "reconcile"}, follow_redirects=False)
@@ -208,6 +263,18 @@ def test_live_ui_has_no_execute_controls_but_allows_read_reconciliation():
     reconcile = render(a_case(status="unknown", action="reconcile"), execute=False, user=ADMIN2)
     assert 'value="reconcile"' in reconcile and URL + 'approve"' in reconcile
     assert "再送しません" in reconcile and 'value="execute"' not in reconcile
+
+
+def test_enabled_live_inventory_shows_execution_and_separate_admin_approval(http_route):
+    http_route.settings = replace(http_route.settings, stripe_secret_key="rk_live_synthetic",
+        stripe_connection_mode="live_financial", stripe_live_refunds_enabled=True)
+    inventory = routes.paid_out_refund_inventory(http_route.store, http_route.settings, http_route.backend)
+    opened = render(a_case(), execute=inventory["execute_ready"], user=ADMIN1)
+    assert 'value="execute"' in opened
+    approval = render(a_case(status="proposed"), execute=inventory["execute_ready"], user=ADMIN2)
+    assert URL + 'approve"' in approval
+    own_approval = render(a_case(status="proposed"), execute=inventory["execute_ready"], user=ADMIN1)
+    assert URL + 'approve"' not in own_approval
 
 
 def test_refunded_case_has_no_resend_or_approval_form():

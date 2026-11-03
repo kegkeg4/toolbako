@@ -1,7 +1,8 @@
 """Admin-only entry points for the durable paid-out refund workflow.
 
-No live financial writes are enabled. Every call is reauthorized by the service
-against the current session, actual MFA, bound ledger and distinct admins.
+Live execution is default-off and follows the explicit refund operation flag.
+Every call is reauthorized by the service against the current session, actual
+MFA, bound ledger, ONE funding evidence and distinct admins.
 """
 from fastapi import APIRouter, Form, HTTPException, Request
 from starlette.responses import RedirectResponse
@@ -28,7 +29,12 @@ def paid_out_refund_inventory(store, settings, backend):
     candidates = [order for order in store.orders if FIELD in order or (
         order.get("payment_reference") in paid_receipts and order.get("status") == "cancel_pending"
         and order.get("refund_cancel_accepted_by"))]
-    return {"ready": ready, "execute_ready": ready and scope.mode == "test", "truncated": len(candidates) > 100,
+    # This is UI/route admission only. The execution service rechecks the real
+    # bound provider/database, immutable case, funding and two-person approval.
+    execute_ready = ready and (scope.mode == "test" or (
+        scope.mode == "live" and settings.stripe_connection_mode == "live_financial"
+        and settings.stripe_live_refunds_enabled is True))
+    return {"ready": ready, "execute_ready": execute_ready, "truncated": len(candidates) > 100,
             "items": [{"order_id": order["id"], "tool_name": order.get("tool_name", "商品"),
                        "amount": order.get("amount", 0), "case": order.get(FIELD)} for order in candidates[:100]]}
 
