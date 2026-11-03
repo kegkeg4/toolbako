@@ -72,17 +72,17 @@
     </div>
   </details>
 
-  {% if finance_controls_ready %}
+  {% if finance_controls_ready or live_recovery_ready %}
   <details class="finance-details">
-    <summary>結果不明の分配・分配取消・振込を照合する（テスト環境）</summary>
+    <summary>結果不明の分配・振込を照合する{% if not live_recovery_ready %}（テスト環境）{% endif %}</summary>
     <p>Stripeの分配・分配取消・銀行振込記録を読み取り、金額・口座・注文との一致を確認します。再送はしません。取消の申請は復旧後も取消処理を継続し、銀行振込へは進みません。残高の予約は保持されます。照合した管理者とは別の管理者が、2段階認証後に30分以内に承認してください。</p>
     {% for payout in finance.payouts if payout.finance_v2 and payout.status == 'review' %}
     <article class="finance-flow-note">
       <b>申請 {{ payout.id[:8] }} · ¥{{ '{:,}'.format(payout.net_amount) }}</b>
       <small>{{ payout.hold_reason|default('Stripeの結果確認が必要です') }}</small>
-      {% set recovery = payout.reconciliation|default({}) %}
+      {% set recovery = (payout.live_payout_recovery|default({})) if live_recovery_ready else (payout.reconciliation|default({})) %}
       {% if recovery.status == 'proposed' %}
-      <small>照合した記録: {{ recovery.provider_reference }} · 確認者: {{ recovery.proposed_by }}</small>
+      <small>照合した記録: {{ recovery.provider_reference|default(recovery.operation_id) }} · 確認者: {{ recovery.proposed_by }}</small>
       {% if recovery.proposed_by != user.id %}
       <form method="post" action="/admin/payouts/{{ payout.id }}/reconcile/approve">
         <input type="hidden" name="proposal_id" value="{{ recovery.id }}">
@@ -126,15 +126,15 @@
   </details>
 
   <details id="payment-recovery" class="finance-details">
-    <summary>結果不明の購入・追加支払い・返金を照合する（テスト環境）</summary>
+    <summary>結果不明の購入・追加支払い・返金を照合する{% if not live_recovery_ready %}（テスト環境）{% endif %}</summary>
     <p>Stripeの記録を読むだけで、再請求・再返金はしません。注文・金額・元決済が一致する記録を、別々の管理者2名が2段階認証後に確認します。0件・複数件・不一致の場合は保留を継続します。</p>
-    {% if not payment_recovery_ready %}<p class="control-unavailable">操作にはテスト用Stripe・永続DB・別々の管理者2名が必要です。本番の決済は引き続き停止しています。</p>{% endif %}
+    {% if not (payment_recovery_ready or live_recovery_ready) %}<p class="control-unavailable">操作には対象のStripe口座・永続DB・別々の管理者2名の接続確認が必要です。</p>{% endif %}
     {% if payment_recoveries.truncated %}<p role="alert">100件まで表示しています。表示されていない記録も保留中です。運営で詳細確認してください。</p>{% endif %}
     {% for recovery in payment_recoveries['items'] %}
     <article class="finance-flow-note">
       <b>{{ recovery.label }}{% if recovery.order_id %} · {{ recovery.tool_name }}{% endif %}</b>
       <small>{{ recovery.id }} · {{ '応答不明' if recovery.status == 'unknown' else '要求後に結果未記録' }}</small>
-      {% if recovery.order_id and payment_recovery_ready %}
+      {% if recovery.order_id and (payment_recovery_ready or live_recovery_ready) %}
       {% set proposal = recovery.proposal or {} %}
       {% if proposal.status == 'proposed' %}
       <small>照合した記録: {{ proposal.provider_reference }} · 確認者: {{ proposal.proposed_by }}</small>
@@ -157,9 +157,9 @@
   <details id="refund-resumption" class="finance-details">
     {% set resumptions = refund_resumptions|default({'items': [], 'truncated': false}) %}
     <summary>全額返金の開始・再開を確認する{% if not refund_live_inspection_available %}（テスト環境）{% endif %}</summary>
-    {% if refund_live_inspection_available %}<p>本番では承認前の読取検査のみ行えます。元決済と既存の返金明細をStripeから取得して照合します。検査結果は承認として保存されず、返金も実行しません。</p>{% endif %}
-    <p>キャンセル合意だけでは返金しません。テスト環境の承認・実行では、元の決済・金額・全明細を照合し、別々の管理者2名・直近の2段階認証・30分以内の承認を経て、未要求の明細を1件ずつ返金します。途中から再開するときは既存返金の全額成功も確認します。結果不明の返金は再送しません。</p>
-    {% if not payment_recovery_ready %}<p class="control-unavailable">返金の承認・実行はテスト用Stripe・永続DB・別々の管理者2名を接続した後に操作できます。本番では使えません。</p>{% endif %}
+    {% if refund_live_inspection_available %}<p>承認前の読取検査では、元決済と既存の返金明細をStripeから取得して照合します。検査結果は承認として保存されず、返金も実行しません。</p>{% endif %}
+    <p>キャンセル合意だけでは返金しません。元の決済・金額・全明細を照合し、別々の管理者2名・直近の2段階認証・30分以内の承認を経て、未要求の明細を1件ずつ返金します。途中から再開するときは既存返金の全額成功も確認します。結果不明の返金は再送しません。</p>
+    {% if not refund_execution_ready|default(payment_recovery_ready) %}<p class="control-unavailable">返金実行は停止中です。対象口座と取引台帳を確認し、運営が返金機能を有効にするまで承認・実行はできません。</p>{% endif %}
     {% if resumptions.truncated %}<p role="alert">100件まで表示しています。残りも保留中です。</p>{% endif %}
     {% for recovery in resumptions['items'] %}
     <article class="finance-flow-note">
@@ -170,18 +170,41 @@
       {% set proposal = recovery.proposal or {} %}
       {% if proposal.status == 'proposed' %}
       <small>未要求 {{ proposal.remaining_count }}件 · 次の返金 ¥{{ '{:,}'.format(proposal.next_amount) }}{% if not proposal.next_operation %}（既存返金の状態復元のみ）{% endif %} · 確認者 {{ proposal.proposed_by }}</small>
-      {% if payment_recovery_ready and proposal.proposed_by != user.id %}
+      {% if refund_execution_ready|default(payment_recovery_ready) and proposal.proposed_by != user.id %}
       <form method="post" action="/admin/orders/{{ recovery.order_id }}/refund-resumption/approve">
         <input type="hidden" name="proposal_id" value="{{ proposal.id }}">
-        <button data-confirm="テスト環境の全明細を再照合します。未要求の明細があれば、新たなテスト返金を1件だけ作成します。既存の返金は再送しません。">別の管理者として返金を承認</button>
+        <button data-confirm="全明細を再照合し、表示中の金額を購入者へ1件だけ返金します。既存の返金は再送しません。よろしいですか？">別の管理者として返金を承認</button>
       </form>
       {% elif proposal.proposed_by == user.id %}<small>別の管理者による承認を待っています（30分以内）。</small>{% endif %}
       {% endif %}
-      {% if payment_recovery_ready %}
+      {% if refund_execution_ready|default(payment_recovery_ready) %}
       <form method="post" action="/admin/orders/{{ recovery.order_id }}/refund-resumption/propose"><button>元決済・金額を照合して確認を記録</button></form>
       {% endif %}
     </article>
     {% else %}<p>キャンセル合意を記録した、開始・再開確認待ちの全額返金はありません。</p>{% endfor %}
   </details>
+  {% if live_payout_execution_ready %}
+  <details id="live-payout-execution" class="finance-details">
+    <summary>販売者への本番分配・銀行振込を確認する</summary>
+    <p>元の決済・販売者口座・資金・予定日を照合し、別々の管理者2名が追加認証後、30分以内に確認します。1回の承認で、分配または銀行振込を1件だけ実行します。結果不明の送金は再送しません。</p>
+    {% for payout in finance.payouts if payout.finance_v2 and payout.status in ['requested','transferring','awaiting_funds'] %}
+    <article class="finance-flow-note">
+      <b>申請 {{ payout.id[:8] }} · 銀行振込予定額 ¥{{ '{:,}'.format(payout.net_amount) }}</b>
+      {% set proposal = payout.live_payout_review|default({}) %}
+      {% if proposal.status == 'proposed' %}
+      {% set operation_label = '販売者口座へ分配' if proposal.endpoint == 'transfers' else '販売者の銀行へ振込' %}
+      <small>次の操作: {{ operation_label }} · ¥{{ '{:,}'.format(proposal.amount) }} · 確認者 {{ proposal.proposed_by }}</small>
+      {% if proposal.proposed_by != user.id %}
+      <form method="post" action="/admin/payouts/{{ payout.id }}/execute-live/approve">
+        <input type="hidden" name="proposal_id" value="{{ proposal.id }}">
+        <button data-confirm="本番の送金です。元決済・口座・資金を再照合し、{{ operation_label }}を{{ proposal.amount }}円で1件実行します。よろしいですか？">別の管理者として{{ operation_label }}を承認</button>
+      </form>
+      {% else %}<small>別の管理者による承認を待っています。</small>{% endif %}
+      {% endif %}
+      <form method="post" action="/admin/payouts/{{ payout.id }}/execute-live/propose"><button>次の分配・振込を読み取り照合して確認を記録</button></form>
+    </article>
+    {% else %}<p>確認待ちの分配・銀行振込はありません。</p>{% endfor %}
+  </details>
+  {% endif %}
   {% include '_admin_paid_out_refunds.html' %}
 </section>

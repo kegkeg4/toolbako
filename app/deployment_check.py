@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 LIVE_DATABASE_PROJECT = "xijdnqnsuhuciqyygnkg"
 LIVE_AUTH_STORAGE_URL = "https://xnjzgfaasbemffgorvnj.supabase.co"
 LIVE_PLATFORM_ACCOUNT = "acct_1Ty4WnIogL39waUY"
-LIVE_CONNECTION_STAGES = {"live_read_only", "live_setup_only"}
+LIVE_CONNECTION_STAGES = {"live_read_only", "live_setup_only", "live_financial"}
 LIVE_DATABASE_ENDPOINTS = {
     (f"db.{LIVE_DATABASE_PROJECT}.supabase.co", "postgres"),
     ("aws-0-ap-northeast-1.pooler.supabase.com", f"postgres.{LIVE_DATABASE_PROJECT}"),
@@ -50,10 +50,12 @@ def _live_database_config(settings: Settings) -> dict:
 
 def _live_configuration_verified(settings: Settings) -> bool:
     try:
-        from .live_setup_plan import STRIPE_API_VERSION
+        from .live_setup_plan import STRIPE_API_VERSION, WEBHOOK_API_VERSIONS
         scope = configured_scope(settings)
+        flags = (settings.stripe_live_refunds_enabled, settings.stripe_live_payouts_enabled)
         setup_notifications = (
             settings.stripe_api_version == STRIPE_API_VERSION
+            and settings.stripe_webhook_api_version in WEBHOOK_API_VERSIONS
             and settings.stripe_connect_accounts_v2 is False
             and all(isinstance(secret, str) and re.fullmatch(r"whsec_[A-Za-z0-9]+", secret)
                     for secret in (settings.stripe_webhook_secret, settings.stripe_connect_webhook_secret))
@@ -61,10 +63,16 @@ def _live_configuration_verified(settings: Settings) -> bool:
         )
         return bool(
             settings.stripe_connection_mode in LIVE_CONNECTION_STAGES
+            and settings.stripe_api_version == STRIPE_API_VERSION
+            and settings.stripe_connect_accounts_v2 is False
+            and all(type(value) is bool for value in flags)
+            and type(settings.stripe_live_seller_setup_enabled) is bool
             and ((settings.stripe_connection_mode == "live_setup_only"
-                  and settings.stripe_live_seller_setup_enabled is True and setup_notifications)
+                  and settings.stripe_live_seller_setup_enabled is True and setup_notifications and not any(flags))
                  or (settings.stripe_connection_mode == "live_read_only"
-                     and settings.stripe_live_seller_setup_enabled is False))
+                     and settings.stripe_live_seller_setup_enabled is False and not any(flags)
+                     and settings.stripe_webhook_api_version in WEBHOOK_API_VERSIONS)
+                 or (settings.stripe_connection_mode == "live_financial" and setup_notifications))
             and re.fullmatch(r"rk_live_[A-Za-z0-9]+", settings.stripe_secret_key)
             and scope is not None and scope.mode == "live"
             and scope.platform_account == LIVE_PLATFORM_ACCOUNT
@@ -256,6 +264,8 @@ def configuration_checks(settings: Settings) -> dict[str, bool]:
     else:
         results["stripe_connection_mode"] = settings.stripe_connection_mode == "sandbox"
         results["live_seller_setup_disabled"] = settings.stripe_live_seller_setup_enabled is False
+        results["live_financial_operations_disabled"] = (
+            settings.stripe_live_refunds_enabled is False and settings.stripe_live_payouts_enabled is False)
     return results
 
 

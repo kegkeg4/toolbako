@@ -9,6 +9,7 @@ import re
 
 
 STRIPE_API_VERSION = "2026-02-25.clover"
+WEBHOOK_API_VERSIONS = frozenset({STRIPE_API_VERSION, "2026-06-24.dahlia"})
 PLATFORM_EVENTS = (
     "checkout.session.completed",
     "checkout.session.async_payment_succeeded",
@@ -33,7 +34,7 @@ class SetupPlanError(ValueError):
         super().__init__("invalid_live_setup_plan_input")
 
 
-def build_live_setup_plan(site_base_url, platform_account):
+def build_live_setup_plan(site_base_url, platform_account, *, webhook_api_version=STRIPE_API_VERSION):
     """Return a configuration packet; never claim external readiness."""
     try:
         parsed = urlsplit(site_base_url)
@@ -53,7 +54,8 @@ def build_live_setup_plan(site_base_url, platform_account):
         )
     except (AttributeError, TypeError, ValueError):
         valid = False
-    if not valid:
+    if (not valid or not isinstance(webhook_api_version, str)
+            or webhook_api_version not in WEBHOOK_API_VERSIONS):
         raise SetupPlanError()
     base = site_base_url.rstrip("/")
     return {
@@ -71,7 +73,7 @@ def build_live_setup_plan(site_base_url, platform_account):
                 "scope": "your_account",
                 "connect": False,
                 "url": base + "/webhooks/stripe/live",
-                "api_version": STRIPE_API_VERSION,
+                "api_version": webhook_api_version,
                 "enabled_events": list(PLATFORM_EVENTS),
                 "pending_secret_variable": "STRIPE_LIVE_PENDING_WEBHOOK_SECRET",
             },
@@ -79,7 +81,7 @@ def build_live_setup_plan(site_base_url, platform_account):
                 "scope": "connected_accounts",
                 "connect": True,
                 "url": base + "/webhooks/stripe/connect/live",
-                "api_version": STRIPE_API_VERSION,
+                "api_version": webhook_api_version,
                 "enabled_events": list(CONNECT_EVENTS),
                 "pending_secret_variable": "STRIPE_LIVE_PENDING_CONNECT_WEBHOOK_SECRET",
             },

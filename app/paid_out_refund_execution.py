@@ -1,11 +1,11 @@
-"""Durable paid-out refund workflow; execution remains Sandbox-only.
+"""Durable paid-out refunds; live execution is narrowly default-off.
 
 Cases live in the existing private order snapshot. Immutable opening evidence,
 approval consumption and Stripe intent share the existing database boundary.
 No schema migration, seller collection, netting, email or payout mutation is
 performed. A production router is NOT installed by this module. Live GET review
-is supported only for an explicitly bound dataset; the existing live POST block
-and an additional Sandbox execution gate remain in place.
+is supported only for an explicitly bound dataset. The generic live POST block
+remains; the separate refund flag never enables collection, transfer or payout.
 
 ONE reserve references are accountable admin attestations, not automated proof
 of economic ownership. Provider available JPY is checked separately as liquidity.
@@ -15,7 +15,9 @@ from datetime import datetime, timezone
 import json
 from uuid import UUID, uuid4, uuid5
 
-from .database import content_hash
+import httpx
+
+from .database import content_hash, restore
 from .finance import FinanceConflict
 from .financial_scope import FinancialScope, configured_scope
 from .integrations import StripeIntegration, StripeOutcomeUnknown
@@ -62,6 +64,11 @@ async def _context(backend, store, stripe, settings, mfa, request):
     scope = configured_scope(settings)
     _require(isinstance(scope, FinancialScope) and stripe.financial_scope == scope)
     await backend.assert_financial_scope(scope)
+    if scope.mode == "live":
+        from .refund_resumption import live_refund_context
+        verified_actor, verified_admins, verified_scope = await live_refund_context(
+            backend, store, stripe, settings, mfa, request)
+        _require((verified_actor, verified_scope) == (user["id"], scope) and set(admins) == verified_admins)
     return user["id"], admins, scope
 
 
@@ -197,6 +204,8 @@ async def _collect(backend, store, stripe, order, case, scope, at, *, verify_ope
     payment = await stripe.retrieve_payment(c["payment_id"])
     bank = await stripe.retrieve_payout(payout["provider_payout_id"], payout["account_id"])
     transfer = await stripe._get("transfers/" + allocation["transfer_id"])
+    if scope.mode == "live":
+        await _live_paid_sources(backend, scope, order, payout, allocation, payment, bank, transfer)
     refunds = await stripe.list_financial_objects("refunds", params={"payment_intent": c["payment_id"]})
     reversals = await stripe.list_financial_objects("transfers/" + allocation["transfer_id"] + "/reversals")
     # Seller recovery is separate and not executed/automatically adopted here.
@@ -210,6 +219,7 @@ async def _collect(backend, store, stripe, order, case, scope, at, *, verify_ope
             metadata = remote.get("metadata") or {}
             _require(metadata.get("paid_out_case_id") == c["id"] and metadata.get("ledger_id") == scope.ledger_id
                      and remote.get("created", 0) >= int(operation["created_at"].timestamp()))
+            _require("livemode" not in remote or remote["livemode"] is scope.livemode)
             previous = await backend.operation_result(_key(case))
             if previous["status"] == "succeeded":
                 _require(previous["response"]["id"] == remote.get("id"))
@@ -226,6 +236,139 @@ async def _collect(backend, store, stripe, order, case, scope, at, *, verify_ope
                    "refunds": items, "recoveries": []},
         funding=case["funding"], observed_at=at, at=at)
     return inspection, operation, refunds[0] if refunds else None, balance
+
+
+async def _live_paid_sources(backend, scope, order, payout, allocation, payment, bank, transfer):
+    """The original live allocation/bank intents, not relabelled test history."""
+    from .live_payout_execution import request_data, remote_proof
+    for source in (payment, payment.get("latest_charge", {})):
+        _require(isinstance(source, dict))
+        metadata = source.get("metadata")
+        _require(isinstance(metadata, dict) and metadata.get("order_id") == order["id"]
+                 and metadata.get("ledger_id") == scope.ledger_id and "extra_id" not in metadata)
+    charge = payment["latest_charge"]
+    _require(charge.get("refunded") is (charge.get("amount_refunded") == order["amount"]))
+    for item, remote in ((allocation, transfer), (None, bank)):
+        key, path, data = request_data(scope, payout, item)
+        details, result = await backend.operation_details(key), await backend.operation_result(key)
+        _require(details is not None and details["endpoint"] == path and details["status"] == "succeeded"
+                 and details["request_hash"] == content_hash(data) and result is not None
+                 and result["status"] == "succeeded" and (result.get("response") or {}).get("id") == remote.get("id"))
+        remote_proof(scope, payout, item, remote)
+
+
+async def _live_reserves(backend, store, stripe, scope, case, *, current_operation=None):
+    uncertain = await (await backend._connection.execute(
+        "select operation_id from toolbako_runtime.stripe_operations where status in ('pending','unknown') "
+        "and (endpoint in ('refunds','transfers','payouts') or endpoint like 'transfers/%%/reversals') "
+        "and operation_id<>%s limit 1", (current_operation or "",),
+    )).fetchone()
+    _require(uncertain is None)
+    reserves, ids = case["case"]["refund_amount"], {case["funding"]["reserve_id"]}
+    for order in store.orders:
+        if FIELD in order:
+            other = order[FIELD]
+            if other is case:
+                continue
+            _require(isinstance(other, dict) and other.get("scope") == scope.payload())
+            await _verify_opening(backend, other)
+            reserve_id = other["funding"]["reserve_id"]
+            _require(reserve_id not in ids)
+            ids.add(reserve_id)
+            if other.get("buyer_refund", {}).get("state") != "complete":
+                amount = other["case"]["refund_amount"]
+                _require(type(amount) is int and amount > 0)
+                reserves += amount
+        else:
+            _require(order.get("primary_refund_status") not in {"pending", "partial"}
+                     and not any(e.get("refund_status") in {"pending", "partial"} for e in order.get("pending_extras", [])))
+    balance = await stripe._get("balance")
+    _require(balance.get("object") == "balance" and balance.get("livemode") is True
+             and _liquidity(balance) >= reserves)
+
+
+def _live_actor_now(store, settings, mfa, request, case, actor, *, executing=False):
+    user, admins = mfa.sessions.current(request), _admins(store, settings)
+    proposal = case["proposal"]
+    _require(request.method == "POST" and user is not None and user["id"] == actor and actor in admins
+             and mfa.recent(request) and len(admins) >= 2 and proposal["proposed_by"] in admins
+             and proposal["proposed_by"] != actor and case["funding"]["approved_by"] in admins
+             and datetime.now(timezone.utc) >= proposal["proposed_at"]
+             and datetime.now(timezone.utc) - proposal["proposed_at"] <= REVIEW_WINDOW)
+    if executing:
+        approval = case.get("last_approval") or {}
+        _require(case.get("status") == "submitting" and proposal["action"] == "execute"
+                 and case["consumed_proposals"].count(proposal["id"]) == 1
+                 and approval.get("id") == proposal["id"] and approval.get("action") == "execute"
+                 and approval.get("approved_by") == actor and approval.get("proposed_by") == proposal["proposed_by"]
+                 and approval.get("fingerprint") == proposal["fingerprint"])
+
+
+def _restore_checkpoint(backend, store):
+    if backend._checkpoint is not None:
+        restore(store, backend._checkpoint)
+    backend._emails.clear()
+
+
+async def _execute_live(backend, store, stripe, settings, mfa, request, order, case, scope, actor):
+    """One fixed refund after consumed approval + pending intent commit."""
+    from .refund_resumption import _live_execution_enabled
+    from .live_setup_plan import STRIPE_API_VERSION
+    key, data = _key(case), _data(case)
+    try:
+        _live_execution_enabled(settings, stripe)
+        await _proposal_record(backend, case)
+        _live_actor_now(store, settings, mfa, request, case, actor, executing=True)
+        cached = await backend.begin_operation(key, "refunds", data)
+        _require(cached is None)
+    except Exception:
+        _restore_checkpoint(backend, store)
+        raise
+    try:
+        inspection, operation, remote, _ = await _collect(backend, store, stripe, order, case, scope, _now(None))
+        buyer = inspection.payload()["buyer_refund"]
+        _require(operation is not None and operation["status"] == "pending" and remote is None
+                 and buyer["confirmed"] == 0 and buyer["remaining"] == case["case"]["refund_amount"]
+                 and set(buyer["holds"]) <= {"unknown_operation"})
+        await _live_reserves(backend, store, stripe, scope, case, current_operation=key)
+        async with httpx.AsyncClient(timeout=20, follow_redirects=False) as client:
+            _live_execution_enabled(settings, stripe)
+            _live_actor_now(store, settings, mfa, request, case, actor, executing=True)
+            response = await client.post("https://api.stripe.com/v1/refunds", data=data, headers={
+                "Authorization": f"Bearer {stripe.secret_key}", "Idempotency-Key": key,
+                "Stripe-Version": STRIPE_API_VERSION})
+        if response.status_code in {400, 401, 403, 404, 422}:
+            await backend.finish_operation(key, "rejected")
+            case["status"] = "held"
+            await backend.save()
+            raise FinanceConflict("返金要求は拒否されています。再送せず確認してください")
+        _require(response.status_code in {200, 201})
+        result = response.json()
+        _require(isinstance(result, dict))
+        inspection, operation, remote, _ = await _collect(backend, store, stripe, order, case, scope, _now(None))
+        _require(remote is not None and _minimal(result) == _minimal(remote)
+                 and operation["status"] == "pending")
+    except Exception:
+        details = await backend.operation_details(key)
+        if details and details["status"] == "rejected":
+            raise FinanceConflict("返金要求は拒否されています。再送せず確認してください") from None
+        if details and details["status"] == "pending":
+            await backend.finish_operation(key, "unknown")
+        case["status"] = "unknown"
+        await backend.save()
+        raise StripeOutcomeUnknown(key) from None
+    try:
+        buyer = inspection.payload()["buyer_refund"]
+        if buyer["confirmed"] == case["case"]["refund_amount"] and set(buyer["holds"]) <= {"unknown_operation"}:
+            _settle_case(case, inspection, remote)
+        else:
+            case["buyer_refund"] = buyer | {"holds": sorted(set(buyer["holds"]) - {"unknown_operation"})}
+            case["status"] = "awaiting_confirmation"
+        await backend.reconcile_operation(key, endpoint="refunds", request_hash=content_hash(data), response=_minimal(remote))
+    except Exception:
+        _restore_checkpoint(backend, store)
+        raise
+    return case["status"]
 
 
 async def open_paid_out_refund_case(backend, store, stripe, settings, mfa, request, order_id,
@@ -251,6 +394,8 @@ async def open_paid_out_refund_case(backend, store, stripe, settings, mfa, reque
     inspection, operation, remote, balance = await _collect(backend, store, stripe, order, case, scope, at, verify_opening=False)
     _require(operation is None and not inspection.payload()["buyer_refund"]["holds"]
              and _liquidity(balance) >= order["amount"] + _reserved_other(store, case))
+    if scope.mode == "live":
+        await _live_reserves(backend, store, stripe, scope, case)
     case.update(buyer_refund=inspection.payload()["buyer_refund"], seller_recovery=inspection.payload()["seller_recovery"])
     order[FIELD] = case
     await _commit_opening(backend, store, case, actor)
@@ -265,6 +410,8 @@ async def propose_paid_out_refund_action(backend, store, stripe, settings, mfa, 
     _require(isinstance(case, dict) and action in {"execute", "reconcile"})
     inspection, operation, remote, balance = await _collect(backend, store, stripe, order, case, scope, at)
     _action_ready(action, case, inspection, operation, remote, balance, store)
+    if scope.mode == "live" and action == "execute":
+        await _live_reserves(backend, store, stripe, scope, case)
     proposal = propose_paid_out_refund(inspection, proposal_id=str(uuid4()), actor_id=actor, admin_ids=admins, at=at)
     case["proposal"] = {"id": proposal.id, "case_id": proposal.case_id, "scope": scope.payload(),
                         "fingerprint": proposal.fingerprint, "proposed_by": actor, "proposed_at": at, "action": action}
@@ -301,20 +448,33 @@ async def approve_paid_out_refund_action(backend, store, stripe, settings, mfa, 
     review_paid_out_refund(proposal, inspection, actor_id=actor, admin_ids=admins,
                           consumed_proposal_ids=frozenset(case["consumed_proposals"]), at=at)
     if p["action"] == "execute":
-        # This adapter cannot authorize a live write; keep both existing gates.
-        require_sandbox_review(backend, store, stripe, settings, actor)
+        if scope.mode == "live":
+            from .refund_resumption import _live_execution_enabled
+            _live_execution_enabled(settings, stripe)
+            await _live_reserves(backend, store, stripe, scope, case)
+        else:
+            require_sandbox_review(backend, store, stripe, settings, actor)
+    if scope.mode == "live":
+        _live_actor_now(store, settings, mfa, request, case, actor)
     case["consumed_proposals"].append(p["id"])
     case["last_approval"] = {"id": p["id"], "proposed_by": p["proposed_by"], "approved_by": actor,
                              "approved_at": at, "fingerprint": inspection.fingerprint, "action": p["action"]}
     store.audit(actor, "finance.paid_out_refund_approved", json.dumps(encode_value(case["last_approval"]), sort_keys=True))
     if p["action"] == "reconcile":
-        _settle_case(case, inspection, remote)
-        if operation["status"] in {"pending", "unknown"}:
-            await backend.reconcile_operation(_key(case), endpoint="refunds", request_hash=content_hash(_data(case)), response=_minimal(remote))
-        else:
-            await backend.save()
+        try:
+            _settle_case(case, inspection, remote)
+            if operation["status"] in {"pending", "unknown"}:
+                await backend.reconcile_operation(_key(case), endpoint="refunds", request_hash=content_hash(_data(case)), response=_minimal(remote))
+            else:
+                await backend.save()
+        except Exception:
+            if scope.mode == "live":
+                _restore_checkpoint(backend, store)
+            raise
         return case["status"]
     case["status"] = "submitting"
+    if scope.mode == "live":
+        return await _execute_live(backend, store, stripe, settings, mfa, request, order, case, scope, actor)
     # begin_operation commits consumed approval + pending intent BEFORE POST.
     try:
         await stripe._post("refunds", {"_idempotency_key": _key(case), **_data(case)})

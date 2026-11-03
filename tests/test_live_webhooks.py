@@ -17,11 +17,13 @@ from app.config import Settings
 from app.data import DemoStore
 from app.database import snapshot, restore
 from app.financial_scope import FinancialScope, FinancialScopeError
+from app.finance import FinanceConflict
 from app.integrations import StripeIntegration
 from app.live_webhooks import build_live_webhook_handler, LiveWebhookDispatcherMiddleware
 from app.middleware import ProductionGuardMiddleware
 from test_payment_source_proof import source
 from test_database import database, query
+from test_live_payout_execution import live as live_payout_fixture, transfer, propose, approve
 
 
 SCOPE = FinancialScope("live", "acct_LivePlatform", "11111111-1111-4111-8111-111111111111")
@@ -48,6 +50,8 @@ class MemoryBoundary:
         self.fail_open = self.fail_save = False
         self._store = None
         self.operations = {}
+        self.bank_validations = []
+        self.fail_bank_validation = False
 
     @asynccontextmanager
     async def request(self, store):
@@ -106,6 +110,19 @@ class ProviderResponses:
         self.objects[("events/" + event["id"], event.get("account"))] = deepcopy(event)
 
 
+def mock_memory_bank_validation(monkeypatch):
+    """Explicit memory-test seam; real PG durability is tested separately."""
+    async def validate(backend, provider, scope, payout, remote):
+        assert isinstance(backend, MemoryBoundary), "Never mock a real database's payout proof"
+        await backend.assert_financial_scope(scope)
+        assert provider.journal is backend and provider.financial_scope == scope
+        assert remote["id"] == payout["provider_payout_id"]
+        backend.bank_validations.append((payout["id"], remote["id"]))
+        if backend.fail_bank_validation:
+            raise FinanceConflict("synthetic original intent not proven")
+    monkeypatch.setattr("app.live_webhooks.validate_live_bank_notification", validate)
+
+
 def seed():
     store = DemoStore(seed=False)
     store.registered_users["seller"] = {"id": "seller", "email": "seller@example.invalid"}
@@ -147,6 +164,7 @@ def build_app(handler, settings):
 
 @pytest.fixture
 def fixture(monkeypatch):
+    mock_memory_bank_validation(monkeypatch)
     responses = ProviderResponses(monkeypatch)
     store = seed()
     settings = configuration()
@@ -522,7 +540,9 @@ def payout_evidence(fixture):
         "provider_payout_id": "po_fixture", "status": "bank_pending", "net_amount": 800}]
     backend.committed = snapshot(store)
     obj = {"object": "payout", "id": "po_fixture", "amount": 800, "currency": "jpy", "livemode": True,
-        "status": "paid", "automatic": False, "method": "standard", "type": "bank_account", "metadata": {"payout_id": "payout1"}}
+        "status": "paid", "automatic": False, "method": "standard", "type": "bank_account",
+        "metadata": {"payout_id": "payout1", "ledger_id": SCOPE.ledger_id,
+                     "platform_account_id": SCOPE.platform_account}}
     notification = event("payout.paid", obj, identifier="evt_payout")
     responses.event(notification)
     responses.objects[("payouts/po_fixture", "acct_seller")] = deepcopy(obj)
@@ -530,12 +550,13 @@ def payout_evidence(fixture):
 
 
 def test_payout_uses_connected_get_and_late_paid_snapshot_cannot_undo_current_failure(fixture):
-    client, store, _, _, responses, _ = fixture
+    client, store, backend, _, responses, _ = fixture
     notification = payout_evidence(fixture)
     responses.objects[("payouts/po_fixture", "acct_seller")]["status"] = "failed"
     assert deliver(client, notification).status_code == 200
     assert store.payouts[0]["status"] == "bank_failed"
     assert ("payouts/po_fixture", "acct_seller") in responses.calls
+    assert backend.bank_validations == [("payout1", "po_fixture")]
 
 
 @pytest.mark.parametrize("field,value", [("amount", True), ("amount", 799), ("livemode", False),
@@ -546,6 +567,54 @@ def test_payout_amount_mode_and_type_mismatch_never_marks_paid(fixture, field, v
     responses.objects[("payouts/po_fixture", "acct_seller")][field] = value
     assert deliver(client, notification).status_code == (503 if field == "livemode" else 400)
     assert store.payouts[0]["status"] == "bank_pending" and not store.processed_webhook_events
+
+
+@pytest.mark.parametrize("stage", ["signed", "current"])
+@pytest.mark.parametrize("field,missing", [("ledger_id", True), ("ledger_id", False),
+    ("platform_account_id", True), ("platform_account_id", False)])
+def test_payout_requires_exact_ledger_and_platform_in_signed_and_current_objects(fixture, stage, field, missing):
+    client, store, backend, _, responses, _ = fixture
+    notification = payout_evidence(fixture)
+    target = notification["data"]["object"] if stage == "signed" else responses.objects[("payouts/po_fixture", "acct_seller")]
+    if missing: target["metadata"].pop(field)
+    else: target["metadata"][field] = "different"
+    if stage == "signed": responses.event(notification)
+    assert deliver(client, notification).status_code == 400
+    assert store.payouts[0]["status"] == "bank_pending" and not store.processed_webhook_events
+    assert not backend.bank_validations
+
+
+def test_unproven_durable_bank_intent_is_never_acknowledged(fixture):
+    client, store, backend, _, _, _ = fixture
+    notification = payout_evidence(fixture)
+    backend.fail_bank_validation = True
+    assert deliver(client, notification).status_code == 409
+    assert store.payouts[0]["status"] == "bank_pending" and not store.processed_webhook_events
+
+
+def test_real_postgres_payout_hook_uses_actual_scoped_journal_validator(live_payout_fixture):
+    from app import live_payout_execution, live_webhooks
+    assert live_webhooks.validate_live_bank_notification is live_payout_execution.validate_live_bank_notification
+    e = live_payout_fixture
+    async def prepare():
+        await transfer(e)
+        async with e.backend.request(e.store):
+            await approve(e, await propose(e))
+    asyncio.run(prepare())
+    settings = replace(e.settings, stripe_webhook_secret=SECRET, stripe_connect_webhook_secret=CONNECT_SECRET)
+    e.bank_status = "paid"
+    obj = {**deepcopy(e.payouts[0]), "status": "paid"}
+    notification = event("payout.paid", obj, identifier="evt_livebank")
+    e.events[notification["id"]] = deepcopy(notification)
+    client = build_app(build_live_webhook_handler(settings, e.store, e.backend, e.stripe), settings)
+    posts = len(e.posts)
+    response = deliver(client, notification)
+    assert response.status_code == 200, response.text
+    assert e.store.payouts[0]["status"] == "paid"
+    assert query(e.dsn, "select payload->'payouts'->0->>'status' from toolbako_runtime.marketplace_state where singleton") == [("paid",)]
+    assert query(e.dsn, "select count(*) from toolbako_runtime.audit_events where action='webhook.processed'") == [(1,)]
+    assert deliver(client, notification).json()["duplicate"] is True
+    assert len(e.posts) == posts
 
 
 def test_dispute_binds_live_parent_amount_and_keeps_payment_record(fixture):

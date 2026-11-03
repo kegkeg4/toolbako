@@ -29,14 +29,14 @@
         {% if proposal.proposed_by != user.id and (proposal.action == 'reconcile' or paid_refunds.execute_ready) %}
         <form method="post" action="/admin/orders/{{ item.order_id }}/paid-out-refund/approve">
           <input type="hidden" name="proposal_id" value="{{ proposal.id }}">
-          <button data-confirm="元決済・原資・振込記録を再照合します。表示中の{{ '既存返金の確認' if proposal.action == 'reconcile' else 'テスト返金' }}を承認しますか？">別の管理者として{{ '既存返金の照合' if proposal.action == 'reconcile' else 'テスト返金' }}を承認</button>
+          <button data-confirm="元決済・ONEの原資・振込記録を再照合します。表示中の{{ '既存返金の確認' if proposal.action == 'reconcile' else '購入者への返金' }}を承認しますか？">別の管理者として{{ '既存返金の照合' if proposal.action == 'reconcile' else '購入者への返金' }}を承認</button>
         </form>
         {% endif %}
       {% endif %}
       {% if case.status in ['unknown', 'awaiting_confirmation', 'submitting', 'awaiting_review'] %}
       <form method="post" action="/admin/orders/{{ item.order_id }}/paid-out-refund/propose"><input type="hidden" name="review_action" value="reconcile"><button>既存返金を照会する（再送しません）</button></form>
       {% elif case.status == 'opened' and paid_refunds.execute_ready %}
-      <form method="post" action="/admin/orders/{{ item.order_id }}/paid-out-refund/propose"><input type="hidden" name="review_action" value="execute"><button>テスト返金の実行前確認を記録</button></form>
+      <form method="post" action="/admin/orders/{{ item.order_id }}/paid-out-refund/propose"><input type="hidden" name="review_action" value="execute"><button>購入者への返金の実行前確認を記録</button></form>
       {% endif %}
     {% endif %}
     {% endif %}

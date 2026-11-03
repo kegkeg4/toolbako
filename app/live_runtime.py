@@ -51,11 +51,18 @@ def prepare_runtime_launch(action, environment):
     selection = env.get("LIVE_RUNTIME_CONFIG", "off")
     _require(selection in {"off", "isolated_v1"})
     if selection == "isolated_v1":
+        from .live_setup_plan import STRIPE_API_VERSION, WEBHOOK_API_VERSIONS
         mode = env.get("STRIPE_CONNECTION_MODE")
         flag = env.get("STRIPE_LIVE_SELLER_SETUP_ENABLED", "false")
-        _require((mode, flag) in {("live_read_only", "false"), ("live_setup_only", "true")}
+        financial_flags = [env.get(name, "false") for name in
+                           ("STRIPE_LIVE_REFUNDS_ENABLED", "STRIPE_LIVE_PAYOUTS_ENABLED")]
+        _require(flag in {"true", "false"} and all(value in {"true", "false"} for value in financial_flags))
+        _require(((mode, flag) in {("live_read_only", "false"), ("live_setup_only", "true")}
+                  and financial_flags == ["false", "false"] or mode == "live_financial")
                  and env.get("APP_ENV") in {"staging", "production"}
                  and env.get("DEMO_MODE", "false") == "false"
+                 and env.get("STRIPE_API_VERSION", STRIPE_API_VERSION) == STRIPE_API_VERSION
+                 and env.get("STRIPE_CONNECT_ACCOUNTS_V2", "false") == "false"
                  and env.get("STRIPE_CHARGE_MODE") == "separate"
                  and env.get("STRIPE_PLATFORM_ACCOUNT_ID") == "acct_1Ty4WnIogL39waUY"
                  and env.get("SUPABASE_URL", "").rstrip("/") == "https://xnjzgfaasbemffgorvnj.supabase.co"
@@ -87,10 +94,13 @@ def prepare_runtime_launch(action, environment):
                 _require(re.fullmatch(r"whsec_[A-Za-z0-9]+", value) is not None)
             # Never inherit a test endpoint signature after live key selection.
             env[active] = value
-        if mode == "live_setup_only":
+        webhook_version = env.get("STRIPE_WEBHOOK_API_VERSION", STRIPE_API_VERSION)
+        _require(webhook_version in WEBHOOK_API_VERSIONS)
+        env["STRIPE_WEBHOOK_API_VERSION"] = webhook_version
+        if mode in {"live_setup_only", "live_financial"}:
             _require(env["STRIPE_WEBHOOK_SECRET"] and env["STRIPE_CONNECT_WEBHOOK_SECRET"]
                      and env["STRIPE_WEBHOOK_SECRET"] != env["STRIPE_CONNECT_WEBHOOK_SECRET"]
-                     and env.get("STRIPE_API_VERSION", "2026-02-25.clover") == "2026-02-25.clover"
+                     and env.get("STRIPE_API_VERSION", STRIPE_API_VERSION) == STRIPE_API_VERSION
                      and env.get("STRIPE_CONNECT_ACCOUNTS_V2", "false") == "false")
     if action == "preflight":
         argv = [sys.executable, "-m", "app.deployment_check"]

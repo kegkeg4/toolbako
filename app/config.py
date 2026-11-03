@@ -6,6 +6,13 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+def _strict_operation_flag(name: str) -> bool:
+    value = os.getenv(name, "false")
+    if value not in {"true", "false"}:
+        raise ValueError("Invalid financial operation boolean configuration")
+    return value == "true"
+
+
 @dataclass(frozen=True)
 class Settings:
     environment: str = os.getenv("APP_ENV", "development").lower()
@@ -44,6 +51,10 @@ class Settings:
     # Separate, explicit setup-only permission. This never enables payment,
     # refund, transfer or payout APIs and cannot extend live_read_only.
     stripe_live_seller_setup_enabled: bool = os.getenv("STRIPE_LIVE_SELLER_SETUP_ENABLED", "false") == "true"
+    # Independent financial capabilities. Neither changes Checkout readiness
+    # or the generic Stripe POST denial; domain executors still verify proofs.
+    stripe_live_refunds_enabled: bool = _strict_operation_flag("STRIPE_LIVE_REFUNDS_ENABLED")
+    stripe_live_payouts_enabled: bool = _strict_operation_flag("STRIPE_LIVE_PAYOUTS_ENABLED")
     # Optional until a separately reviewed dataset is bound. Supplying these
     # never enables live writes or automatically rebinds existing test data.
     stripe_platform_account_id: str = os.getenv("STRIPE_PLATFORM_ACCOUNT_ID", "").strip()
@@ -56,6 +67,9 @@ class Settings:
     # funds until acceptance and then create an explicit Connect transfer.
     stripe_charge_mode: str = os.getenv("STRIPE_CHARGE_MODE", "destination").lower()
     stripe_api_version: str = os.getenv("STRIPE_API_VERSION", "2026-02-25.clover")
+    # Signed notifications may use a separately reviewed provider version.
+    # Outbound GET/POST remains pinned by stripe_api_version.
+    stripe_webhook_api_version: str = os.getenv("STRIPE_WEBHOOK_API_VERSION", "2026-02-25.clover")
     stripe_connect_accounts_v2: bool = os.getenv("STRIPE_CONNECT_ACCOUNTS_V2", "false").lower() in {"1", "true", "yes"}
     email_api_key: str = os.getenv("EMAIL_API_KEY", "")
     email_from: str = os.getenv("EMAIL_FROM", "")
@@ -97,6 +111,9 @@ class Settings:
     account_erasure_policy_revision: str = os.getenv("ACCOUNT_ERASURE_POLICY_REVISION", "").strip()
 
     def __post_init__(self) -> None:
+        if any(type(value) is not bool for value in (
+                self.stripe_live_refunds_enabled, self.stripe_live_payouts_enabled)):
+            raise ValueError("Invalid financial operation boolean configuration")
         configured_providers = self.oauth_providers if isinstance(self.oauth_providers, tuple) else ()
         object.__setattr__(self, "oauth_providers", tuple(
             provider for provider in ("google", "twitter") if provider in configured_providers

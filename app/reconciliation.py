@@ -147,7 +147,11 @@ async def _bounded_inspect(*args):
         raise FinanceConflict("Stripeの照合がタイムアウトしました。再送せず再確認してください") from None
 
 
-async def propose_recovery(backend, store, stripe, settings, payout, actor_id, *, at=None):
+async def propose_recovery(backend, store, stripe, settings, payout, actor_id, *, at=None, mfa=None, request=None):
+    if settings.stripe_secret_key.startswith(("sk_live_", "rk_live_")):
+        from .live_payout_execution import propose_live_recovery
+        return await propose_live_recovery(backend, store, stripe, settings, payout, actor_id,
+                                           at=at, mfa=mfa, request=request)
     _allowed(settings, stripe, backend, actor_id, store)
     if payout["status"] != "review":
         raise FinanceConflict("運営確認中の申請だけ照合できます")
@@ -162,7 +166,11 @@ async def propose_recovery(backend, store, stripe, settings, payout, actor_id, *
     return proposal
 
 
-async def approve_recovery(backend, store, stripe, settings, payout, actor_id, proposal_id, *, at=None):
+async def approve_recovery(backend, store, stripe, settings, payout, actor_id, proposal_id, *, at=None, mfa=None, request=None):
+    if settings.stripe_secret_key.startswith(("sk_live_", "rk_live_")):
+        from .live_payout_execution import approve_live_recovery
+        return await approve_live_recovery(backend, store, stripe, settings, payout, actor_id, proposal_id,
+                                           at=at, mfa=mfa, request=request)
     _allowed(settings, stripe, backend, actor_id, store)
     proposal = payout.get("reconciliation") or {}
     at = at or datetime.now(timezone.utc)

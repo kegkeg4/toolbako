@@ -61,6 +61,7 @@ from .reconciliation import propose_recovery, approve_recovery
 from .payout_recovery import propose_failed_payout, approve_failed_payout
 from .payment_reconciliation import KINDS as PAYMENT_RECOVERY_KINDS, payment_recovery_inventory, propose_payment_recovery, approve_payment_recovery
 from .refund_resumption import refund_resumption_inventory, propose_refund_resumption, approve_refund_resumption, inspect_refund_resumption_live
+from .live_payout_execution import propose_live_payout, approve_live_payout
 from .deployment_check import deployment_database_check
 from .supabase_api import supabase_headers
 from .object_storage import SupabaseObjectStorage, ObjectStorageError, storage_ready, delivery_upload_available
@@ -2724,6 +2725,20 @@ ADMIN_SECTIONS = {
 }
 
 
+def live_finance_route_ready(operation="read"):
+    """UI admission only; each executor freshly checks DB scope, actor and MFA."""
+    scope = stripe.financial_scope
+    if not (database_store and not settings.demo_mode and settings.is_deployed
+            and settings.stripe_charge_mode == "separate" and scope and scope.mode == "live"
+            and settings.stripe_connection_mode in {"live_read_only", "live_setup_only", "live_financial"}
+            and len(set(settings.admin_user_ids)) >= 2):
+        return False
+    if operation == "read":
+        return True
+    return (settings.stripe_connection_mode == "live_financial" and operation in {"refunds", "payouts"}
+            and getattr(settings, "stripe_live_" + operation + "_enabled", False) is True)
+
+
 @app.get("/admin", response_class=HTMLResponse)
 async def admin(request: Request, section: str = "overview"):
     user = current_user(request)
@@ -2740,6 +2755,10 @@ async def admin(request: Request, section: str = "overview"):
     if section == "readiness":
         values["readiness"] = readiness_summary(settings, runtime_database_ready=bool(database_store and await database_store.probe()), runtime_storage_ready=await storage_ready(settings), runtime_security_ready=security_service_readiness())
     if section == "finance":
+        values.update(live_payout_execution_ready=live_finance_route_ready("payouts"),
+            live_recovery_ready=live_finance_route_ready(),
+            refund_execution_ready=bool(database_store and (sandbox_payouts_ready(settings)
+                or live_finance_route_ready("refunds")) and len(set(settings.admin_user_ids)) >= 2))
         values.update(finance=store.finance_snapshot(ledger=bool(database_store)), finance_controls_ready=settings.demo_mode or sandbox_payouts_ready(settings), payout_labels=PAYOUT_LABELS,
             payment_recoveries=await payment_recovery_inventory(database_store, store) if database_store else {"items": [], "truncated": False},
             paid_out_refunds=paid_out_refund_inventory(store, settings, database_store),
@@ -2776,8 +2795,8 @@ async def admin_resume_refund(request: Request, order_id: str, action: str, prop
     user = current_user(request)
     if not is_admin(user) or action not in {"propose", "approve"}:
         raise HTTPException(403)
-    if not database_store or not sandbox_payouts_ready(settings):
-        raise HTTPException(409, "返金再開は接続済みのテスト環境のみ操作できます")
+    if not database_store or not (sandbox_payouts_ready(settings) or live_finance_route_ready("refunds")):
+        raise HTTPException(409, "返金の実行接続が有効ではありません")
     if not mfa.recent(request):
         return RedirectResponse("/security/mfa?next=/admin", 303)
     order = next((o for o in store.orders if o["id"] == order_id), None)
@@ -2785,9 +2804,9 @@ async def admin_resume_refund(request: Request, order_id: str, action: str, prop
         raise HTTPException(404)
     try:
         if action == "propose":
-            await propose_refund_resumption(database_store, store, stripe, settings, order, user["id"])
+            await propose_refund_resumption(database_store, store, stripe, settings, order, user["id"], mfa=mfa, request=request)
         else:
-            await approve_refund_resumption(database_store, store, stripe, settings, order, user["id"], proposal_id, send_email_safely)
+            await approve_refund_resumption(database_store, store, stripe, settings, order, user["id"], proposal_id, send_email_safely, mfa=mfa, request=request)
     except StripeOutcomeUnknown:
         raise
     except (FinanceConflict, RuntimeError):
@@ -2802,8 +2821,8 @@ async def admin_reconcile_payment(request: Request, order_id: str, kind: str, ac
         raise HTTPException(403)
     if kind not in PAYMENT_RECOVERY_KINDS:
         raise HTTPException(404)
-    if not database_store or not sandbox_payouts_ready(settings):
-        raise HTTPException(409, "決済・返金の照合は接続済みのテスト環境のみ操作できます")
+    if not database_store or not (sandbox_payouts_ready(settings) or live_finance_route_ready()):
+        raise HTTPException(409, "決済・返金の照合接続が有効ではありません")
     if not mfa.recent(request):
         return RedirectResponse("/security/mfa?next=/admin", 303)
     order = next((o for o in store.orders if o["id"] == order_id), None)
@@ -2811,11 +2830,11 @@ async def admin_reconcile_payment(request: Request, order_id: str, kind: str, ac
         raise HTTPException(404)
     try:
         if action == "propose":
-            await propose_payment_recovery(database_store, store, stripe, settings, order, kind, user["id"], extra_id=extra_id)
+            await propose_payment_recovery(database_store, store, stripe, settings, order, kind, user["id"], extra_id=extra_id, mfa=mfa, request=request)
         else:
-            await approve_payment_recovery(database_store, store, stripe, settings, order, kind, user["id"], proposal_id, send_email_safely, extra_id=extra_id)
-    except (FinanceConflict, RuntimeError) as exc:
-        raise HTTPException(409, str(exc)) from None
+            await approve_payment_recovery(database_store, store, stripe, settings, order, kind, user["id"], proposal_id, send_email_safely, extra_id=extra_id, mfa=mfa, request=request)
+    except (FinanceConflict, RuntimeError):
+        raise HTTPException(409, "決済・返金の照合が一致しません。再送せず運営で確認してください") from None
     return RedirectResponse("/admin?section=finance#payment-recovery", 303)
 
 
@@ -2860,8 +2879,8 @@ async def admin_reconcile_payout(request: Request, payout_id: str, action: str, 
     user = current_user(request)
     if not is_admin(user) or action not in {"propose", "approve"}:
         raise HTTPException(403)
-    if not database_store or not sandbox_payouts_ready(settings):
-        raise HTTPException(409, "振込の照合は接続済みのテスト環境のみ操作できます")
+    if not database_store or not (sandbox_payouts_ready(settings) or live_finance_route_ready()):
+        raise HTTPException(409, "振込の照合接続が有効ではありません")
     if not mfa.recent(request):
         return RedirectResponse("/security/mfa?next=/admin", 303)
     payout = next((p for p in store.payouts if p["id"] == payout_id and p.get("finance_v2")), None)
@@ -2869,12 +2888,36 @@ async def admin_reconcile_payout(request: Request, payout_id: str, action: str, 
         raise HTTPException(404)
     try:
         if action == "propose":
-            await propose_recovery(database_store, store, stripe, settings, payout, user["id"])
+            await propose_recovery(database_store, store, stripe, settings, payout, user["id"], mfa=mfa, request=request)
         else:
-            await approve_recovery(database_store, store, stripe, settings, payout, user["id"], proposal_id)
-    except (FinanceConflict, RuntimeError) as exc:
-        raise HTTPException(409, str(exc)) from None
+            await approve_recovery(database_store, store, stripe, settings, payout, user["id"], proposal_id, mfa=mfa, request=request)
+    except (FinanceConflict, RuntimeError):
+        raise HTTPException(409, "振込の照合が一致しません。再送せず運営で確認してください") from None
     return RedirectResponse("/admin?section=finance", 303)
+
+
+@app.post("/admin/payouts/{payout_id}/execute-live/{action}")
+async def admin_execute_live_payout(request: Request, payout_id: str, action: str, proposal_id: str = Form("")):
+    user = current_user(request)
+    if not is_admin(user) or action not in {"propose", "approve"}:
+        raise HTTPException(403)
+    if not live_finance_route_ready("payouts"):
+        raise HTTPException(409, "本番振込の実行接続が有効ではありません")
+    if not mfa.recent(request):
+        return RedirectResponse("/security/mfa?next=%2Fadmin%3Fsection%3Dfinance", 303)
+    payout = next((p for p in store.payouts if p["id"] == payout_id and p.get("finance_v2")), None)
+    if not payout:
+        raise HTTPException(404)
+    try:
+        if action == "propose":
+            await propose_live_payout(database_store, store, stripe, settings, payout, user["id"], mfa=mfa, request=request)
+        else:
+            await approve_live_payout(database_store, store, stripe, settings, payout, user["id"], proposal_id, mfa=mfa, request=request)
+    except StripeOutcomeUnknown:
+        raise
+    except (FinanceConflict, RuntimeError):
+        raise HTTPException(409, "振込の元決済・口座・承認を確認できません。重複操作せず運営で確認してください") from None
+    return RedirectResponse("/admin?section=finance#live-payout-execution", 303)
 
 
 @app.post("/admin/payouts/{payout_id}/recover-failure/{action}")

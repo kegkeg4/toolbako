@@ -163,8 +163,13 @@ class StripeWebhookService(StripeWebhookValidator):
                 remote = await self.provider._get("events/" + event["id"], account=event.get("account"))
                 # A connected-account retrieval can omit the delivery envelope's
                 # account property. The authenticated request context supplies it.
+                immutable_fields = ("id", "type", "livemode", "data")
+                if scope.mode == "live":
+                    # Event data/version are fixed at creation, independent of
+                    # the version used for this authenticated retrieval.
+                    immutable_fields += ("api_version",)
                 if (remote.get("account", event.get("account")) != event.get("account")
-                        or any(remote.get(key) != event.get(key) for key in ("id", "type", "livemode", "data"))):
+                        or any(remote.get(key) != event.get(key) for key in immutable_fields)):
                     raise FinancialScopeError()
         except RuntimeError:
             raise HTTPException(503, "payment environment verification unavailable") from None

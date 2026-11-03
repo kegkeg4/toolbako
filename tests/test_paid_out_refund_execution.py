@@ -124,6 +124,17 @@ async def seed(backend, dsn, provider, mode="test"):
             pending_extras=[]))
         store.payouts.append(deepcopy(payout))
         await backend.save()
+        if mode == "live":
+            # Complete synthetic live parent evidence, never a test relabel.
+            from app.live_payout_execution import request_data, _metadata
+            b["payment"]["metadata"]["ledger_id"] = scope.ledger_id
+            b["payment"]["latest_charge"]["metadata"] = dict(b["payment"]["metadata"])
+            b["payment"]["latest_charge"]["refunded"] = False
+            for item, remote in ((allocation, b["transfer"]), (None, b["provider_payout"])):
+                remote["metadata"].update(_metadata(scope, payout, item))
+                key, endpoint, data = request_data(scope, payout, item)
+                await backend.begin_operation(key, endpoint, data)
+                await backend.finish_operation(key, "succeeded", deepcopy(remote))
     stripe = StripeIntegration(settings.stripe_secret_key, settings.site_base_url, charge_mode="separate", journal=backend, financial_scope=scope)
     return store, settings, stripe, mfa, requests
 

@@ -17,7 +17,8 @@ from starlette.responses import JSONResponse
 from .connect_status import account_status
 from .financial_scope import configured_scope, key_mode, FinancialScopeError
 from .finance import FinanceConflict
-from .live_setup_plan import CONNECT_EVENTS, PLATFORM_EVENTS, STRIPE_API_VERSION
+from .live_setup_plan import CONNECT_EVENTS, PLATFORM_EVENTS, STRIPE_API_VERSION, WEBHOOK_API_VERSIONS
+from .live_payout_execution import validate_live_bank_notification
 from .payment_source_proof import payment_source_proof
 from .request_limits import WEBHOOK_BODY_LIMIT
 from .stripe_bank_proof import bank_payout_proof
@@ -67,7 +68,7 @@ class LiveStripeWebhookService(StripeWebhookService):
         expected = CONNECT_EVENTS if self.kind == "connect" else PLATFORM_EVENTS
         _require(event.get("object") == "event" and _reference(event.get("id"), "evt")
                  and event.get("livemode") is True
-                 and event.get("api_version") == STRIPE_API_VERSION
+                 and event.get("api_version") == getattr(self.settings, "stripe_webhook_api_version", STRIPE_API_VERSION)
                  and type(event.get("created")) is int and event["created"] > 0
                  and event["type"] in expected)
         _require(("account" in event) == (self.kind == "connect"), "event endpoint scope does not match")
@@ -123,10 +124,14 @@ class LiveStripeWebhookService(StripeWebhookService):
 
     def _validate_payout(self, obj, state, event):
         payout = state["payout"]
+        scope = self.provider.financial_scope
+        _require(scope is not None and scope.mode == "live", "financial ledger reconciliation required", 409)
         try:
             bank_payout_proof(obj, expected_mode="live", account_id=payout.get("account_id"),
                 response_account_id=event["account"], amount=payout.get("net_amount"), currency="jpy",
-                metadata={"payout_id": payout["id"]}, payout_id=payout.get("provider_payout_id") or None)
+                metadata={"payout_id": payout["id"], "ledger_id": scope.ledger_id,
+                          "platform_account_id": scope.platform_account},
+                payout_id=payout.get("provider_payout_id") or None)
         except FinanceConflict:
             raise HTTPException(400, "live notification does not match") from None
 
@@ -180,6 +185,11 @@ class LiveStripeWebhookService(StripeWebhookService):
             _require(not expected or original["status"] == expected)
             state["obj"] = await self._get_current("payouts/" + original["id"], account=event["account"])
             self._validate_payout(state["obj"], state, event)
+            try:
+                await validate_live_bank_notification(self.journal, self.provider, self.provider.financial_scope,
+                                                      state["payout"], state["obj"])
+            except (FinanceConflict, RuntimeError):
+                raise HTTPException(409, "live payout intent reconciliation required") from None
             return
         order, extra = state["order"], state["extra"]
         if kind in {"refund.updated", "charge.refunded"}:
@@ -341,6 +351,7 @@ def build_live_webhook_handler(settings, store, backend, provider, *, paid_out_r
         if (scope is None or scope.mode != "live" or key_mode(settings.stripe_secret_key) != "live"
                 or settings.demo_mode or not settings.is_deployed or not settings.database_url
                 or settings.stripe_charge_mode != "separate" or settings.stripe_api_version != STRIPE_API_VERSION
+                or getattr(settings, "stripe_webhook_api_version", STRIPE_API_VERSION) not in WEBHOOK_API_VERSIONS
                 or getattr(settings, "stripe_connect_accounts_v2", False)
                 or backend is None or provider.journal is not backend or provider.financial_scope != scope
                 or provider.secret_key != settings.stripe_secret_key or provider.charge_mode != "separate"

@@ -1,15 +1,19 @@
-"""Sandbox-only, two-person recovery of uncertain Checkout/full refunds.
+"""Two-person recovery of uncertain Checkout/full refunds.
 
 GETs never authorize another POST, even if a complete list has no match.
 Provider proofs are re-fetched at approval. Journal, state, audit and email
 outbox are committed together; no synthetic webhook events are generated.
+Checkout recovery remains Sandbox-only. Live full-refund recovery requires
+the real admin session/MFA, bound live scope and exact original intent hash.
 """
 import asyncio
+import json
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 from uuid import uuid4
 
 from .database import content_hash
+from .persistence import encode_value
 from .finance import FinanceConflict, RESERVED
 from .financial_scope import FinancialScope, key_mode
 from .payment_state import apply_checkout_payment, apply_checkout_expiry, apply_refund_payment
@@ -26,6 +30,41 @@ def require_sandbox_review(backend, store, stripe, settings, actor_id):
             or actor_id not in settings.admin_user_ids or len(set(settings.admin_user_ids)) < 2
             or backend._store is not store):
         raise FinanceConflict("接続済みのテスト環境と、別々の管理者2名が必要です")
+
+
+async def live_refund_review_record(backend, store, order, proposal, *, kind, extra_id="", create=False):
+    """Immutable evidence of the EXISTING review, not another permission layer.
+
+    Uses the existing journal and snapshot transaction; no provider I/O or new
+    schema. Approval consumption is later committed with the financial intent.
+    """
+    proof = {"order_id": order["id"], "kind": kind, "extra_id": extra_id, "proposal": proposal}
+    key = "live-refund-review-" + proposal["id"]
+    endpoint = "internal/live-refund-review-v1"
+    response = {"id": key, "proof": encode_value(proof)}
+    if create:
+        try:
+            async with backend._connection.transaction():
+                await backend._connection.execute(
+                    "insert into toolbako_runtime.stripe_operations(operation_id,endpoint,request_hash,status,response) "
+                    "values(%s,%s,%s,'succeeded',%s::jsonb)",
+                    (key, endpoint, content_hash(proof), json.dumps(response)),
+                )
+                committed = await backend._save(backend._connection)
+            backend._accept_commit(committed)
+        except Exception:
+            # A route may catch an exception as 409 and checkpoint the store.
+            # Do not let that persist an uncommitted/tampered proposed review.
+            from .database import restore
+            if backend._checkpoint is not None:
+                restore(store, backend._checkpoint)
+            raise
+    else:
+        row = await (await backend._connection.execute(
+            "select endpoint,request_hash,status,response from toolbako_runtime.stripe_operations where operation_id=%s", (key,)
+        )).fetchone()
+        if row != (endpoint, content_hash(proof), "succeeded", response):
+            raise FinanceConflict("保存済みの返金承認内容と一致しません")
 
 
 def refund_request_data(stripe, order, extra, amount, *, operation=None, scope=None):
@@ -80,7 +119,7 @@ def _key(order, kind, extra):
     return f"refund-extra-{order['id']}-{extra['id']}"
 
 
-async def _target(backend, store, stripe, order, kind, extra_id):
+async def _target(backend, store, stripe, order, kind, extra_id, scope=None):
     extra = _part(order, kind, extra_id)
     part = extra or order
     amount = extra["amount"] if extra else order.get("primary_payment_amount", order["amount"])
@@ -96,6 +135,8 @@ async def _target(backend, store, stripe, order, kind, extra_id):
         data = stripe.extra_checkout_data(order, extra, destination) if extra else stripe.checkout_data(order, destination)
         endpoint = "checkout/sessions"
     else:
+        if scope is not None and "paid_out_refund_case" in order:
+            raise FinanceConflict("払出し後返金は専用のケースで照合してください")
         if ((extra and extra.get("status") != "paid") or order.get("payment_status") != "paid"
                 or not isinstance(part.get("payment_reference"), str) or not part["payment_reference"].startswith("pi_")):
             raise FinanceConflict("返金元の支払済み決済を確認できません")
@@ -109,7 +150,7 @@ async def _target(backend, store, stripe, order, kind, extra_id):
     if not operation or operation["status"] not in {"pending", "unknown"}:
         raise FinanceConflict("結果不明な決済・返金がありません")
     if endpoint == "refunds":
-        _, data = refund_request_data(stripe, order, extra, amount, operation=operation)
+        _, data = refund_request_data(stripe, order, extra, amount, operation=operation, scope=scope)
     if operation["endpoint"] != endpoint or operation["request_hash"] != content_hash(data):
         raise FinanceConflict("元の要求内容と一致しません。再送せず詳細確認してください")
     return extra, amount, data, operation_id, operation
@@ -136,17 +177,23 @@ async def sandbox_payment_proof(stripe, order, extra, payment_id, amount, *, ref
     return proof
 
 
-async def _inspect(backend, store, stripe, order, kind, extra_id, at):
-    extra, amount, data, operation_id, operation = await _target(backend, store, stripe, order, kind, extra_id)
+async def _inspect(backend, store, stripe, order, kind, extra_id, at, scope=None):
+    extra, amount, data, operation_id, operation = await _target(backend, store, stripe, order, kind, extra_id, scope)
     params = {"created[gte]": str(int(operation["created_at"].timestamp()) - 60)}
     if operation["endpoint"] == "refunds": params["payment_intent"] = data["payment_intent"]
-    objects = await stripe.list_financial_objects(operation["endpoint"], params=params)
+    # In live refund recovery, an older/manual refund must not be hidden by a
+    # time filter. One original full-refund intent must match exactly one fact.
+    filters = {"payment_intent": data["payment_intent"]} if scope is not None else params
+    objects = await stripe.list_financial_objects(operation["endpoint"], params=filters)
     if any(not isinstance(obj.get("metadata"), dict) for obj in objects):
         raise FinanceConflict("Stripeの照合記録の形式を確認できません")
     matches = [obj for obj in objects if payment_metadata_matches(obj["metadata"], order, extra)]
     if len(matches) != 1:
         raise FinanceConflict("該当記録が0件または複数あります。再送せずStripeで詳細確認してください")
     remote = matches[0]
+    if scope is not None and (len(objects) != 1 or remote["metadata"].get("ledger_id") != scope.ledger_id
+                              or ("livemode" in remote and remote["livemode"] is not True)):
+        raise FinanceConflict("本番返金の元要求・台帳・明細を一意に確認できません")
     if (type(remote.get("created")) is not int or remote["created"] < int(params["created[gte]"])
             or remote["created"] > int(at.timestamp()) + 60 or remote.get("currency") != "jpy"):
         raise FinanceConflict("照合記録の作成日時・通貨が一致しません")
@@ -184,11 +231,16 @@ async def _inspect(backend, store, stripe, order, kind, extra_id, at):
                 or (part.get("refund_reference") and part["refund_reference"] != remote["id"])):
             raise FinanceConflict("返金の注文・全額・元決済が一致しません")
         # Refund objects have no livemode attribute. Prove it on their parent PI.
-        proof = await sandbox_payment_proof(stripe, order, extra, remote["payment_intent"], amount, refund=True)
+        if scope is None:
+            proof = await sandbox_payment_proof(stripe, order, extra, remote["payment_intent"], amount, refund=True)
+        else:
+            from .refund_resumption import _source_proof
+            proof = await _source_proof(stripe, order, extra, remote["payment_intent"], amount, scope)
         if remote.get("charge") != proof["charge"] or (remote["status"] == "succeeded" and proof["amount_refunded"] != amount):
             raise FinanceConflict("返金の元請求・確定額が一致しません")
         identity = {key: remote.get(key) for key in ("id", "metadata", "status", "amount", "currency", "payment_intent", "charge")}
-    return extra, operation_id, operation, remote, content_hash({"remote": identity, "payment": proof})
+    return extra, operation_id, operation, remote, content_hash({"remote": identity, "payment": proof,
+        **({"scope": scope.payload()} if scope is not None else {})})
 
 
 async def _bounded_inspect(*args):
@@ -199,30 +251,53 @@ async def _bounded_inspect(*args):
         raise FinanceConflict("Stripeの照合がタイムアウトしました。再送せず再確認してください") from None
 
 
-async def propose_payment_recovery(backend, store, stripe, settings, order, kind, actor_id, *, extra_id="", at=None):
-    require_sandbox_review(backend, store, stripe, settings, actor_id)
+async def _review_context(backend, store, stripe, settings, order, kind, actor_id, mfa, request):
+    if key_mode(stripe.secret_key) != "live":
+        require_sandbox_review(backend, store, stripe, settings, actor_id)
+        return None, set(settings.admin_user_ids)
+    if kind not in {"refund", "refund_extra"}:
+        raise FinanceConflict("本番では元要求の全額返金だけ照合できます")
+    from .refund_resumption import live_refund_context
+    actor, admins, scope = await live_refund_context(backend, store, stripe, settings, mfa, request)
+    if (actor != actor_id or request.method != "POST"
+            or sum(o.get("id") == order.get("id") for o in store.orders) != 1
+            or not any(o is order for o in store.orders) or backend._emails):
+        raise FinanceConflict("現在の管理者・返金注文を確認できません")
+    return scope, admins
+
+
+async def propose_payment_recovery(backend, store, stripe, settings, order, kind, actor_id, *, extra_id="", at=None, mfa=None, request=None):
+    scope, _ = await _review_context(backend, store, stripe, settings, order, kind, actor_id, mfa, request)
     at = at or datetime.now(timezone.utc)
-    extra, operation_id, operation, remote, fingerprint = await _bounded_inspect(backend, store, stripe, order, kind, extra_id, at)
+    extra, operation_id, operation, remote, fingerprint = await _bounded_inspect(backend, store, stripe, order, kind, extra_id, at, scope)
     proposal = {"id": str(uuid4()), "status": "proposed", "proposed_by": actor_id, "proposed_at": at,
                 "operation_id": operation_id, "endpoint": operation["endpoint"], "request_hash": operation["request_hash"],
                 "provider_reference": remote["id"], "fingerprint": fingerprint, "kind": kind}
+    if scope is not None:
+        proposal["scope"] = scope.payload()
     (extra or order).setdefault("payment_reconciliations", {})[kind] = proposal
     store.audit(actor_id, "payment.reconciliation_proposed", f"{order['id']}:{operation_id}:{remote['id']}")
-    await backend.save()
+    if scope is not None:
+        await live_refund_review_record(backend, store, order, proposal, kind=kind, extra_id=extra_id, create=True)
+    else:
+        await backend.save()
     return proposal
 
 
-async def approve_payment_recovery(backend, store, stripe, settings, order, kind, actor_id, proposal_id, email_sender, *, extra_id="", at=None):
-    require_sandbox_review(backend, store, stripe, settings, actor_id)
+async def approve_payment_recovery(backend, store, stripe, settings, order, kind, actor_id, proposal_id, email_sender, *, extra_id="", at=None, mfa=None, request=None):
+    scope, admins = await _review_context(backend, store, stripe, settings, order, kind, actor_id, mfa, request)
     extra = _part(order, kind, extra_id)
     proposal = (extra or order).get("payment_reconciliations", {}).get(kind, {})
     at = at or datetime.now(timezone.utc)
     if (proposal.get("status") != "proposed" or proposal.get("id") != proposal_id
-            or proposal.get("proposed_by") == actor_id or proposal.get("proposed_by") not in settings.admin_user_ids
+            or proposal.get("proposed_by") == actor_id or proposal.get("proposed_by") not in admins
+            or (scope is not None and proposal.get("scope") != scope.payload())
             or not isinstance(proposal.get("proposed_at"), datetime) or not proposal["proposed_at"].tzinfo
             or not timedelta(0) <= at - proposal["proposed_at"] <= timedelta(minutes=30)):
         raise FinanceConflict("別の管理者が30分以内の照合結果を確認してください。古い画面は再読み込みしてください")
-    extra, operation_id, operation, remote, fingerprint = await _bounded_inspect(backend, store, stripe, order, kind, extra_id, at)
+    if scope is not None:
+        await live_refund_review_record(backend, store, order, proposal, kind=kind, extra_id=extra_id)
+    extra, operation_id, operation, remote, fingerprint = await _bounded_inspect(backend, store, stripe, order, kind, extra_id, at, scope)
     if (operation_id != proposal["operation_id"] or operation["endpoint"] != proposal["endpoint"]
             or operation["request_hash"] != proposal["request_hash"] or remote["id"] != proposal["provider_reference"]
             or fingerprint != proposal["fingerprint"]):
@@ -253,9 +328,17 @@ async def approve_payment_recovery(backend, store, stripe, settings, order, kind
     order["payment_reconciliation_required"] = unresolved
     proposal.update(status="approved", approved_by=actor_id, approved_at=at)
     store.audit(actor_id, "payment.reconciliation_approved", f"{order['id']}:{operation_id}:{remote['id']}:{proposal['proposed_by']}")
-    for message in emails:
-        await email_sender(*message)  # In DB mode this queues, it never sends.
-    await backend.reconcile_operation(operation_id, endpoint=operation["endpoint"], request_hash=operation["request_hash"], response=remote)
+    try:
+        for message in emails:
+            await email_sender(*message)  # In DB mode this queues, it never sends.
+        await backend.reconcile_operation(operation_id, endpoint=operation["endpoint"], request_hash=operation["request_hash"], response=remote)
+    except Exception:
+        if scope is not None:
+            from .database import restore
+            if backend._checkpoint is not None:
+                restore(store, backend._checkpoint)
+            backend._emails.clear()
+        raise
     return part.get("refund_status") if kind.startswith("refund") else remote["status"]
 
 

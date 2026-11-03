@@ -4,6 +4,10 @@ Each approval performs at most one reversal, reconciles one uncertain reversal,
 or releases the reservation after fresh GETs confirm all funds were returned.
 Never creates another bank payout. Previously paid payouts require accounting
 review and are deliberately excluded from this workflow.
+
+The separate live Transfer/Payout creation gate does not authorize reversals.
+This module retains the Sandbox-only gate; do not activate it by enabling the
+live payout flag or by calling the generic integration with a live credential.
 """
 import asyncio
 from datetime import datetime, timedelta, timezone

@@ -1,4 +1,4 @@
-"""One durable payout step per invocation; sandbox only until launch approval.
+"""Sandbox financial steps; the live worker only polls an existing bank payout.
 
 Never mark a bank payout paid merely because creating it returned HTTP 200.
 The runtime DB advisory lock serializes this worker with webhooks and requests.
@@ -75,6 +75,20 @@ def apply_bank_status(payout, remote):
 
 
 async def run_step(backend, store, stripe, settings, *, payout_id=None, at=None):
+    if settings.stripe_secret_key.startswith(("sk_live_", "rk_live_")):
+        from .live_payout_execution import poll_live_bank, service_context
+        async with backend.request(store):
+            await service_context(backend, store, stripe, settings)
+            matches = [p for p in store.payouts if p.get("finance_v2") and p.get("status") == "bank_pending"
+                       and (payout_id is None or p.get("id") == payout_id)]
+            if not matches:
+                # New live money movement belongs to the explicit four-eyes
+                # API. A scheduler never treats an arbitrary saved dict as a
+                # reusable authority or promotes a pending/unknown intent.
+                return "approval_required" if any(p.get("finance_v2") and p.get("status") in {
+                    "requested", "transferring", "awaiting_funds", "review", "reversing"}
+                    and (payout_id is None or p.get("id") == payout_id) for p in store.payouts) else "idle"
+            return await poll_live_bank(backend, store, stripe, settings, matches[0])
     if not sandbox_payouts_ready(settings) or stripe.journal is not backend or stripe.secret_key != settings.stripe_secret_key or stripe.charge_mode != "separate":
         raise FinanceConflict("振込workerはPostgres接続済みのseparate方式・テスト環境のみ実行できます")
     at = at or datetime.now(timezone.utc)
@@ -208,7 +222,7 @@ async def _step(backend, store, stripe, payout):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Sandbox-only Toolbako payout worker (one step)")
+    parser = argparse.ArgumentParser(description="One payout step: Sandbox financial operations; live bank status GET only")
     parser.add_argument("--payout-id")
     args = parser.parse_args()
     from .config import settings
@@ -220,7 +234,7 @@ def main():
                                charge_mode=settings.stripe_charge_mode, journal=backend, financial_scope=configured_scope(settings))
     try:
         status = asyncio.run(run_step(backend, DemoStore(seed=False), stripe, settings, payout_id=args.payout_id))
-        print(f"Sandbox payout step: {status}. No live payment operations are allowed.")
+        print(f"Payout step: {status}. This worker never creates a live transfer or bank payout.")
         raise SystemExit(2 if status in {"review", "bank_failed"} else 0)
     except Exception:
         print("Payout worker stopped safely. Check the private ledger and environment; do not retry an unknown operation.")
