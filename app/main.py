@@ -630,6 +630,7 @@ async def tool_detail(request: Request, slug: str):
     related = [x for x in store.list_tools(category=item["category"], sort="popular") if x["slug"] != slug][:4]
     share_text = quote(f'「{item["name"]}」を見つけました！ {settings.site_base_url}/tools/{slug} #ツールバコ')
     user = viewer
+    is_tool_owner = bool(user and user["id"] == item.get("author_id"))
     liked = bool(user and (user["id"], slug) in store.likes)
     following = bool(user and (user["id"], slug) in store.update_followers)
     tool_reviews = sorted([review for review in store.reviews if review.get("tool_slug") == slug and review.get("published", True)], key=lambda review:review["created_at"], reverse=True)
@@ -651,7 +652,7 @@ async def tool_detail(request: Request, slug: str):
     exclusive_public = store.transfer_is_public(item)
     if is_unavailable or sold_out:
         product_schema["offers"]["availability"] = "https://schema.org/OutOfStock"
-    return templates.TemplateResponse(request, "tool_detail.html", context(request, tool=item, tool_reviews=tool_reviews, related=related, og_url=f"{settings.site_base_url}{og_path}", og_image_url=f"{settings.site_base_url}{og_path}", seo_jsonld=[product_schema,breadcrumb_schema], share_text=share_text, liked=liked, following=following, waiting_reopen=waiting_reopen, interaction_blocked=interaction_blocked, exclusive_public=exclusive_public, sold_out=sold_out, is_unavailable=is_unavailable, is_preview=is_preview, robots_value="noindex, nofollow" if is_preview else seo_metadata(request)["robots_value"]))
+    return templates.TemplateResponse(request, "tool_detail.html", context(request, tool=item, tool_reviews=tool_reviews, related=related, og_url=f"{settings.site_base_url}{og_path}", og_image_url=f"{settings.site_base_url}{og_path}", seo_jsonld=[product_schema,breadcrumb_schema], share_text=share_text, liked=liked, following=following, waiting_reopen=waiting_reopen, interaction_blocked=interaction_blocked, exclusive_public=exclusive_public, sold_out=sold_out, is_unavailable=is_unavailable, is_preview=is_preview, is_tool_owner=is_tool_owner, robots_value="noindex, nofollow" if is_preview else seo_metadata(request)["robots_value"]))
 
 
 @app.post("/tools/{slug}/wait-reopen")
