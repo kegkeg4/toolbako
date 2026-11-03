@@ -99,3 +99,18 @@ def test_finance_template_keeps_unsupported_live_actions_closed_and_shows_exact_
     assert '/execute-live/approve' in html and '400円で1件実行' in html
     assert '/cancel"' not in html and '/recover-failure/approve' not in html and '/refund-resumption/approve' not in html
     assert '本番の送金です' in html
+
+
+@pytest.mark.parametrize('status', ['requested','transferring','awaiting_funds','review'])
+@pytest.mark.parametrize('live', [True,False])
+def test_finance_template_exposes_get_recovery_after_interrupted_live_intent(status,live):
+    env=Environment(loader=FileSystemLoader(Path(__file__).resolve().parents[1]/'templates'),autoescape=True)
+    finance={'sellers':[],'transactions':[],'payouts':[{'id':'interrupted','seller_id':'seller','finance_v2':True,'status':status,
+        'created_at':datetime.now(timezone.utc),'amount':1000,'fee':160,'net_amount':840,
+        'live_payout_review':{'status':'executing'}}],
+        **{k:0 for k in ('gross_paid','completed_gmv','platform_fee_earned','processor_fee_total','available_to_payout','paid_out','held','refund_total','disputed_total','blocked_for_payout')}}
+    html=env.get_template('_admin_finance.html').render(finance=finance,finance_controls_ready=not live,
+        payment_recovery_ready=False,live_recovery_ready=live,live_payout_execution_ready=False,
+        refund_execution_ready=False,payout_labels={},payment_recoveries={'items':[],'truncated':False},user={'id':'two'})
+    assert ('/admin/payouts/interrupted/reconcile/propose' in html) == (live or status=='review')
+    assert '/execute-live/approve' not in html

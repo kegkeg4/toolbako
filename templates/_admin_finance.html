@@ -76,7 +76,7 @@
   <details class="finance-details">
     <summary>結果不明の分配・振込を照合する{% if not live_recovery_ready %}（テスト環境）{% endif %}</summary>
     <p>Stripeの分配・分配取消・銀行振込記録を読み取り、金額・口座・注文との一致を確認します。再送はしません。取消の申請は復旧後も取消処理を継続し、銀行振込へは進みません。残高の予約は保持されます。照合した管理者とは別の管理者が、2段階認証後に30分以内に承認してください。</p>
-    {% for payout in finance.payouts if payout.finance_v2 and payout.status == 'review' %}
+    {% for payout in finance.payouts if payout.finance_v2 and (payout.status == 'review' or (live_recovery_ready and payout.status in ['requested','transferring','awaiting_funds'] and (payout.live_payout_review|default({})).status == 'executing')) %}
     <article class="finance-flow-note">
       <b>申請 {{ payout.id[:8] }} · ¥{{ '{:,}'.format(payout.net_amount) }}</b>
       <small>{{ payout.hold_reason|default('Stripeの結果確認が必要です') }}</small>
