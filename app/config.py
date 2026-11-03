@@ -9,6 +9,8 @@ load_dotenv()
 @dataclass(frozen=True)
 class Settings:
     environment: str = os.getenv("APP_ENV", "development").lower()
+    # Admission barrier only; enabling it needs a separate all-writer drain.
+    migration_maintenance_mode: str = os.getenv("MIGRATION_MAINTENANCE_MODE", "off")
     supabase_url: str = os.getenv("SUPABASE_URL", "").rstrip("/")
     supabase_anon_key: str = os.getenv("SUPABASE_ANON_KEY", "").strip()
     supabase_service_role_key: str = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()

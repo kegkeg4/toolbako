@@ -38,6 +38,7 @@ from .config import settings
 from .data import AI_OPTIONS, CATEGORIES, DIST_LABELS, PRICE_LABELS, TRANSFER_ASSET_LABELS, TRANSFER_STATUS_LABELS, store
 from .ogp import generate_og, generate_site_og
 from .middleware import ProductionGuardMiddleware
+from .migration_maintenance import MigrationMaintenanceMiddleware
 from .monitoring import initialize_monitoring
 from .security_services import SecurityServiceMonitor, unchecked_snapshot
 from .production import readiness_summary
@@ -124,6 +125,7 @@ app.add_middleware(LiveWebhookDispatcherMiddleware, application_state=app.state,
 app.add_middleware(SessionMiddleware, secret_key=settings.session_secret, session_cookie="toolbako_session", same_site="lax", https_only=settings.site_base_url.startswith("https"), max_age=settings.session_max_age)
 app.add_middleware(StripeWebhookGuardMiddleware, settings=settings)
 app.add_middleware(ProductionGuardMiddleware, settings=settings)
+app.add_middleware(MigrationMaintenanceMiddleware, mode=settings.migration_maintenance_mode, https_only=settings.site_base_url.startswith("https"))
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(settings.allowed_hosts) if settings.allowed_hosts else ["*"])
 app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
 templates = Jinja2Templates(directory=ROOT / "templates")
