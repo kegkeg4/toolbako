@@ -108,7 +108,7 @@ async def wait_for_next_check(stop, observer, *, interval=60):
         await asyncio.gather(stopping, return_exceptions=True)
 
 
-async def run(url, recipient, *, stop=None):
+async def run(url, recipient, *, stop=None, backend=None):
     from .config import settings
     from .database import PostgresStateStore
     from .mail_monitor import observe
@@ -118,7 +118,7 @@ async def run(url, recipient, *, stop=None):
     for signum in (signal.SIGTERM, signal.SIGINT):
         previous[signum] = signal.signal(signum, lambda *_: loop.call_soon_threadsafe(stop.set))
     observer = asyncio.create_task(observe(
-        PostgresStateStore(settings.database_url, production=settings.is_deployed),
+        backend if backend is not None else PostgresStateStore(settings.database_url, production=settings.is_deployed),
         watch=True, interval=60, stop=stop,
     ))
     alert = AvailabilityAlert(EmailIntegration(settings.email_api_key, settings.email_from), recipient)

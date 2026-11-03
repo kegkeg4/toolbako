@@ -120,7 +120,8 @@ def test_missing_or_bad_effective_role_cannot_pass_preflight(monkeypatch):
     backend = Backend(dsn=settings.database_url)
     backend.conn.info.user = config.RUNTIME_USER
     calls = []
-    async def refused(conn):
+    async def refused(conn, *, mail_queue_since):
+        assert mail_queue_since == 0
         calls.append(conn)
         raise RuntimeError("SYNTHETIC_SECRET_NOT_TO_ECHO")
     monkeypatch.setattr("app.live_runtime_role.verify_runtime_role", refused)
@@ -134,10 +135,52 @@ def test_runtime_preflight_checks_role_then_existing_binding_without_writes(monk
     backend = Backend(dsn=settings.database_url)
     backend.conn.info.user = config.RUNTIME_USER
     calls = []
-    async def accepted(conn):
+    async def accepted(conn, *, mail_queue_since):
+        assert mail_queue_since == 0
         assert conn.calls == [("set default_transaction_read_only = on", None)]
         calls.append(conn)
         return True
     monkeypatch.setattr("app.live_runtime_role.verify_runtime_role", accepted)
     assert all(asyncio.run(checks._live_database_checks(settings, backend)).values())
     assert len(calls) == 1
+
+
+def test_runtime_preflight_forwards_explicit_mail_cutoff(monkeypatch):
+    monkeypatch.setattr(os, "environ", {})
+    settings = role_stage()
+    settings.live_mail_policy_since = 1793700000
+    backend = Backend(dsn=settings.database_url)
+    backend.conn.info.user = config.RUNTIME_USER
+    calls = []
+    async def accepted(conn, *, mail_queue_since):
+        calls.append((conn, mail_queue_since))
+        return True
+    monkeypatch.setattr("app.live_runtime_role.verify_runtime_role", accepted)
+    assert all(asyncio.run(checks._live_database_checks(settings, backend)).values())
+    assert calls == [(backend.conn, settings.live_mail_policy_since)]
+
+
+@pytest.mark.parametrize("value", [True, False, None, -1, 4102444801, 1.0, "1793700000", "0"])
+def test_runtime_preflight_rejects_invalid_mail_cutoff_before_connect(monkeypatch, value):
+    monkeypatch.setattr(os, "environ", {})
+    settings = role_stage()
+    settings.live_mail_policy_since = value
+    backend = Backend(dsn=settings.database_url)
+    backend.conn.info.user = config.RUNTIME_USER
+    async def never(*args, **kwargs):
+        pytest.fail("Malformed mail policy cutoff must not open a DB connection")
+    monkeypatch.setattr(backend, "connect", never)
+    assert asyncio.run(checks._live_database_checks(settings, backend)) == {
+        "database_schema": False, "database_target_verified": False, "financial_scope_bound": False}
+
+
+def test_positive_mail_contract_needs_runtime_role_proof_even_during_setup(monkeypatch):
+    monkeypatch.setattr(os, "environ", {})
+    settings = stage()
+    settings = SimpleNamespace(**{**vars(settings), "live_mail_policy_since": 1793700000})
+    backend = Backend(dsn=settings.database_url)
+    async def never(*args, **kwargs):
+        pytest.fail("Migration admin cannot attest the configured Web/mail role contract")
+    monkeypatch.setattr(backend, "connect", never)
+    assert asyncio.run(checks._live_database_checks(settings, backend)) == {
+        "database_schema": False, "database_target_verified": False, "financial_scope_bound": False}

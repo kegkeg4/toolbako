@@ -13,8 +13,8 @@ def _strict_operation_flag(name: str) -> bool:
     return value == "true"
 
 
-def _strict_notification_epoch() -> int:
-    value = os.getenv("LIVE_TRANSACTION_EMAILS_SINCE", "0")
+def _strict_notification_epoch(name: str = "LIVE_TRANSACTION_EMAILS_SINCE") -> int:
+    value = os.getenv(name, "0")
     if not value.isascii() or not value.isdecimal():
         raise ValueError("Invalid transaction notification start time")
     return int(value)
@@ -84,6 +84,8 @@ class Settings:
     # Opt-in for new verified live events only. Never replay the old queue.
     live_transaction_emails_enabled: bool = _strict_operation_flag("LIVE_TRANSACTION_EMAILS_ENABLED")
     live_transaction_emails_since: int = _strict_notification_epoch()
+    # Permission inventory persists when delivery is paused; never a send flag.
+    live_mail_policy_since: int = _strict_notification_epoch("LIVE_MAIL_POLICY_SINCE")
     support_email: str = os.getenv("SUPPORT_EMAIL", "")
     sentry_dsn: str = os.getenv("SENTRY_DSN", "")
     # Only the operating entity is decided. Keep unverified legal contact details
@@ -128,6 +130,10 @@ class Settings:
                 or self.live_transaction_emails_since < 0
                 or self.live_transaction_emails_enabled and self.live_transaction_emails_since == 0):
             raise ValueError("Invalid transaction notification configuration")
+        if (type(self.live_mail_policy_since) is not int or self.live_mail_policy_since < 0
+                or self.live_mail_policy_since > 0
+                and self.live_transaction_emails_since != self.live_mail_policy_since):
+            raise ValueError("Invalid live mail permission start time")
         if any(type(value) is not bool for value in (
                 self.stripe_live_checkout_enabled, self.stripe_live_refunds_enabled, self.stripe_live_payouts_enabled)):
             raise ValueError("Invalid financial operation boolean configuration")

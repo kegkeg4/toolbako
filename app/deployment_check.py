@@ -104,6 +104,11 @@ async def _live_database_checks(settings: Settings, backend) -> dict[str, bool]:
     result = {"database_schema": False, "database_target_verified": False,
               "financial_scope_bound": False}
     try:
+        mail_queue_since = getattr(settings, "live_mail_policy_since", 0)
+        if type(mail_queue_since) is not int or not 0 <= mail_queue_since <= 4102444800:
+            return result
+        if mail_queue_since and getattr(settings, "live_database_role", "migration_admin") != "runtime_v1":
+            return result
         if not _live_configuration_verified(settings) or backend.dsn != settings.database_url:
             return result
         config = _live_database_config(settings)
@@ -118,7 +123,7 @@ async def _live_database_checks(settings: Settings, backend) -> dict[str, bool]:
                 await conn.execute("set default_transaction_read_only = on")
                 if getattr(settings, "live_database_role", "migration_admin") == "runtime_v1":
                     from .live_runtime_role import verify_runtime_role
-                    await verify_runtime_role(conn)
+                    await verify_runtime_role(conn, mail_queue_since=mail_queue_since)
                 row = await (await conn.execute(
                     "select v.version,s.revision,o.endpoint,o.request_hash,o.status,o.response "
                     "from toolbako_runtime.schema_version v "

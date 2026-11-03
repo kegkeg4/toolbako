@@ -105,14 +105,24 @@ async def verify_runtime_memberships(conn):
     _membership_shape(rows, postgres, conn.info.server_version)
 
 
-async def verify_runtime_role(conn):
+async def verify_runtime_role(conn, *, mail_queue_since=0):
     """Verify actual SQL identity and effective rights. Call in READ ONLY mode.
 
     Connection target/TLS and nonempty bound dataset are independently checked
     by deployment_check. No test override or arbitrary-role argument exists.
     This checks privileges, not a runtime DML trial or provider readiness.
+    Zero keeps the original exact 19-policy contract. A positive reviewed mail
+    cutoff permits only four dedicated mail policies AND independently proves
+    the separate mail role's effective rights. It never grants those rights.
     """
     try:
+        _require(type(mail_queue_since) is int and 0 <= mail_queue_since <= 4102444800)
+        mail_policies = {}
+        if mail_queue_since:
+            # The mail verifier reuses this module's Web contract; load it only
+            # after module initialization and only for the explicit extension.
+            from .live_mail_runtime import mail_policy_rows, normalize_mail_expression, verify_mail_access
+            mail_policies = mail_policy_rows(mail_queue_since)
         identity = await (await conn.execute("select current_user, session_user, current_setting('transaction_read_only')")).fetchone()
         _require(identity == (RUNTIME_ROLE, RUNTIME_ROLE, "on"))
         roles = await (await conn.execute(
@@ -161,11 +171,13 @@ async def verify_runtime_role(conn):
                     seen.add((verb, column))
             _require(seen == {(verb, column) for verb, names in PERMISSIONS[table].items() for column in names.split()})
             _require(dangerous is False)
-            expected_policies = _policies(table)
+            expected_mail = mail_policies.get(table, {})
+            expected_policies = {**_policies(table), **expected_mail}
             _require(isinstance(policies, list) and len(policies) == len(expected_policies))
             for name, command, permissive, policy_roles, using, check, public in policies:
+                normalize = normalize_mail_expression if name in expected_mail else _expression
                 _require(public is False and expected_policies.get(name) ==
-                         (command, permissive, policy_roles, _expression(using), _expression(check)))
+                         (command, permissive, policy_roles, normalize(using), normalize(check)))
         if conn.info.server_version >= 170000:
             maintain = await (await conn.execute(
                 "select exists(select 1 from pg_catalog.pg_class c join pg_catalog.pg_namespace n on n.oid=c.relnamespace "
@@ -192,6 +204,8 @@ async def verify_runtime_role(conn):
             "where n.nspname !~ '^pg_' and n.nspname <> 'information_schema' and p.prosecdef "
             "and has_schema_privilege(n.oid,'USAGE') and has_function_privilege(p.oid,'EXECUTE'))", (SCHEMA,))).fetchone()
         _require(outside == (False,))
+        if mail_queue_since:
+            await verify_mail_access(conn, queue_since=mail_queue_since)
         return True
     except RuntimeRoleError:
         raise
