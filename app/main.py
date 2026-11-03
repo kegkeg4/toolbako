@@ -696,11 +696,12 @@ async def transfer_offer(request: Request, slug: str):
     tool = store.get_public(slug)
     if not tool or not store.transfer_is_public(tool): raise HTTPException(404, "独占譲渡の受付はありません")
     user = current_user(request)
+    interaction_blocked = bool(user and store.blocked_between(user["id"], user["username"], tool["author_id"], tool["author_username"]))
     existing = next((item for item in store.transfer_inquiries if user and item["buyer_id"] == user["id"] and item["tool_slug"] == slug and item["status"] in {"nda_pending","reviewing","negotiating"}), None)
     transfer_schema = {"@context":"https://schema.org","@type":"SoftwareApplication","name":f"{tool['name']} 独占譲渡","description":tool.get("exclusive_summary", tool["tagline"]),"applicationCategory":tool["category"],"operatingSystem":tool.get("passport",{}).get("requirements","Web"),"url":f"{settings.site_base_url}/tools/{slug}/transfer","author":{"@type":"Person","name":tool["author_name"],"url":f"{settings.site_base_url}/u/{tool['author_username']}"},"offers":{"@type":"Offer","priceCurrency":"JPY","price":tool["exclusive_price_min"],"availability":"https://schema.org/InStock","url":f"{settings.site_base_url}/tools/{slug}/transfer"}}
     breadcrumb_schema = {"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"独占譲渡","item":f"{settings.site_base_url}/transfers"},{"@type":"ListItem","position":2,"name":tool["name"],"item":f"{settings.site_base_url}/tools/{slug}/transfer"}]}
     og_path = generate_og(slug, tool["name"], tool["tagline"], tool["author_username"])
-    return templates.TemplateResponse(request, "transfer_offer.html", context(request, tool=tool, existing_inquiry=existing, buyer_identity_verified=identity_verified(user), seller_identity_verified=identity_verified_by_id(tool["author_id"]), seo_jsonld=[transfer_schema,breadcrumb_schema], og_image_url=f"{settings.site_base_url}{og_path}"))
+    return templates.TemplateResponse(request, "transfer_offer.html", context(request, tool=tool, existing_inquiry=existing, interaction_blocked=interaction_blocked, buyer_identity_verified=identity_verified(user), seller_identity_verified=identity_verified_by_id(tool["author_id"]), seo_jsonld=[transfer_schema,breadcrumb_schema], og_image_url=f"{settings.site_base_url}{og_path}"))
 
 
 @app.post("/tools/{slug}/transfer")

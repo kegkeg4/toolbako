@@ -72,7 +72,7 @@ class ProductionGuardMiddleware(BaseHTTPMiddleware):
             # submitted password/body or trust a caller-provided destination.
             destination = str(request.url.replace(scheme="https", netloc=canonical.netloc))
             return self._finish(RedirectResponse(destination, 307, headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"}), request, request_id)
-        if not security_path.startswith(("/static/", "/healthz", "/readyz", "/deploymentz")):
+        if not (security_path.startswith("/static/") or security_path in {"/healthz", "/readyz", "/deploymentz"}):
             forwarded = request.headers.get("x-forwarded-for", "").split(",")[0].strip()
             direct_ip = request.client.host if request.client else "unknown"
             trusted_proxy = False
@@ -119,9 +119,15 @@ class ProductionGuardMiddleware(BaseHTTPMiddleware):
             source = request.headers.get("origin") or request.headers.get("referer")
             if not source:
                 return self._finish(JSONResponse({"error":"origin_required","request_id":request_id}, status_code=403), request, request_id)
-            source_url = urlparse(source)
-            expected_url = urlparse(self.settings.site_base_url)
-            if (source_url.scheme, source_url.netloc) != (expected_url.scheme, expected_url.netloc):
+            try:
+                source_url = urlparse(source)
+                expected_url = urlparse(self.settings.site_base_url)
+                origin_matches = (source_url.scheme, source_url.netloc) == (expected_url.scheme, expected_url.netloc)
+            except ValueError:
+                # Malformed caller headers must be rejected before the handler,
+                # without an unhandled error or reflecting the supplied value.
+                origin_matches = False
+            if not origin_matches:
                 return self._finish(JSONResponse({"error":"invalid_origin","request_id":request_id}, status_code=403), request, request_id)
 
         try:
