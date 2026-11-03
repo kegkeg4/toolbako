@@ -302,25 +302,56 @@ def test_new_response_cannot_commit_wrong_identity_or_claim_bank_paid(monkeypatc
     assert provider.calls == [kind]
 
 
+@pytest.fixture
+def scoped_live_webhook():
+    """Real pure validator with explicit synthetic scope; no journal/network."""
+    from app.config import Settings
+    from app.data import DemoStore
+    from app.financial_scope import FinancialScope
+    from app.integrations import StripeIntegration
+    from app.live_setup_plan import STRIPE_API_VERSION
+    from app.live_webhooks import LiveStripeWebhookService
+
+    scope = FinancialScope("live", "acct_LivePlatform", "11111111-1111-4111-8111-111111111111")
+    settings = Settings(stripe_secret_key="rk_live_syntheticOnly", stripe_api_version=STRIPE_API_VERSION,
+                        stripe_platform_account_id=scope.platform_account, stripe_ledger_id=scope.ledger_id)
+    provider = StripeIntegration(settings.stripe_secret_key, "https://synthetic.invalid",
+                                 api_version=STRIPE_API_VERSION, financial_scope=scope)
+    service = LiveStripeWebhookService(settings, DemoStore(seed=False), backend=None, provider=provider, kind="connect")
+
+    def evidence(mode):
+        remote = bank(mode)
+        remote["metadata"].update(ledger_id=scope.ledger_id, platform_account_id=scope.platform_account)
+        return remote
+
+    return service, evidence
+
+
 @pytest.mark.parametrize("mode", ["test", "live"])
 @pytest.mark.parametrize("field,value", [("amount", 690.0), ("automatic", 0), ("object", "transfer"),
                                        ("arrival_date", True), ("metadata", {"payout_id": "other"})])
-def test_live_webhook_retains_strict_proof_and_mode_rejection(mode, field, value):
+def test_live_webhook_retains_strict_proof_and_mode_rejection(scoped_live_webhook, mode, field, value):
     from fastapi import HTTPException
-    from app.live_webhooks import LiveStripeWebhookService
-    service = LiveStripeWebhookService.__new__(LiveStripeWebhookService)
+    service, evidence = scoped_live_webhook
     payout = payout_record(provider_payout_id="po_fixture")
+    # Prove the fixture meets the full current contract before corrupting one
+    # field; a missing ledger must not make every negative case pass by accident.
+    assert service._validate_payout(evidence("live"), {"payout": payout}, {"account": "acct_seller"}) is None
+    remote = evidence(mode)
+    if field == "metadata":
+        remote["metadata"].update(value)
+    else:
+        remote[field] = value
     with pytest.raises(HTTPException) as error:
-        service._validate_payout(bank(mode, **{field: value}), {"payout": payout}, {"account": "acct_seller"})
+        service._validate_payout(remote, {"payout": payout}, {"account": "acct_seller"})
     assert error.value.status_code == 400
 
 
 @pytest.mark.parametrize("mode", ["test", "live"])
-def test_live_webhook_accepts_only_live_bank_evidence(mode):
+def test_live_webhook_accepts_only_live_bank_evidence(scoped_live_webhook, mode):
     from fastapi import HTTPException
-    from app.live_webhooks import LiveStripeWebhookService
-    service = LiveStripeWebhookService.__new__(LiveStripeWebhookService)
-    args = (bank(mode), {"payout": payout_record(provider_payout_id="po_fixture")}, {"account": "acct_seller"})
+    service, evidence = scoped_live_webhook
+    args = (evidence(mode), {"payout": payout_record(provider_payout_id="po_fixture")}, {"account": "acct_seller"})
     if mode == "test":
         with pytest.raises(HTTPException): service._validate_payout(*args)
     else:

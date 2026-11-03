@@ -1,7 +1,7 @@
-"""Future default-off refund domain with real isolated PG and mock Stripe only."""
+"""Default-off refund domain with real isolated PG and mock Stripe only."""
 import asyncio
 from copy import deepcopy
-from dataclasses import dataclass, fields, replace
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qs
 from uuid import uuid4
@@ -23,12 +23,6 @@ from test_database import database, query
 from test_finance import order as make_order
 from test_payment_reconciliation import sender
 from test_refund_resumption import ResumeProvider, seed_live
-
-
-@dataclass(frozen=True)
-class FutureRefundSettings(Settings):
-    # Production Settings/runtime is root-owned and deliberately still OFF.
-    stripe_live_refunds_enabled: bool = False
 
 
 class LiveProvider(ResumeProvider):
@@ -82,9 +76,9 @@ def live_provider(monkeypatch):
 
 async def setup(backend, dsn, provider):
     store, original, stripe, mfa, one, scope, at = await seed_live(backend, dsn, provider)
-    values = {field.name: getattr(original, field.name) for field in fields(Settings)}
-    values.update(stripe_connection_mode="live_financial", stripe_api_version=STRIPE_API_VERSION)
-    settings = FutureRefundSettings(**values, stripe_live_refunds_enabled=True)
+    settings = replace(original, stripe_connection_mode="live_financial",
+                       stripe_api_version=STRIPE_API_VERSION, stripe_live_refunds_enabled=True)
+    assert type(settings) is Settings
     stripe.api_version = STRIPE_API_VERSION
     mfa = SupabaseMFA(settings, mfa.sessions)
     one.scope.update(method="POST", path="/admin/orders/live_order/refund-resumption/propose")

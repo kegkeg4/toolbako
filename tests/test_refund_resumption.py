@@ -358,19 +358,39 @@ def test_cancellation_route_records_consent_but_does_not_finish_before_confirmat
     asyncio.run(run())
 
 
-def test_new_template_does_not_show_actions_when_recovery_disabled():
+@pytest.mark.parametrize("recovery_ready,execution_ready,inspection_available", [
+    (False, None, False), (True, None, False),
+    (False, False, True), (True, False, True),
+    (False, True, True), (True, True, True),
+])
+@pytest.mark.parametrize("actor", ["admin_one", "admin_two"])
+def test_new_template_does_not_show_actions_when_recovery_disabled(
+    recovery_ready, execution_ready, inspection_available, actor,
+):
     from jinja2 import Environment, FileSystemLoader
     from pathlib import Path
     env = Environment(loader=FileSystemLoader(Path(__file__).resolve().parents[1] / "templates"), autoescape=True)
     proposal = {"status": "proposed", "id": "proposal", "proposed_by": "admin_one", "remaining_count": 1, "next_amount": 400, "next_operation": "refund-extra-o-e1"}
     finance = {"sellers": [], "transactions": [], "payouts": [], **{key: 0 for key in ("gross_paid", "completed_gmv", "platform_fee_earned", "processor_fee_total", "available_to_payout", "paid_out", "held", "refund_total", "disputed_total", "blocked_for_payout")}}
-    for ready in (False, True):
-        html = env.get_template("_admin_finance.html").render(finance=finance, finance_controls_ready=False,
-            payment_recovery_ready=ready, payment_recoveries={"items": [], "truncated": False},
-            refund_resumptions={"items": [{"order_id": "o", "tool_name": "<script>private</script>", "proposal": proposal}], "truncated": False}, user={"id": "admin_two"})
-        assert "<script>private</script>" not in html
-        assert ("/refund-resumption/approve" in html) is ready
-        assert "新たなテスト返金を1件だけ作成" in html if ready else "本番では使えません" in html
+    context = dict(finance=finance, finance_controls_ready=False,
+        payment_recovery_ready=recovery_ready, payment_recoveries={"items": [], "truncated": False},
+        refund_live_inspection_available=inspection_available,
+        refund_resumptions={"items": [{"order_id": "o", "tool_name": "<script>private</script>", "proposal": proposal}], "truncated": False},
+        user={"id": actor})
+    if execution_ready is not None:
+        context["refund_execution_ready"] = execution_ready
+    html = env.get_template("_admin_finance.html").render(**context)
+    enabled = recovery_ready if execution_ready is None else execution_ready
+    assert "<script>private</script>" not in html
+    assert ("/refund-resumption/approve" in html) is (enabled and actor != proposal["proposed_by"])
+    assert ("/refund-resumption/propose" in html) is enabled
+    assert ("/refund-inspection" in html) is inspection_available
+    assert ("返金実行は停止中です。" in html) is (not enabled)
+    assert "結果不明の返金は再送しません。" in html
+    if enabled and actor != proposal["proposed_by"]:
+        assert "別の管理者として返金を承認" in html
+    if actor == proposal["proposed_by"]:
+        assert "別の管理者による承認を待っています" in html
 
 
 @pytest.mark.parametrize("status", ["awaiting_approval", "processing", "pending", "partial", "review", "completed"])
