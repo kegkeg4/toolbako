@@ -105,6 +105,78 @@ async def verify_runtime_memberships(conn):
     _membership_shape(rows, postgres, conn.info.server_version)
 
 
+async def _runtime_catalog_cursors(conn):
+    """Queue fresh, independent catalog SELECTs; no result fetch inside pipeline.
+
+    The caller has already verified READ ONLY. Pipeline failure rejects the
+    complete audit; no cached result or sequential success fallback is used.
+    """
+    cursors = {}
+    extra = ",m.inherit_option,m.set_option,m.grantor" if conn.info.server_version >= 160000 else ""
+    async with conn.pipeline():
+        cursors["roles"] = await conn.execute(
+            "select rolname,rolsuper,rolinherit,rolcreaterole,rolcreatedb,rolcanlogin,rolreplication,rolbypassrls "
+            "from pg_catalog.pg_roles where rolname in (%s,%s)", (RUNTIME_ROLE, RUNTIME_GROUP))
+        cursors["postgres"] = await conn.execute(
+            "select oid,rolsuper,rolcreaterole from pg_catalog.pg_roles where rolname='postgres'"
+        )
+        if conn.info.server_version >= 160000:
+            cursors["bootstrap"] = await conn.execute(
+                "select oid,rolsuper from pg_catalog.pg_roles where oid=10"
+            )
+        cursors["memberships"] = await conn.execute(
+            "select parent.rolname,child.rolname,m.admin_option" + extra + " from pg_catalog.pg_auth_members m "
+            "join pg_catalog.pg_roles parent on parent.oid=m.roleid "
+            "join pg_catalog.pg_roles child on child.oid=m.member "
+            "where parent.rolname in (%s,%s) or child.rolname in (%s,%s)",
+            (RUNTIME_ROLE, RUNTIME_GROUP, RUNTIME_ROLE, RUNTIME_GROUP))
+        cursors["database"] = await conn.execute(
+            "select has_database_privilege(current_database(),'CONNECT'),"
+            "has_database_privilege(current_database(),'CREATE'),"
+            "has_database_privilege(current_database(),'TEMP'),d.datdba = r.oid "
+            "from pg_catalog.pg_database d,pg_catalog.pg_roles r "
+            "where d.datname=current_database() and r.rolname=current_user")
+        cursors["schemas"] = await conn.execute(
+            "select n.nspname,has_schema_privilege(n.oid,'USAGE'),has_schema_privilege(n.oid,'CREATE'),"
+            "pg_has_role(n.nspowner,'USAGE') from pg_catalog.pg_namespace n "
+            "where n.nspname !~ '^pg_' and n.nspname <> 'information_schema'")
+        cursors["tables"] = await conn.execute(
+            "select c.relname,c.oid,c.relrowsecurity,c.relkind,pg_has_role(c.relowner,'USAGE'), "
+            "(select jsonb_agg(jsonb_build_array(a.attname,v.verb,has_column_privilege(c.oid,a.attnum,v.verb),"
+            "has_column_privilege(c.oid,a.attnum,v.verb||' WITH GRANT OPTION'))) "
+            "from pg_catalog.pg_attribute a cross join (values ('SELECT'),('INSERT'),('UPDATE'),('REFERENCES')) v(verb) "
+            "where a.attrelid=c.oid and a.attnum>0 and not a.attisdropped), "
+            "(select bool_or(has_table_privilege(c.oid,verb)) from "
+            "(values ('SELECT'),('INSERT'),('UPDATE'),('DELETE'),('TRUNCATE'),('REFERENCES'),('TRIGGER')) v(verb)), "
+            "(select jsonb_agg(jsonb_build_array(p.polname,p.polcmd,p.polpermissive,"
+            "array(select r.rolname::text from pg_catalog.pg_roles r where r.oid=any(p.polroles) order by r.rolname),"
+            "pg_get_expr(p.polqual,p.polrelid),pg_get_expr(p.polwithcheck,p.polrelid),0=any(p.polroles))) "
+            "from pg_catalog.pg_policy p where p.polrelid=c.oid) "
+            "from pg_catalog.pg_class c join pg_catalog.pg_namespace n on n.oid=c.relnamespace "
+            "where n.nspname=%s and c.relkind in ('r','p','v','m','f','S')", (SCHEMA,))
+        if conn.info.server_version >= 170000:
+            cursors["maintain"] = await conn.execute(
+                "select exists(select 1 from pg_catalog.pg_class c join pg_catalog.pg_namespace n on n.oid=c.relnamespace "
+                "where n.nspname !~ '^pg_' and n.nspname <> 'information_schema' "
+                "and has_schema_privilege(n.oid,'USAGE') "
+                "and c.relkind in ('r','p','m') and has_table_privilege(c.oid,'MAINTAIN'))")
+        cursors["outside"] = await conn.execute(
+            "select exists(select 1 from pg_catalog.pg_class c join pg_catalog.pg_namespace n on n.oid=c.relnamespace "
+            "where n.nspname !~ '^pg_' and n.nspname not in ('information_schema',%s) "
+            "and has_schema_privilege(n.oid,'USAGE') "
+            "and c.relkind in ('r','p','v','m','f') and ("
+            "has_any_column_privilege(c.oid,'SELECT,INSERT,UPDATE,REFERENCES') or "
+            "has_table_privilege(c.oid,'DELETE,TRUNCATE,TRIGGER') or pg_has_role(c.relowner,'USAGE'))) "
+            "or exists(select 1 from pg_catalog.pg_class c join pg_catalog.pg_namespace n on n.oid=c.relnamespace "
+            "where n.nspname !~ '^pg_' and n.nspname <> 'information_schema' "
+            "and has_schema_privilege(n.oid,'USAGE') "
+            "and case when c.relkind='S' then has_sequence_privilege(c.oid,'USAGE,SELECT,UPDATE') else false end) "
+            "or exists(select 1 from pg_catalog.pg_proc p join pg_catalog.pg_namespace n on n.oid=p.pronamespace "
+            "where n.nspname !~ '^pg_' and n.nspname <> 'information_schema' and p.prosecdef "
+            "and has_schema_privilege(n.oid,'USAGE') and has_function_privilege(p.oid,'EXECUTE'))", (SCHEMA,))
+    return cursors
+
+
 async def verify_runtime_role(conn, *, mail_queue_since=0):
     """Verify actual SQL identity and effective rights. Call in READ ONLY mode.
 
@@ -125,41 +197,22 @@ async def verify_runtime_role(conn, *, mail_queue_since=0):
             mail_policies = mail_policy_rows(mail_queue_since)
         identity = await (await conn.execute("select current_user, session_user, current_setting('transaction_read_only')")).fetchone()
         _require(identity == (RUNTIME_ROLE, RUNTIME_ROLE, "on"))
-        roles = await (await conn.execute(
-            "select rolname,rolsuper,rolinherit,rolcreaterole,rolcreatedb,rolcanlogin,rolreplication,rolbypassrls "
-            "from pg_catalog.pg_roles where rolname in (%s,%s)", (RUNTIME_ROLE, RUNTIME_GROUP))).fetchall()
+        cursors = await _runtime_catalog_cursors(conn)
+        roles = await cursors["roles"].fetchall()
         _require(set(roles) == {
             (RUNTIME_ROLE, False, True, False, False, True, False, False),
             (RUNTIME_GROUP, False, False, False, False, False, False, False),
         })
-        await verify_runtime_memberships(conn)
-        database = await (await conn.execute(
-            "select has_database_privilege(current_database(),'CONNECT'),"
-            "has_database_privilege(current_database(),'CREATE'),"
-            "has_database_privilege(current_database(),'TEMP'),d.datdba = r.oid "
-            "from pg_catalog.pg_database d,pg_catalog.pg_roles r "
-            "where d.datname=current_database() and r.rolname=current_user")).fetchone()
+        postgres = await cursors["postgres"].fetchone()
+        if conn.info.server_version >= 160000 and postgres is not None and postgres[1] is False:
+            _require(await cursors["bootstrap"].fetchone() == (10, True))
+        _membership_shape(await cursors["memberships"].fetchall(), postgres, conn.info.server_version)
+        database = await cursors["database"].fetchone()
         _require(database == (True, False, False, False))
-        schemas = await (await conn.execute(
-            "select n.nspname,has_schema_privilege(n.oid,'USAGE'),has_schema_privilege(n.oid,'CREATE'),"
-            "pg_has_role(n.nspowner,'USAGE') from pg_catalog.pg_namespace n "
-            "where n.nspname !~ '^pg_' and n.nspname <> 'information_schema'")).fetchall()
+        schemas = await cursors["schemas"].fetchall()
         _require(any(row[:3] == (SCHEMA, True, False) for row in schemas))
         _require(all(not row[2] and not row[3] for row in schemas))
-        tables = await (await conn.execute(
-            "select c.relname,c.oid,c.relrowsecurity,c.relkind,pg_has_role(c.relowner,'USAGE'), "
-            "(select jsonb_agg(jsonb_build_array(a.attname,v.verb,has_column_privilege(c.oid,a.attnum,v.verb),"
-            "has_column_privilege(c.oid,a.attnum,v.verb||' WITH GRANT OPTION'))) "
-            "from pg_catalog.pg_attribute a cross join (values ('SELECT'),('INSERT'),('UPDATE'),('REFERENCES')) v(verb) "
-            "where a.attrelid=c.oid and a.attnum>0 and not a.attisdropped), "
-            "(select bool_or(has_table_privilege(c.oid,verb)) from "
-            "(values ('SELECT'),('INSERT'),('UPDATE'),('DELETE'),('TRUNCATE'),('REFERENCES'),('TRIGGER')) v(verb)), "
-            "(select jsonb_agg(jsonb_build_array(p.polname,p.polcmd,p.polpermissive,"
-            "array(select r.rolname::text from pg_catalog.pg_roles r where r.oid=any(p.polroles) order by r.rolname),"
-            "pg_get_expr(p.polqual,p.polrelid),pg_get_expr(p.polwithcheck,p.polrelid),0=any(p.polroles))) "
-            "from pg_catalog.pg_policy p where p.polrelid=c.oid) "
-            "from pg_catalog.pg_class c join pg_catalog.pg_namespace n on n.oid=c.relnamespace "
-            "where n.nspname=%s and c.relkind in ('r','p','v','m','f','S')", (SCHEMA,))).fetchall()
+        tables = await cursors["tables"].fetchall()
         _require({row[0] for row in tables} == set(PERMISSIONS) and len(tables) == 9)
         for table, oid, rls, kind, owned, columns, dangerous, policies in tables:
             _require(rls is True and kind == "r" and owned is False)
@@ -179,30 +232,13 @@ async def verify_runtime_role(conn, *, mail_queue_since=0):
                 _require(public is False and expected_policies.get(name) ==
                          (command, permissive, policy_roles, normalize(using), normalize(check)))
         if conn.info.server_version >= 170000:
-            maintain = await (await conn.execute(
-                "select exists(select 1 from pg_catalog.pg_class c join pg_catalog.pg_namespace n on n.oid=c.relnamespace "
-                "where n.nspname !~ '^pg_' and n.nspname <> 'information_schema' "
-                "and has_schema_privilege(n.oid,'USAGE') "
-                "and c.relkind in ('r','p','m') and has_table_privilege(c.oid,'MAINTAIN'))")).fetchone()
+            maintain = await cursors["maintain"].fetchone()
             _require(maintain == (False,))
         # Check PUBLIC and any grant on non-runtime relations, including column
         # grants (table-only predicates would miss them) and sequences. An ACL
         # inside a namespace without effective USAGE is not executable access;
         # PUBLIC/direct/inherited USAGE becoming available is checked afresh.
-        outside = await (await conn.execute(
-            "select exists(select 1 from pg_catalog.pg_class c join pg_catalog.pg_namespace n on n.oid=c.relnamespace "
-            "where n.nspname !~ '^pg_' and n.nspname not in ('information_schema',%s) "
-            "and has_schema_privilege(n.oid,'USAGE') "
-            "and c.relkind in ('r','p','v','m','f') and ("
-            "has_any_column_privilege(c.oid,'SELECT,INSERT,UPDATE,REFERENCES') or "
-            "has_table_privilege(c.oid,'DELETE,TRUNCATE,TRIGGER') or pg_has_role(c.relowner,'USAGE'))) "
-            "or exists(select 1 from pg_catalog.pg_class c join pg_catalog.pg_namespace n on n.oid=c.relnamespace "
-            "where n.nspname !~ '^pg_' and n.nspname <> 'information_schema' "
-            "and has_schema_privilege(n.oid,'USAGE') "
-            "and case when c.relkind='S' then has_sequence_privilege(c.oid,'USAGE,SELECT,UPDATE') else false end) "
-            "or exists(select 1 from pg_catalog.pg_proc p join pg_catalog.pg_namespace n on n.oid=p.pronamespace "
-            "where n.nspname !~ '^pg_' and n.nspname <> 'information_schema' and p.prosecdef "
-            "and has_schema_privilege(n.oid,'USAGE') and has_function_privilege(p.oid,'EXECUTE'))", (SCHEMA,))).fetchone()
+        outside = await cursors["outside"].fetchone()
         _require(outside == (False,))
         if mail_queue_since:
             await verify_mail_access(conn, queue_since=mail_queue_since)

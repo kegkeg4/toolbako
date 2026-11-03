@@ -48,52 +48,35 @@ def mail_policy_rows(queue_since):
                     for name, (command, using, check) in policies.items()} for table, policies in values.items()}
 
 
-async def verify_mail_access(conn, *, queue_since, require_login=True):
-    """Read-only fixed-role audit; callable from the Web verifier as well.
+async def _mail_catalog_cursors(conn):
+    """Queue fresh, independent catalog SELECTs; no result fetch inside pipeline.
 
-    SQL current_user may be Web or the operator during preparation. All effective
-    privilege predicates explicitly target MAIL_ROLE. The delivery backend also
-    verifies actual SQL identity and the TLS connection independently below.
+    The caller has already verified READ ONLY. Pipeline failure rejects the
+    complete audit; no cached result or sequential success fallback is used.
     """
-    try:
-        _require(type(require_login) is bool)
-        extra_policies = mail_policy_rows(queue_since)
-        _require(await (await conn.execute("select current_setting('transaction_read_only')")).fetchone() == ("on",))
-        roles = await (await conn.execute(
+    cursors = {}
+    extra = ",m.inherit_option,m.set_option,m.grantor" if conn.info.server_version >= 160000 else ""
+    async with conn.pipeline():
+        cursors["roles"] = await conn.execute(
             "select rolname,rolsuper,rolinherit,rolcreaterole,rolcreatedb,rolcanlogin,rolreplication,rolbypassrls,rolconfig "
-            "from pg_catalog.pg_roles where rolname in (%s,%s)", (MAIL_ROLE, MAIL_GROUP))).fetchall()
-        _require(set(roles) == {
-            (MAIL_ROLE, False, True, False, False, require_login, False, False, None),
-            (MAIL_GROUP, False, False, False, False, False, False, False, None),
-        })
-        postgres = await (await conn.execute("select oid,rolsuper,rolcreaterole from pg_catalog.pg_roles where rolname='postgres'")).fetchone()
-        _require(postgres is not None and (postgres[1] or postgres[2]))
-        creator, superuser, _ = postgres
-        extra = ",m.inherit_option,m.set_option,m.grantor" if conn.info.server_version >= 160000 else ""
-        memberships = await (await conn.execute(
+            "from pg_catalog.pg_roles where rolname in (%s,%s)", (MAIL_ROLE, MAIL_GROUP))
+        cursors["postgres"] = await conn.execute("select oid,rolsuper,rolcreaterole from pg_catalog.pg_roles where rolname='postgres'")
+        cursors["memberships"] = await conn.execute(
             "select parent.rolname,child.rolname,m.admin_option" + extra + " from pg_catalog.pg_auth_members m "
             "join pg_catalog.pg_roles parent on parent.oid=m.roleid join pg_catalog.pg_roles child on child.oid=m.member "
             "where parent.rolname in (%s,%s) or child.rolname in (%s,%s)",
-            (MAIL_ROLE, MAIL_GROUP, MAIL_ROLE, MAIL_GROUP))).fetchall()
-        expected = {(MAIL_GROUP, MAIL_ROLE, False)}
+            (MAIL_ROLE, MAIL_GROUP, MAIL_ROLE, MAIL_GROUP))
         if conn.info.server_version >= 160000:
-            expected = {(MAIL_GROUP, MAIL_ROLE, False, True, True, creator)}
-            if not superuser:
-                _require(await (await conn.execute("select oid,rolsuper from pg_catalog.pg_roles where oid=10")).fetchone() == (10, True))
-                expected.update((role, "postgres", True, False, False, 10) for role in (MAIL_ROLE, MAIL_GROUP))
-        _require(len(memberships) == len(expected) and set(memberships) == expected)
-        database = await (await conn.execute(
+            cursors["bootstrap"] = await conn.execute("select oid,rolsuper from pg_catalog.pg_roles where oid=10")
+        cursors["database"] = await conn.execute(
             "select has_database_privilege(%s,current_database(),'CONNECT'),has_database_privilege(%s,current_database(),'CREATE'),"
             "has_database_privilege(%s,current_database(),'TEMP'),pg_has_role(%s,d.datdba,'USAGE') "
-            "from pg_catalog.pg_database d where d.datname=current_database()", (MAIL_ROLE,) * 4)).fetchone()
-        _require(database == (True, False, False, False))
-        schemas = await (await conn.execute(
+            "from pg_catalog.pg_database d where d.datname=current_database()", (MAIL_ROLE,) * 4)
+        cursors["schemas"] = await conn.execute(
             "select n.nspname,has_schema_privilege(%s,n.oid,'USAGE'),has_schema_privilege(%s,n.oid,'CREATE'),"
             "pg_has_role(%s,n.nspowner,'USAGE') from pg_catalog.pg_namespace n where n.nspname !~ '^pg_' and n.nspname <> 'information_schema'",
-            (MAIL_ROLE,) * 3)).fetchall()
-        _require(any(row[:3] == ("toolbako_runtime", True, False) for row in schemas))
-        _require(all(not row[2] and not row[3] for row in schemas))
-        tables = await (await conn.execute(
+            (MAIL_ROLE,) * 3)
+        cursors["tables"] = await conn.execute(
             "select c.relname,c.relrowsecurity,c.relkind,pg_has_role(%s,c.relowner,'USAGE'), "
             "(select jsonb_agg(jsonb_build_array(a.attname,v.verb,has_column_privilege(%s,c.oid,a.attnum,v.verb),"
             "has_column_privilege(%s,c.oid,a.attnum,v.verb||' WITH GRANT OPTION'))) "
@@ -106,7 +89,60 @@ async def verify_mail_access(conn, *, queue_since, require_login=True):
             "pg_get_expr(p.polqual,p.polrelid),pg_get_expr(p.polwithcheck,p.polrelid),0=any(p.polroles))) "
             "from pg_catalog.pg_policy p where p.polrelid=c.oid) "
             "from pg_catalog.pg_class c join pg_catalog.pg_namespace n on n.oid=c.relnamespace "
-            "where n.nspname='toolbako_runtime' and c.relkind in ('r','p','v','m','f','S')", (MAIL_ROLE,) * 4)).fetchall()
+            "where n.nspname='toolbako_runtime' and c.relkind in ('r','p','v','m','f','S')", (MAIL_ROLE,) * 4)
+        if conn.info.server_version >= 170000:
+            cursors["maintain"] = await conn.execute(
+                "select exists(select 1 from pg_class c join pg_namespace n on n.oid=c.relnamespace "
+                "where n.nspname !~ '^pg_' and n.nspname <> 'information_schema' and has_schema_privilege(%s,n.oid,'USAGE') "
+                "and c.relkind in ('r','p','m') and has_table_privilege(%s,c.oid,'MAINTAIN'))", (MAIL_ROLE,) * 2)
+        cursors["outside"] = await conn.execute(
+            "select exists(select 1 from pg_class c join pg_namespace n on n.oid=c.relnamespace "
+            "where n.nspname !~ '^pg_' and n.nspname not in ('information_schema','toolbako_runtime') "
+            "and has_schema_privilege(%s,n.oid,'USAGE') and c.relkind in ('r','p','v','m','f') and "
+            "(has_any_column_privilege(%s,c.oid,'SELECT,INSERT,UPDATE,REFERENCES') or has_table_privilege(%s,c.oid,'DELETE,TRUNCATE,TRIGGER') or pg_has_role(%s,c.relowner,'USAGE'))) "
+            "or exists(select 1 from pg_class c join pg_namespace n on n.oid=c.relnamespace "
+            "where n.nspname !~ '^pg_' and n.nspname <> 'information_schema' and has_schema_privilege(%s,n.oid,'USAGE') "
+            "and case when c.relkind='S' then has_sequence_privilege(%s,c.oid,'USAGE,SELECT,UPDATE') else false end) "
+            "or exists(select 1 from pg_proc p join pg_namespace n on n.oid=p.pronamespace "
+            "where n.nspname !~ '^pg_' and n.nspname <> 'information_schema' and p.prosecdef "
+            "and has_schema_privilege(%s,n.oid,'USAGE') and has_function_privilege(%s,p.oid,'EXECUTE'))", (MAIL_ROLE,) * 8)
+    return cursors
+
+
+async def verify_mail_access(conn, *, queue_since, require_login=True):
+    """Read-only fixed-role audit; callable from the Web verifier as well.
+
+    SQL current_user may be Web or the operator during preparation. All effective
+    privilege predicates explicitly target MAIL_ROLE. The delivery backend also
+    verifies actual SQL identity and the TLS connection independently below.
+    """
+    try:
+        _require(type(require_login) is bool)
+        extra_policies = mail_policy_rows(queue_since)
+        _require(await (await conn.execute("select current_setting('transaction_read_only')")).fetchone() == ("on",))
+        cursors = await _mail_catalog_cursors(conn)
+        roles = await cursors["roles"].fetchall()
+        _require(set(roles) == {
+            (MAIL_ROLE, False, True, False, False, require_login, False, False, None),
+            (MAIL_GROUP, False, False, False, False, False, False, False, None),
+        })
+        postgres = await cursors["postgres"].fetchone()
+        _require(postgres is not None and (postgres[1] or postgres[2]))
+        creator, superuser, _ = postgres
+        memberships = await cursors["memberships"].fetchall()
+        expected = {(MAIL_GROUP, MAIL_ROLE, False)}
+        if conn.info.server_version >= 160000:
+            expected = {(MAIL_GROUP, MAIL_ROLE, False, True, True, creator)}
+            if not superuser:
+                _require(await cursors["bootstrap"].fetchone() == (10, True))
+                expected.update((role, "postgres", True, False, False, 10) for role in (MAIL_ROLE, MAIL_GROUP))
+        _require(len(memberships) == len(expected) and set(memberships) == expected)
+        database = await cursors["database"].fetchone()
+        _require(database == (True, False, False, False))
+        schemas = await cursors["schemas"].fetchall()
+        _require(any(row[:3] == ("toolbako_runtime", True, False) for row in schemas))
+        _require(all(not row[2] and not row[3] for row in schemas))
+        tables = await cursors["tables"].fetchall()
         _require(len(tables) == 9 and {row[0] for row in tables} == set(WEB_TABLES))
         for table, rls, kind, owned, columns, broad_grants, policies in tables:
             _require(rls is True and kind == "r" and owned is False and broad_grants is False)
@@ -123,21 +159,8 @@ async def verify_mail_access(conn, *, queue_since, require_login=True):
                 _require(public is False and expected_policies.get(name) == (command, permissive, policy_roles,
                     normalize_mail_expression(using), normalize_mail_expression(check)))
         if conn.info.server_version >= 170000:
-            _require(await (await conn.execute(
-                "select exists(select 1 from pg_class c join pg_namespace n on n.oid=c.relnamespace "
-                "where n.nspname !~ '^pg_' and n.nspname <> 'information_schema' and has_schema_privilege(%s,n.oid,'USAGE') "
-                "and c.relkind in ('r','p','m') and has_table_privilege(%s,c.oid,'MAINTAIN'))", (MAIL_ROLE,) * 2)).fetchone() == (False,))
-        outside = await (await conn.execute(
-            "select exists(select 1 from pg_class c join pg_namespace n on n.oid=c.relnamespace "
-            "where n.nspname !~ '^pg_' and n.nspname not in ('information_schema','toolbako_runtime') "
-            "and has_schema_privilege(%s,n.oid,'USAGE') and c.relkind in ('r','p','v','m','f') and "
-            "(has_any_column_privilege(%s,c.oid,'SELECT,INSERT,UPDATE,REFERENCES') or has_table_privilege(%s,c.oid,'DELETE,TRUNCATE,TRIGGER') or pg_has_role(%s,c.relowner,'USAGE'))) "
-            "or exists(select 1 from pg_class c join pg_namespace n on n.oid=c.relnamespace "
-            "where n.nspname !~ '^pg_' and n.nspname <> 'information_schema' and has_schema_privilege(%s,n.oid,'USAGE') "
-            "and case when c.relkind='S' then has_sequence_privilege(%s,c.oid,'USAGE,SELECT,UPDATE') else false end) "
-            "or exists(select 1 from pg_proc p join pg_namespace n on n.oid=p.pronamespace "
-            "where n.nspname !~ '^pg_' and n.nspname <> 'information_schema' and p.prosecdef "
-            "and has_schema_privilege(%s,n.oid,'USAGE') and has_function_privilege(%s,p.oid,'EXECUTE'))", (MAIL_ROLE,) * 8)).fetchone()
+            _require(await cursors["maintain"].fetchone() == (False,))
+        outside = await cursors["outside"].fetchone()
         _require(outside == (False,))
         return True
     except LiveMailRuntimeError:
