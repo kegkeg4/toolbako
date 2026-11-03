@@ -20,7 +20,8 @@ async def request_order_refunds(store, order, stripe):
         if part.get("refund_reference"):
             continue
         kwargs = {"extra_id": extra_id} if extra_id else {}
-        refund = await stripe.refund_payment(part["payment_reference"], order["id"], **kwargs)
+        refund = await stripe.refund_payment(part["payment_reference"], order["id"],
+                                            amount=part["amount"] if extra_id else primary_amount, **kwargs)
         part["refund_reference"] = refund["id"]
         if extra_id:
             part["refund_status"] = "pending"

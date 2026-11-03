@@ -41,6 +41,9 @@ class Settings:
     # Exact opt-in only. This permits connection verification of a separately
     # bound live dataset, never Stripe mutations or payment activation.
     stripe_connection_mode: str = os.getenv("STRIPE_CONNECTION_MODE", "sandbox")
+    # Separate, explicit setup-only permission. This never enables payment,
+    # refund, transfer or payout APIs and cannot extend live_read_only.
+    stripe_live_seller_setup_enabled: bool = os.getenv("STRIPE_LIVE_SELLER_SETUP_ENABLED", "false") == "true"
     # Optional until a separately reviewed dataset is bound. Supplying these
     # never enables live writes or automatically rebinds existing test data.
     stripe_platform_account_id: str = os.getenv("STRIPE_PLATFORM_ACCOUNT_ID", "").strip()

@@ -270,17 +270,19 @@ class StripeIntegration:
     async def cancel_subscription(self, subscription_id: str, idempotency_key: str) -> dict[str, Any]:
         return await self._post(f"subscriptions/{subscription_id}", {"_idempotency_key":idempotency_key,"cancel_at_period_end":"true"})
 
-    def refund_data(self, payment_intent: str, order_id: str, *, extra_id: str | None = None) -> dict[str, Any]:
+    def refund_data(self, payment_intent: str, order_id: str, *, amount: int, extra_id: str | None = None) -> dict[str, Any]:
+        if type(amount) is not int or amount <= 0:
+            raise RuntimeError("返金の承認金額を確認できません")
         key = f"refund-extra-{order_id}-{extra_id}" if extra_id else f"refund-{order_id}"
-        data = {"_idempotency_key":key,"payment_intent":payment_intent,"metadata[order_id]":order_id}
+        data = {"_idempotency_key":key,"payment_intent":payment_intent,"amount":str(amount),"metadata[order_id]":order_id}
         if extra_id:
             data["metadata[extra_id]"] = extra_id
         if self.charge_mode == "destination":
             data.update({"reverse_transfer":"true","refund_application_fee":"true"})
         return data
 
-    async def refund_payment(self, payment_intent: str, order_id: str, *, extra_id: str | None = None) -> dict[str, Any]:
-        return await self._post("refunds", self.refund_data(payment_intent, order_id, extra_id=extra_id))
+    async def refund_payment(self, payment_intent: str, order_id: str, *, amount: int, extra_id: str | None = None) -> dict[str, Any]:
+        return await self._post("refunds", self.refund_data(payment_intent, order_id, amount=amount, extra_id=extra_id))
 
     async def create_identity_session(self, user_id: str) -> dict[str, Any]:
         return await self._post("identity/verification_sessions", {"_idempotency_key":f"identity-{user_id}-{uuid4()}","type":"document","metadata[user_id]":user_id,"return_url":f"{self.base_url}/verification?returned=1","options[document][require_matching_selfie]":"true"})

@@ -4,6 +4,7 @@ from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qs
+from uuid import uuid4
 
 import httpx
 import pytest
@@ -12,11 +13,17 @@ from starlette.requests import Request
 
 from app.config import Settings
 from app.data import DemoStore
-from app.database import StorageUnavailable
+from app.database import PostgresStateStore, StorageUnavailable, content_hash, snapshot
 from app.finance import FinanceConflict, balance
+from app.financial_scope import FinancialScope, FinancialScopeError
 from app.integrations import StripeIntegration, StripeOutcomeUnknown
-from app.payment_reconciliation import propose_payment_recovery, approve_payment_recovery
-from app.refund_resumption import propose_refund_resumption, approve_refund_resumption, refund_resumption_inventory
+from app.mfa import SupabaseMFA
+from app.security import SessionService
+from app.payment_reconciliation import propose_payment_recovery, approve_payment_recovery, refund_request_data
+from app.refund_resumption import (
+    propose_refund_resumption, approve_refund_resumption, refund_resumption_inventory,
+    inspect_refund_resumption_live,
+)
 from app.refunds import request_order_refunds
 from test_database import database, query
 from test_finance import order as make_order
@@ -29,8 +36,17 @@ class ResumeProvider(PaymentProvider):
         self.timeouts = {"pi_main"}
         self.rejects = set()
         self.invalid = False
+        self.scope = None
+        self.wrong_platform = False
+        self.wrong_balance_mode = False
+        self.partial_race = False
 
     def __call__(self, request):
+        if self.scope is not None and request.method == "GET" and request.url.path in {"/v1/account", "/v1/balance"}:
+            self.requests.append(request)
+            if request.url.path == "/v1/account":
+                return httpx.Response(200, json={"object": "account", "id": "acct_other" if self.wrong_platform else self.scope.platform_account})
+            return httpx.Response(200, json={"object": "balance", "livemode": not self.wrong_balance_mode})
         if request.method == "GET" and request.url.path == "/v1/refunds":
             self.requests.append(request)
             records = [deepcopy(x) for x in self.records if x.get("payment_intent") == request.url.params.get("payment_intent")]
@@ -39,6 +55,11 @@ class ResumeProvider(PaymentProvider):
         if request.method == "POST" and request.url.path == "/v1/refunds":
             data = {k: v[0] for k, v in parse_qs(request.content.decode()).items()}
             payment_id = data["payment_intent"]
+            assert data["amount"] == str(self.payments[payment_id]["amount"])
+            if self.partial_race:
+                self.requests.append(request)
+                self.payments[payment_id]["latest_charge"]["amount_refunded"] = 1
+                return httpx.Response(400, json={"error": {"message": "synthetic amount exceeds remaining"}})
             if payment_id in self.rejects:
                 self.requests.append(request)
                 return httpx.Response(400, json={"error": {"message": "private provider error"}})
@@ -387,6 +408,8 @@ def test_first_refund_requires_two_admins_and_persists_before_post(database, pro
             with pytest.raises(FinanceConflict):
                 await approve_refund_resumption(backend, store, stripe, settings, store.orders[0], "admin_two", proposal["id"], sender(backend), at=at)
         assert sum(r.method == "POST" for r in provider.requests) == 1
+        first_post = next(r for r in provider.requests if r.method == "POST")
+        assert parse_qs(first_post.content.decode())["amount"] == ["1000"]
         assert await resume(backend, store, settings, stripe, at) == "partial"
         assert await resume(backend, store, settings, stripe, at) == "completed"
         assert sum(r.method == "POST" for r in provider.requests) == 3
@@ -415,4 +438,279 @@ def test_first_refund_fails_closed_before_any_send(database, provider, monkeypat
                 await approve_refund_resumption(backend, store, stripe, settings, order, "admin_two", proposal["id"], sender(backend), at=at)
             if failure == "save_failure": monkeypatch.setattr(backend, "save", original_save)
         assert not any(r.method == "POST" for r in provider.requests)
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("amount", [None, True, False, "1000", 1000.0, 0, -1])
+def test_new_refund_api_rejects_non_exact_amount_before_provider_io(amount):
+    stripe = StripeIntegration("sk_test_synthetic", "https://example.test", charge_mode="separate")
+    with pytest.raises(RuntimeError):
+        stripe.refund_data("pi_one", "order", amount=amount)
+    with pytest.raises(RuntimeError):
+        asyncio.run(stripe.refund_payment("pi_one", "order", amount=amount))
+
+
+def test_new_refund_api_cannot_omit_amount():
+    stripe = StripeIntegration("sk_test_synthetic", "https://example.test", charge_mode="separate")
+    with pytest.raises(TypeError):
+        stripe.refund_data("pi_one", "order")
+    with pytest.raises(TypeError):
+        stripe.refund_payment("pi_one", "order")
+
+
+def legacy_record(backend, store, stripe, provider, at, status):
+    async def create():
+        async with backend.request(store):
+            order = store.orders[0]
+            # Hand-build the historic request. The new API cannot generate it.
+            legacy = {"payment_intent": "pi_main", "metadata[order_id]": order["id"]}
+            key = "refund-" + order["id"]
+            remote = {"object": "refund", "id": "re_legacy", "payment_intent": "pi_main", "charge": "ch_main",
+                      "amount": 1000, "currency": "jpy", "status": "succeeded", "created": int(at.timestamp()),
+                      "metadata": {"order_id": order["id"]}}
+            await backend.begin_operation(key, "refunds", legacy)
+            await backend.finish_operation(key, status, remote if status == "succeeded" else None)
+            provider.records.append(remote)
+            provider.payments["pi_main"]["latest_charge"].update(amount_refunded=1000, refunded=True)
+            order.update(refund_status="review", payment_reconciliation_required=True)
+            await backend.save()
+            return key, content_hash(legacy)
+    return create()
+
+
+def test_legacy_unknown_refund_reconciles_using_original_hash_without_post(database, provider):
+    backend, dsn = database
+    async def run():
+        store, settings, stripe, at = await seed(backend, dsn, provider, initial=True)
+        key, digest = await legacy_record(backend, store, stripe, provider, at, "unknown")
+        async with backend.request(store):
+            proposal = await propose_payment_recovery(backend, store, stripe, settings, store.orders[0], "refund", "admin_one", at=at)
+            assert proposal["request_hash"] == digest
+            await approve_payment_recovery(backend, store, stripe, settings, store.orders[0], "refund", "admin_two", proposal["id"], sender(backend), at=at)
+        assert query(dsn, "select request_hash,status from toolbako_runtime.stripe_operations where operation_id=%s", (key,)) == [(digest, "succeeded")]
+        assert not any(r.method == "POST" for r in provider.requests)
+    asyncio.run(run())
+
+
+def test_legacy_success_allows_only_next_explicit_amount_refund(database, provider):
+    backend, dsn = database
+    async def run():
+        store, settings, stripe, at = await seed(backend, dsn, provider, initial=True)
+        key, digest = await legacy_record(backend, store, stripe, provider, at, "succeeded")
+        assert await resume(backend, store, settings, stripe, at) == "partial"
+        posts = [r for r in provider.requests if r.method == "POST"]
+        assert len(posts) == 1
+        assert posts[0].headers["Idempotency-Key"] == "refund-extra-resume_order-e1"
+        assert parse_qs(posts[0].content.decode())["amount"] == ["400"]
+        assert query(dsn, "select request_hash from toolbako_runtime.stripe_operations where operation_id=%s", (key,)) == [(digest,)]
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("failure", ["different_amount", "different_payment", "different_order", "different_extra", "different_endpoint", "wrong_amount_hash"])
+def test_legacy_unknown_evidence_cannot_expand_to_another_target(database, provider, failure):
+    backend, dsn = database
+    async def run():
+        store, settings, stripe, at = await seed(backend, dsn, provider, initial=True)
+        key, digest = await legacy_record(backend, store, stripe, provider, at, "unknown")
+        async with backend.request(store):
+            order = store.orders[0]
+            if failure == "different_amount": order["primary_payment_amount"] += 1
+            elif failure == "different_payment": order["payment_reference"] = "pi_elsewhere"
+            elif failure == "different_order": order["id"] = "other_order"
+            elif failure == "different_extra":
+                provider.records[0]["metadata"]["extra_id"] = "different_extra"
+            elif failure == "different_endpoint":
+                await backend._connection.execute("update toolbako_runtime.stripe_operations set endpoint='transfers' where operation_id=%s", (key,))
+            else:
+                bad = {"payment_intent": "pi_main", "amount": "999", "metadata[order_id]": order["id"]}
+                await backend._connection.execute("update toolbako_runtime.stripe_operations set request_hash=%s where operation_id=%s", (content_hash(bad), key))
+            with pytest.raises((FinanceConflict, RuntimeError)):
+                await propose_payment_recovery(backend, store, stripe, settings, order, "refund", "admin_one", at=at)
+        assert not any(r.method == "POST" for r in provider.requests)
+        assert query(dsn, "select status from toolbako_runtime.stripe_operations where operation_id=%s", (key,)) == [("unknown",)]
+    asyncio.run(run())
+
+
+def test_external_partial_refund_between_get_and_post_never_changes_approved_amount(database, provider):
+    backend, dsn = database
+    async def run():
+        store, settings, stripe, at = await seed(backend, dsn, provider, initial=True)
+        provider.partial_race = True
+        with pytest.raises(RuntimeError):
+            await resume(backend, store, settings, stripe, at)
+        posts = [r for r in provider.requests if r.method == "POST"]
+        assert len(posts) == 1 and parse_qs(posts[0].content.decode())["amount"] == ["1000"]
+        async with backend.request(store):
+            assert store.orders[0]["refund_status"] == "review"
+            with pytest.raises(FinanceConflict):
+                await propose_refund_resumption(backend, store, stripe, settings, store.orders[0], "admin_one", at=at)
+        assert sum(r.method == "POST" for r in provider.requests) == 1
+        assert query(dsn, "select status from toolbako_runtime.stripe_operations where operation_id='refund-resume_order'") == [("rejected",)]
+    asyncio.run(run())
+
+
+async def seed_live(backend, dsn, provider, *, bind=True):
+    at = datetime.now(timezone.utc)
+    scope = FinancialScope("live", "acct_platform", str(uuid4()))
+    provider.scope = scope
+    settings = Settings(environment="staging", demo_mode=False, database_url=dsn,
+                        stripe_secret_key="rk_live_SYNTHETIC", stripe_charge_mode="separate",
+                        stripe_connection_mode="live_read_only", stripe_platform_account_id=scope.platform_account,
+                        stripe_ledger_id=scope.ledger_id, site_base_url="https://example.test",
+                        admin_user_ids=("admin_one", "admin_two"))
+    stripe = StripeIntegration(settings.stripe_secret_key, settings.site_base_url,
+                               charge_mode="separate", journal=backend, financial_scope=scope)
+    store = DemoStore(seed=False)
+    sessions = SessionService(store, 3600)
+    mfa = SupabaseMFA(settings, sessions)
+    request = Request({"type": "http", "method": "GET", "headers": [], "session": {}})
+    async with backend.request(store):
+        if bind:
+            await backend.bind_empty_financial_scope(scope)
+        for name in settings.admin_user_ids:
+            store.registered_users[name] = {"id": name, "username": name, "email_verified": True}
+        sessions.establish(request, store.registered_users["admin_one"])
+        store.account_sessions[request.session["sid"]].update(mfa_verified_at=at, mfa_token_expires_at=at + timedelta(hours=1))
+        order = make_order(id="live_order", status="cancel_pending", payment_reference="pi_live", amount=1000,
+                           cancel_requested_by="buyer", refund_cancel_accepted_by="seller", refund_cancel_accepted_at=at,
+                           refund_status="awaiting_approval", pending_extras=[], tool_slug="test")
+        store.orders.append(order)
+        store.tools.append({"slug": "test", "sales_count": 1})
+        metadata = {"order_id": order["id"], "ledger_id": scope.ledger_id}
+        provider.payment("pi_live", 1000, metadata)
+        payment = provider.payments["pi_live"]
+        payment["livemode"] = payment["latest_charge"]["livemode"] = True
+        payment["latest_charge"]["metadata"] = dict(metadata)
+        await backend.save()
+    return store, settings, stripe, mfa, request, scope, at
+
+
+def test_live_inspection_is_fresh_get_only_and_does_not_persist_or_enable_execution(database, provider):
+    backend, dsn = database
+    async def run():
+        store, settings, stripe, mfa, request, scope, at = await seed_live(backend, dsn, provider)
+        async with backend.request(store):
+            before = deepcopy(snapshot(store))
+            result = await inspect_refund_resumption_live(backend, store, stripe, settings, mfa, request, order_id="live_order", at=at)
+            assert result["scope"] == scope.payload() and result["execution_allowed"] is False
+            assert result["remaining_amount"] == 1000 and result["remaining_count"] == 1
+            assert snapshot(store) == before
+            with pytest.raises(FinanceConflict):
+                await propose_refund_resumption(backend, store, stripe, settings, store.orders[0], "admin_one", at=at)
+            with pytest.raises(RuntimeError):
+                await stripe.refund_payment("pi_live", "live_order", amount=1000)
+            provider.payments["pi_live"]["latest_charge"]["disputed"] = True
+            with pytest.raises(FinanceConflict):
+                await inspect_refund_resumption_live(backend, store, stripe, settings, mfa, request, order_id="live_order", at=at)
+        assert all(r.method == "GET" and "stripe-account" not in r.headers for r in provider.requests)
+        assert query(dsn, "select count(*) from toolbako_runtime.stripe_operations where endpoint='refunds'") == [(0,)]
+        assert query(dsn, "select count(*) from toolbako_runtime.email_outbox") == [(0,)]
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("failure", ["unbound", "wrong_ledger", "wrong_platform", "wrong_balance_mode", "test_key", "different_key", "different_backend",
+    "different_store", "no_boundary", "no_session", "stale_mfa", "banned_admin", "deleted_second_admin", "not_admin", "duplicate_order",
+    "test_payment", "test_charge", "payment_amount", "charge_amount", "charge_parent", "charge_currency", "payment_metadata", "charge_metadata",
+    "payment_ledger", "charge_ledger", "partial_refund", "manual_refund", "unknown_intent", "paid_out_case", "reserved_payout", "incomplete", "missing_consent"])
+def test_live_inspection_rejects_unproved_context_or_parent_without_post(database, provider, failure):
+    backend, dsn = database
+    async def run():
+        store, settings, stripe, mfa, request, scope, at = await seed_live(backend, dsn, provider, bind=failure != "unbound")
+        if failure == "no_boundary":
+            with pytest.raises(FinanceConflict):
+                await inspect_refund_resumption_live(backend, store, stripe, settings, mfa, request, order_id="live_order", at=at)
+            return
+        async with backend.request(store):
+            order = store.orders[0]
+            payment, charge = provider.payments["pi_live"], provider.payments["pi_live"]["latest_charge"]
+            if failure == "wrong_ledger":
+                scope = FinancialScope("live", scope.platform_account, str(uuid4()))
+                settings = replace(settings, stripe_ledger_id=scope.ledger_id)
+                stripe.financial_scope = scope
+                mfa.settings = settings
+            elif failure == "wrong_platform": provider.wrong_platform = True
+            elif failure == "wrong_balance_mode": provider.wrong_balance_mode = True
+            elif failure == "test_key":
+                settings = replace(settings, stripe_secret_key="sk_test_SYNTHETIC")
+                stripe.secret_key = settings.stripe_secret_key
+                mfa.settings = settings
+            elif failure == "different_key": stripe.secret_key = "rk_live_other"
+            elif failure == "different_backend": stripe.journal = PostgresStateStore(dsn)
+            elif failure == "different_store": mfa.sessions.store = DemoStore(seed=False)
+            elif failure == "no_session": request.session.clear()
+            elif failure == "stale_mfa": store.account_sessions[request.session["sid"]]["mfa_verified_at"] = at - timedelta(minutes=11)
+            elif failure == "banned_admin": store.registered_users["admin_one"]["is_banned"] = True
+            elif failure == "deleted_second_admin": store.registered_users["admin_two"]["deleted_at"] = at
+            elif failure == "not_admin":
+                settings = replace(settings, admin_user_ids=("outsider", "admin_two"))
+                mfa.settings = settings
+            elif failure == "duplicate_order": store.orders.append(deepcopy(order))
+            elif failure == "test_payment": payment["livemode"] = False
+            elif failure == "test_charge": charge["livemode"] = False
+            elif failure == "payment_amount": payment["amount"] = 999
+            elif failure == "charge_amount": charge["amount_captured"] = 999
+            elif failure == "charge_parent": charge["payment_intent"] = "pi_elsewhere"
+            elif failure == "charge_currency": charge["currency"] = "usd"
+            elif failure == "payment_metadata": payment["metadata"]["order_id"] = "another_order"
+            elif failure == "charge_metadata": charge["metadata"]["order_id"] = "another_order"
+            elif failure == "payment_ledger": payment["metadata"]["ledger_id"] = str(uuid4())
+            elif failure == "charge_ledger": charge["metadata"].pop("ledger_id")
+            elif failure == "partial_refund": charge["amount_refunded"] = 1
+            elif failure == "manual_refund": provider.records.append({"id": "re_manual", "payment_intent": "pi_live"})
+            elif failure == "unknown_intent":
+                key, data = refund_request_data(stripe, order, None, 1000, scope=scope)
+                await backend.begin_operation(key, "refunds", data)
+                await backend.finish_operation(key, "unknown")
+            elif failure == "paid_out_case": order["paid_out_refund_case"] = {}
+            elif failure == "reserved_payout": store.payouts.append({"finance_v2": True, "status": "paid", "allocations": [{"order_id": order["id"]}]})
+            elif failure == "incomplete": provider.incomplete = True
+            elif failure == "missing_consent": order.pop("refund_cancel_accepted_by")
+            with pytest.raises((FinanceConflict, FinancialScopeError, RuntimeError)):
+                await inspect_refund_resumption_live(backend, store, stripe, settings, mfa, request, order_id="live_order", at=at)
+        assert all(r.method == "GET" for r in provider.requests)
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("failure", [None, "legacy_amountless", "wrong_amount_hash", "other_ledger_hash", "refund_amount", "refund_currency",
+    "refund_parent", "refund_charge", "refund_order", "refund_extra", "refund_ledger", "refund_test_mode", "refund_pending", "refund_duplicate"])
+def test_live_existing_refund_requires_exact_scoped_request_and_fresh_full_result(database, provider, failure):
+    backend, dsn = database
+    async def run():
+        store, settings, stripe, mfa, request, scope, at = await seed_live(backend, dsn, provider)
+        async with backend.request(store):
+            order = store.orders[0]
+            key, data = refund_request_data(stripe, order, None, 1000, scope=scope)
+            assert data["amount"] == "1000" and data["metadata[ledger_id]"] == scope.ledger_id
+            if failure == "legacy_amountless":
+                data.pop("amount")
+                data.pop("metadata[ledger_id]")
+            elif failure == "wrong_amount_hash": data["amount"] = "999"
+            elif failure == "other_ledger_hash": data["metadata[ledger_id]"] = str(uuid4())
+            remote = {"object": "refund", "id": "re_live", "payment_intent": "pi_live", "charge": "ch_live",
+                      "amount": 1000, "currency": "jpy", "status": "succeeded", "created": int(at.timestamp()),
+                      "metadata": {"order_id": order["id"], "ledger_id": scope.ledger_id}}
+            await backend.begin_operation(key, "refunds", data)
+            await backend.finish_operation(key, "succeeded", deepcopy(remote))
+            provider.records.append(remote)
+            provider.payments["pi_live"]["latest_charge"].update(amount_refunded=1000, refunded=True)
+            if failure == "refund_amount": remote["amount"] = 999
+            elif failure == "refund_currency": remote["currency"] = "usd"
+            elif failure == "refund_parent": remote["payment_intent"] = "pi_elsewhere"
+            elif failure == "refund_charge": remote["charge"] = "ch_elsewhere"
+            elif failure == "refund_order": remote["metadata"]["order_id"] = "another_order"
+            elif failure == "refund_extra": remote["metadata"]["extra_id"] = "another_extra"
+            elif failure == "refund_ledger": remote["metadata"]["ledger_id"] = str(uuid4())
+            elif failure == "refund_test_mode": remote["livemode"] = False
+            elif failure == "refund_pending": remote["status"] = "pending"
+            elif failure == "refund_duplicate": provider.duplicate = True
+            before = deepcopy(snapshot(store))
+            if failure is None:
+                result = await inspect_refund_resumption_live(backend, store, stripe, settings, mfa, request, order_id="live_order", at=at)
+                assert result["verified_refund_count"] == 1 and result["remaining_amount"] == 0
+                assert result["execution_allowed"] is False
+            else:
+                with pytest.raises((FinanceConflict, RuntimeError)):
+                    await inspect_refund_resumption_live(backend, store, stripe, settings, mfa, request, order_id="live_order", at=at)
+            assert snapshot(store) == before
+        assert all(r.method == "GET" for r in provider.requests)
     asyncio.run(run())

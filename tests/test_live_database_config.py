@@ -158,7 +158,8 @@ def test_source_package_contains_ca_at_the_relocatable_railpack_runtime_path(tmp
     # Static packaging contract, not a claim that a new image is deployed.
     deployment = json.loads((ROOT / "railway.json").read_text(encoding="utf-8"))
     assert deployment["build"]["builder"] == "RAILPACK"
-    assert deployment["deploy"]["startCommand"].startswith("uvicorn app.main:app ")
+    assert deployment["deploy"]["startCommand"] == "python -m app.live_runtime web"
+    assert deployment["deploy"]["preDeployCommand"] == ["python -m app.live_runtime preflight"]
     relative_paths = ["app/live_database_config.py", "app/certs/supabase-prod-ca-2021.crt"]
     patterns = [p.strip() for p in (ROOT / ".gitignore").read_text().splitlines()
                 if p.strip() and not p.startswith(("#", "!"))]

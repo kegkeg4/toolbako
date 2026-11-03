@@ -74,6 +74,7 @@ class PaymentProvider:
         else:
             payment_id = data["payment_intent"]
             payment = self.payments[payment_id]
+            assert data["amount"] == str(payment["amount"])
             if self.refund_status == "succeeded":
                 payment["latest_charge"].update(amount_refunded=payment["amount"], refunded=True)
             # Stripe refund objects intentionally have NO livemode field.
@@ -119,7 +120,9 @@ async def uncertain(backend, dsn, provider, kind):
         with pytest.raises(StripeOutcomeUnknown):
             if kind == "checkout": await stripe.create_checkout(order, "acct_seller")
             elif kind == "extra": await stripe.create_extra_checkout(order, extra, "acct_seller")
-            else: await stripe.refund_payment((extra or order)["payment_reference"], order["id"], extra_id=extra["id"] if extra else None)
+            else: await stripe.refund_payment((extra or order)["payment_reference"], order["id"],
+                    amount=extra["amount"] if extra else order.get("primary_payment_amount", order["amount"]),
+                    extra_id=extra["id"] if extra else None)
         order["payment_reconciliation_required"] = True
         if kind.startswith("refund"): order["refund_status"] = "review"
         await backend.save()
@@ -389,7 +392,7 @@ def test_other_unknown_parts_keep_hold_and_resolved_operation_cannot_be_reapprov
     async def run():
         store, settings, stripe, at = await uncertain(backend, dsn, provider, "extra")
         async with backend.request(store):
-            await backend.begin_operation("refund-payment_order", "refunds", stripe.refund_data("pi_main", "payment_order"))
+            await backend.begin_operation("refund-payment_order", "refunds", stripe.refund_data("pi_main", "payment_order", amount=1000))
         await recover(backend, store, settings, stripe, "extra", at)
         async with backend.request(store):
             order = store.orders[0]

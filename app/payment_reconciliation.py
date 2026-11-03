@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from .database import content_hash
 from .finance import FinanceConflict, RESERVED
+from .financial_scope import FinancialScope, key_mode
 from .payment_state import apply_checkout_payment, apply_checkout_expiry, apply_refund_payment
 from .payout_worker import sandbox_payouts_ready
 from .payment_source_proof import payment_source_proof
@@ -25,6 +26,42 @@ def require_sandbox_review(backend, store, stripe, settings, actor_id):
             or actor_id not in settings.admin_user_ids or len(set(settings.admin_user_ids)) < 2
             or backend._store is not store):
         raise FinanceConflict("接続済みのテスト環境と、別々の管理者2名が必要です")
+
+
+def refund_request_data(stripe, order, extra, amount, *, operation=None, scope=None):
+    """Exact refund amount for new intents; old test hashes are GET-only evidence.
+
+    An existing amount-less test request may be inspected/reconciled only with
+    its original hash. This never creates a new operation key or retries an
+    unknown/rejected intent. A live request additionally binds ledger metadata;
+    callers still authenticate the provider/dataset and enforce all POST gates.
+    """
+    if type(amount) is not int or amount <= 0:
+        raise FinanceConflict("返金の承認金額を確認できません")
+    mode = key_mode(stripe.secret_key)
+    if mode == "live" and (not isinstance(scope, FinancialScope) or scope.mode != "live"
+                           or stripe.financial_scope != scope):
+        raise FinanceConflict("本番返金の取引台帳を確認できません")
+    if scope is not None:
+        if not isinstance(scope, FinancialScope) or stripe.financial_scope != scope:
+            raise FinanceConflict("返金要求の取引台帳を確認できません")
+        scope.validate_key(stripe.secret_key)
+    part = extra or order
+    data = stripe.refund_data(part["payment_reference"], order["id"], amount=amount,
+                             extra_id=extra["id"] if extra else None)
+    operation_id = data.pop("_idempotency_key")
+    legacy = {key: value for key, value in data.items() if key != "amount"}
+    if mode == "live":
+        data["metadata[ledger_id]"] = scope.ledger_id
+    if operation is not None:
+        if operation.get("endpoint") != "refunds":
+            raise FinanceConflict("元の返金要求の種類が一致しません")
+        digest = operation.get("request_hash")
+        if digest != content_hash(data):
+            if mode != "test" or digest != content_hash(legacy):
+                raise FinanceConflict("元の返金要求の金額・台帳が一致しません")
+            data = legacy
+    return operation_id, data
 
 
 def _part(order, kind, extra_id):
@@ -65,12 +102,14 @@ async def _target(backend, store, stripe, order, kind, extra_id):
         if any(p.get("finance_v2") and p["status"] in RESERVED
                and any(a["order_id"] == order["id"] for a in p["allocations"]) for p in store.payouts):
             raise FinanceConflict("振込申請済みの売上です。運営で詳細確認してください")
-        data = stripe.refund_data(part["payment_reference"], order["id"], extra_id=extra_id or None)
+        data = stripe.refund_data(part["payment_reference"], order["id"], amount=amount, extra_id=extra_id or None)
         endpoint = "refunds"
     operation_id = data.pop("_idempotency_key")
     operation = await backend.operation_details(operation_id)
     if not operation or operation["status"] not in {"pending", "unknown"}:
         raise FinanceConflict("結果不明な決済・返金がありません")
+    if endpoint == "refunds":
+        _, data = refund_request_data(stripe, order, extra, amount, operation=operation)
     if operation["endpoint"] != endpoint or operation["request_hash"] != content_hash(data):
         raise FinanceConflict("元の要求内容と一致しません。再送せず詳細確認してください")
     return extra, amount, data, operation_id, operation

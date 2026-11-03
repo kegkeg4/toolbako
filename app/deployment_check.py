@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 LIVE_DATABASE_PROJECT = "xijdnqnsuhuciqyygnkg"
 LIVE_AUTH_STORAGE_URL = "https://xnjzgfaasbemffgorvnj.supabase.co"
 LIVE_PLATFORM_ACCOUNT = "acct_1Ty4WnIogL39waUY"
+LIVE_CONNECTION_STAGES = {"live_read_only", "live_setup_only"}
 LIVE_DATABASE_ENDPOINTS = {
     (f"db.{LIVE_DATABASE_PROJECT}.supabase.co", "postgres"),
     ("aws-0-ap-northeast-1.pooler.supabase.com", f"postgres.{LIVE_DATABASE_PROJECT}"),
@@ -49,9 +50,21 @@ def _live_database_config(settings: Settings) -> dict:
 
 def _live_configuration_verified(settings: Settings) -> bool:
     try:
+        from .live_setup_plan import STRIPE_API_VERSION
         scope = configured_scope(settings)
+        setup_notifications = (
+            settings.stripe_api_version == STRIPE_API_VERSION
+            and settings.stripe_connect_accounts_v2 is False
+            and all(isinstance(secret, str) and re.fullmatch(r"whsec_[A-Za-z0-9]+", secret)
+                    for secret in (settings.stripe_webhook_secret, settings.stripe_connect_webhook_secret))
+            and settings.stripe_webhook_secret != settings.stripe_connect_webhook_secret
+        )
         return bool(
-            settings.stripe_connection_mode == "live_read_only"
+            settings.stripe_connection_mode in LIVE_CONNECTION_STAGES
+            and ((settings.stripe_connection_mode == "live_setup_only"
+                  and settings.stripe_live_seller_setup_enabled is True and setup_notifications)
+                 or (settings.stripe_connection_mode == "live_read_only"
+                     and settings.stripe_live_seller_setup_enabled is False))
             and re.fullmatch(r"rk_live_[A-Za-z0-9]+", settings.stripe_secret_key)
             and scope is not None and scope.mode == "live"
             and scope.platform_account == LIVE_PLATFORM_ACCOUNT
@@ -113,7 +126,7 @@ async def deployment_database_check(settings: Settings, backend) -> bool:
     """
     if backend is None or not all(configuration_checks(settings).values()):
         return False
-    if settings.stripe_connection_mode == "live_read_only":
+    if settings.stripe_connection_mode in LIVE_CONNECTION_STAGES:
         return all((await _live_database_checks(settings, backend)).values())
     return bool(await backend.probe())
 
@@ -235,13 +248,14 @@ def configuration_checks(settings: Settings) -> dict[str, bool]:
         # Live money movement remains a separately reviewed, code-blocked step.
         "no_live_stripe_key": not settings.stripe_secret_key.startswith(("sk_live_", "rk_live_")),
     }
-    if settings.stripe_connection_mode == "live_read_only":
+    if settings.stripe_connection_mode in LIVE_CONNECTION_STAGES:
         # Do not mislabel a live key as absent. This static configuration flag
         # alone is never used as connection or scope evidence.
         del results["no_live_stripe_key"]
-        results["live_read_only_configuration"] = _live_configuration_verified(settings)
+        results[settings.stripe_connection_mode + "_configuration"] = _live_configuration_verified(settings)
     else:
         results["stripe_connection_mode"] = settings.stripe_connection_mode == "sandbox"
+        results["live_seller_setup_disabled"] = settings.stripe_live_seller_setup_enabled is False
     return results
 
 
@@ -249,7 +263,7 @@ async def connection_checks(settings: Settings) -> dict[str, bool]:
     results = configuration_checks(settings)
     results.update(database_schema=False, auth_api=False, profile_api=False,
                    badge_api=False, anonymous_profiles_denied=False)
-    live_stage = settings.stripe_connection_mode == "live_read_only"
+    live_stage = settings.stripe_connection_mode in LIVE_CONNECTION_STAGES
     if live_stage:
         results.update(database_target_verified=False, financial_scope_bound=False,
                        live_stripe_connection_verified=False)

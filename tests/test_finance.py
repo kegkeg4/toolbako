@@ -396,7 +396,7 @@ def test_primary_and_extra_refunds_must_both_complete():
             calls.append((payment_intent, kwargs))
             return {"id": "re_" + payment_intent}
     asyncio.run(request_order_refunds(store, original, Refunds()))
-    assert calls == [("pi_finance", {}), ("pi_extra", {"extra_id": "extra"})]
+    assert calls == [("pi_finance", {"amount": 1000}), ("pi_extra", {"amount": 500, "extra_id": "extra"})]
     assert not apply_refund_result(original, None, {"amount_refunded": 1000}, "charge.refunded")
     assert original["refund_status"] == "partial"
     assert apply_refund_result(original, extra, {"amount_refunded": 500}, "charge.refunded")

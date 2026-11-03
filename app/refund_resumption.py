@@ -1,23 +1,36 @@
-"""Four-eyes initiation and resumption of full cancellation, Sandbox only.
+"""Four-eyes full cancellation; execution remains Sandbox only.
 
 This is NOT unknown-operation recovery. A new POST is allowed only for a part
 with NO durable intent, NO local refund facts and NO provider refunds. Every
 previous intent must be a verified, fully succeeded refund. One approval sends
 at most one new refund, using the original deterministic operation key.
+
+The separate live inspection entrypoint performs authenticated GETs under a
+bound database request, never persists an approval or sends a financial POST.
 """
 import asyncio
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
-from .database import content_hash
+from .config import Settings
+from .data import DemoStore
+from .database import PostgresStateStore, content_hash
 from .finance import FinanceConflict, RESERVED
-from .integrations import StripeOutcomeUnknown
-from .payment_reconciliation import require_sandbox_review, payment_metadata_matches, sandbox_payment_proof
+from .financial_scope import FinancialScope, configured_scope
+from .integrations import StripeIntegration, StripeOutcomeUnknown
+from .mfa import SupabaseMFA
+from .security import SessionService
+from .payment_reconciliation import (
+    require_sandbox_review, payment_metadata_matches, sandbox_payment_proof,
+    refund_request_data,
+)
+from .payment_source_proof import payment_source_proof
 from .payment_state import apply_refund_payment
 
 
 def _parts(store, order):
-    if (order.get("billing_type", "one_time") != "one_time" or order.get("payment_status") != "paid"
+    if ("paid_out_refund_case" in order
+            or order.get("billing_type", "one_time") != "one_time" or order.get("payment_status") != "paid"
             or order.get("status") not in {"cancel_pending", "cancelled"}
             or order.get("refund_status") not in {"awaiting_approval", "processing", "review", "partial", "pending"}
             or order.get("refund_cancel_accepted_by") not in {order["buyer_id"], order["seller_id"]}
@@ -48,7 +61,7 @@ def _parts(store, order):
     return parts
 
 
-def _refund_fact(remote, order, extra, part, amount, proof, at, *, since=0, require_complete=True):
+def _refund_fact(remote, order, extra, part, amount, proof, at, *, since=0, require_complete=True, scope=None):
     if (remote.get("object") != "refund" or not str(remote.get("id", "")).startswith("re_")
             or type(remote.get("amount")) is not int or remote["amount"] != amount
             or remote.get("currency") != "jpy" or remote.get("payment_intent") != part["payment_reference"]
@@ -58,9 +71,29 @@ def _refund_fact(remote, order, extra, part, amount, proof, at, *, since=0, requ
             or (part.get("refund_reference") and part["refund_reference"] != remote["id"])
             or (remote["status"] == "succeeded" and proof["amount_refunded"] != amount)):
         raise FinanceConflict("既存返金の全額・元決済・成功を確認できません")
+    if scope is not None and (remote["metadata"].get("ledger_id") != scope.ledger_id
+                              or ("livemode" in remote and remote["livemode"] is not True)):
+        raise FinanceConflict("返金の本番台帳が一致しません")
 
 
-async def _inspect(backend, store, stripe, order, at):
+async def _source_proof(stripe, order, extra, payment_id, amount, scope):
+    if scope is None:
+        return await sandbox_payment_proof(stripe, order, extra, payment_id, amount, refund=True)
+    payment = await stripe.retrieve_payment(payment_id)
+    proof = payment_source_proof(payment, payment_id=payment_id, amount=amount,
+                                order_id=order["id"], expected_mode="live", allow_refunded=True)
+    charge = payment["latest_charge"]
+    if (not payment_metadata_matches(payment.get("metadata"), order, extra)
+            or payment["metadata"].get("ledger_id") != scope.ledger_id
+            or not payment_metadata_matches(charge.get("metadata"), order, extra)
+            or charge["metadata"].get("ledger_id") != scope.ledger_id
+            or charge.get("transfer_group") != f"order-{order['id']}"
+            or charge.get("refunded") is not (proof["amount_refunded"] == amount)):
+        raise FinanceConflict("元決済・元請求の本番台帳が一致しません")
+    return proof
+
+
+async def _inspect(backend, store, stripe, order, at, scope=None):
     parts = _parts(store, order)
     keys = [f"checkout-{order['id']}", f"refund-{order['id']}"]
     for extra in order.get("pending_extras", []):
@@ -71,13 +104,14 @@ async def _inspect(backend, store, stripe, order, at):
             raise FinanceConflict("結果不明の購入・返金を先に照合してください")
     existing, missing, identity = [], [], []
     for extra, part, amount in parts:
-        data = stripe.refund_data(part["payment_reference"], order["id"], extra_id=extra["id"] if extra else None)
-        key = data.pop("_idempotency_key")
+        key, data = refund_request_data(stripe, order, extra, amount, scope=scope)
         operation = await backend.operation_details(key)
+        if operation:
+            _, data = refund_request_data(stripe, order, extra, amount, operation=operation, scope=scope)
         if operation and (operation["status"] != "succeeded" or operation["endpoint"] != "refunds"
                           or operation["request_hash"] != content_hash(data)):
             raise FinanceConflict("既存の返金要求が不明・失敗・不一致です。再送せず先に照合してください")
-        proof = await sandbox_payment_proof(stripe, order, extra, part["payment_reference"], amount, refund=True)
+        proof = await _source_proof(stripe, order, extra, part["payment_reference"], amount, scope)
         # No created filter: an old/manual refund must also prevent a new POST.
         objects = await stripe.list_financial_objects("refunds", params={"payment_intent": part["payment_reference"]})
         if not operation:
@@ -92,7 +126,8 @@ async def _inspect(backend, store, stripe, order, at):
             if len(objects) != 1 or not result or (result.get("response") or {}).get("id") != objects[0].get("id"):
                 raise FinanceConflict("既存返金と台帳が一意に一致しません")
             remote = objects[0]
-            _refund_fact(remote, order, extra, part, amount, proof, at, since=int(operation["created_at"].timestamp()) - 60)
+            _refund_fact(remote, order, extra, part, amount, proof, at,
+                         since=int(operation["created_at"].timestamp()) - 60, scope=scope)
             existing.append((extra, remote))
         identity.append({"key": key, "request_hash": content_hash(data), "payment": proof,
                          "refund": {k: remote.get(k) for k in ("id", "amount", "currency", "payment_intent", "charge", "metadata", "status", "created")} if remote else None})
@@ -102,7 +137,8 @@ async def _inspect(backend, store, stripe, order, at):
                                 "refund_status": order["refund_status"],
                                 "buyer": order["buyer_id"], "seller": order["seller_id"],
                                 "requested_by": order["cancel_requested_by"],
-                                "accepted_by": order["refund_cancel_accepted_by"]})
+                                "accepted_by": order["refund_cancel_accepted_by"],
+                                **({"scope": scope.payload()} if scope is not None else {})})
     return existing, missing, fingerprint
 
 
@@ -112,6 +148,48 @@ async def _bounded_inspect(*args):
             return await _inspect(*args)
     except TimeoutError:
         raise FinanceConflict("返金明細の照合がタイムアウトしました。処理を進めず再確認してください") from None
+
+
+async def inspect_refund_resumption_live(backend, store, stripe, settings, mfa, request, *, order_id, at=None):
+    """Fresh live GET evidence, NOT a permission token or a consumed approval.
+
+    Caller holds backend.request(store). This function does not save, audit,
+    reconcile a journal, send mail or POST. Missing/partial/unknown/paid-out cases
+    remain held by the same rules as the Sandbox resumption path. Future live
+    checkout must stamp order/extra/ledger metadata on both PI and Charge;
+    unscoped historical payments cannot be relabelled by this inspection.
+    """
+    if (not isinstance(settings, Settings) or not isinstance(store, DemoStore)
+            or not isinstance(backend, PostgresStateStore) or backend._store is not store
+            or backend._connection is None or backend.dsn != settings.database_url
+            or settings.demo_mode or settings.stripe_charge_mode != "separate"
+            or not isinstance(stripe, StripeIntegration) or stripe.journal is not backend
+            or stripe.secret_key != settings.stripe_secret_key or stripe.charge_mode != "separate"
+            or not isinstance(mfa, SupabaseMFA) or mfa.settings is not settings
+            or not isinstance(mfa.sessions, SessionService) or mfa.sessions.store is not store):
+        raise FinanceConflict("本番返金の認証済み照合環境を確認できません")
+    admins = {u["id"] for u in store.registered_users.values()
+              if u.get("id") in settings.admin_user_ids and not u.get("is_banned")
+              and not u.get("deleted_at") and not u.get("erased_at")}
+    user = mfa.sessions.current(request)
+    if not user or user["id"] not in admins or len(admins) < 2 or not mfa.recent(request):
+        raise FinanceConflict("本番返金の照合には追加認証済みの有効な管理者が必要です")
+    scope = configured_scope(settings)
+    if not isinstance(scope, FinancialScope) or scope.mode != "live" or stripe.financial_scope != scope:
+        raise FinanceConflict("本番返金の取引台帳を確認できません")
+    await backend.assert_financial_scope(scope)
+    await stripe.verify_financial_scope()
+    orders = [o for o in store.orders if o.get("id") == order_id]
+    if len(orders) != 1:
+        raise FinanceConflict("返金対象の注文を一意に確認できません")
+    at = at or datetime.now(timezone.utc)
+    if not isinstance(at, datetime) or at.tzinfo is None:
+        raise FinanceConflict("返金照合の日時を確認できません")
+    existing, missing, fingerprint = await _bounded_inspect(backend, store, stripe, orders[0], at, scope)
+    return {"scope": scope.payload(), "order_id": order_id, "fingerprint": fingerprint,
+            "observed_at": at, "verified_refund_count": len(existing),
+            "remaining_count": len(missing), "remaining_amount": sum(item[2] for item in missing),
+            "execution_allowed": False}
 
 
 async def propose_refund_resumption(backend, store, stripe, settings, order, actor_id, *, at=None):
@@ -151,7 +229,8 @@ async def approve_refund_resumption(backend, store, stripe, settings, order, act
     if missing:
         extra, part, amount, key = missing[0]
         try:
-            remote = await stripe.refund_payment(part["payment_reference"], order["id"], extra_id=extra["id"] if extra else None)
+            remote = await stripe.refund_payment(part["payment_reference"], order["id"], amount=amount,
+                                                extra_id=extra["id"] if extra else None)
             proof = await sandbox_payment_proof(stripe, order, extra, part["payment_reference"], amount, refund=True)
             _refund_fact(remote, order, extra, part, amount, proof, at, require_complete=False)
             part["refund_reference"] = remote["id"]

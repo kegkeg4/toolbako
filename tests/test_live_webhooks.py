@@ -398,13 +398,70 @@ def test_non_paid_out_refund_uses_current_parent_and_updates_full_refund(fixture
     assert store.orders[0]["refund_status"] == "completed"
 
 
-@pytest.mark.parametrize("marker", ["case_metadata", "empty_case_metadata", "ledger_metadata", "case_record", "paid_allocation", "historically_paid_allocation"])
-def test_paid_out_refund_never_falls_through_generic_seller_debt_path(fixture, marker):
+def scoped_refund_evidence(fixture, kind):
+    _, _, _, _, responses, _ = fixture
+    notification = refund_evidence(fixture, kind=kind)
+    payment = responses.objects[("payment_intents/pi_source", None)]
+    for obj in (payment, payment["latest_charge"], notification["data"]["object"]):
+        obj.setdefault("metadata", {}).update(ledger_id=SCOPE.ledger_id, order_id="order_source")
+    path = "charges/ch_source" if kind == "charge.refunded" else "refunds/re_fixture"
+    responses.objects[(path, None)]["metadata"]["ledger_id"] = SCOPE.ledger_id
+    responses.event(notification)
+    return notification
+
+
+@pytest.mark.parametrize("kind", ["refund.updated", "charge.refunded"])
+def test_common_ledger_metadata_is_not_a_paid_out_case(fixture, kind):
+    client, store, _, _, responses, handler = fixture
+    notification = scoped_refund_evidence(fixture, kind)
+    async def unexpected(*args):
+        raise AssertionError("A common ledger ID must not route an ordinary refund to a paid-out case")
+    handler.services["platform"].paid_out_refund_reconciler = unexpected
+    assert deliver(client, notification, path=PLATFORM_PATH, secret=SECRET).status_code == 200
+    assert store.orders[0]["refund_status"] == "completed"
+
+
+@pytest.mark.parametrize("kind", ["refund.updated", "charge.refunded"])
+@pytest.mark.parametrize("fault", ["signed_foreign", "signed_empty", "signed_none", "current_foreign", "current_empty", "current_missing",
+                                  "payment_foreign", "payment_missing", "charge_foreign", "charge_missing", "charge_order"])
+def test_common_refund_ledger_cannot_cross_scope_or_disappear_in_fresh_proof(fixture, kind, fault):
+    client, store, _, _, responses, _ = fixture
+    notification = scoped_refund_evidence(fixture, kind)
+    current_path = "charges/ch_source" if kind == "charge.refunded" else "refunds/re_fixture"
+    current = responses.objects[(current_path, None)]
+    payment = responses.objects[("payment_intents/pi_source", None)]
+    target_name, mutation = fault.split("_")
+    target = {"signed": notification["data"]["object"], "current": current,
+              "payment": payment, "charge": payment["latest_charge"]}[target_name]["metadata"]
+    if mutation == "foreign": target["ledger_id"] = "22222222-2222-4222-8222-222222222222"
+    elif mutation == "empty": target["ledger_id"] = ""
+    elif mutation == "none": target["ledger_id"] = None
+    elif mutation == "missing": target.pop("ledger_id")
+    else: target["order_id"] = "another_order"
+    responses.event(notification)
+    # Non-string metadata is rejected even earlier by the signed event schema.
+    expected = 400 if fault == "signed_none" else 409
+    assert deliver(client, notification, path=PLATFORM_PATH, secret=SECRET).status_code == expected
+    assert "primary_refund_status" not in store.orders[0] and not store.processed_webhook_events
+
+
+@pytest.mark.parametrize("kind", ["refund.updated", "charge.refunded"])
+def test_older_unscoped_notification_uses_current_scoped_parent_without_case(fixture, kind):
+    client, store, _, _, responses, _ = fixture
+    notification = scoped_refund_evidence(fixture, kind)
+    notification["data"]["object"]["metadata"].pop("ledger_id")
+    responses.event(notification)
+    assert deliver(client, notification, path=PLATFORM_PATH, secret=SECRET).status_code == 200
+    assert store.orders[0]["refund_status"] == "completed"
+
+
+@pytest.mark.parametrize("marker", ["case_metadata", "empty_case_metadata", "case_record", "paid_allocation", "historically_paid_allocation"])
+@pytest.mark.parametrize("kind", ["refund.updated", "charge.refunded"])
+def test_paid_out_refund_never_falls_through_generic_seller_debt_path(fixture, marker, kind):
     client, store, backend, _, responses, _ = fixture
-    notification = refund_evidence(fixture)
+    notification = scoped_refund_evidence(fixture, kind)
     if marker == "case_metadata": notification["data"]["object"]["metadata"]["paid_out_case_id"] = "case1"
     elif marker == "empty_case_metadata": notification["data"]["object"]["metadata"]["paid_out_case_id"] = ""
-    elif marker == "ledger_metadata": notification["data"]["object"]["metadata"]["ledger_id"] = SCOPE.ledger_id
     elif marker == "case_record": store.orders[0]["paid_out_refund_case"] = {"id": "case1"}
     else: store.payouts = [{"id": "paid", "status": "paid", "finance_v2": True, "allocations": [{"order_id": "order_source"}]}]
     if marker == "historically_paid_allocation":
@@ -448,10 +505,13 @@ def test_failed_paid_out_callback_cannot_persist_partial_case_or_event(fixture):
     assert "paid_out_refund_case" not in store.orders[0] and not store.processed_webhook_events
 
 
-def test_later_provider_paid_out_metadata_cannot_fall_through_generic_refund(fixture):
+@pytest.mark.parametrize("kind", ["refund.updated", "charge.refunded"])
+@pytest.mark.parametrize("marker_value", ["case1", ""])
+def test_later_provider_paid_out_metadata_cannot_fall_through_generic_refund(fixture, kind, marker_value):
     client, store, _, _, responses, _ = fixture
-    notification = refund_evidence(fixture)
-    responses.objects[("refunds/re_fixture", None)]["metadata"]["paid_out_case_id"] = "case1"
+    notification = scoped_refund_evidence(fixture, kind)
+    path = "charges/ch_source" if kind == "charge.refunded" else "refunds/re_fixture"
+    responses.objects[(path, None)]["metadata"]["paid_out_case_id"] = marker_value
     assert deliver(client, notification, path=PLATFORM_PATH, secret=SECRET).status_code == 409
     assert "primary_refund_status" not in store.orders[0] and not store.processed_webhook_events
 

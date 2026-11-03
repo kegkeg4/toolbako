@@ -170,7 +170,12 @@ def test_monitoring_outage_does_not_break_the_safe_error_response(monkeypatch, c
     assert all(record.exc_info is None for record in caplog.records if record.name == "toolbako.requests")
 
 
-def test_deployment_commands_do_not_log_oauth_codes_or_private_search_queries():
+def test_deployment_commands_do_not_log_oauth_codes_or_private_search_queries(monkeypatch):
+    from app.live_runtime import prepare_runtime_launch
     root = Path(__file__).resolve().parents[1]
-    assert "--no-access-log" in json.loads((root / "railway.json").read_text())["deploy"]["startCommand"]
-    assert "--no-access-log" in (root / "Procfile").read_text()
+    assert json.loads((root / "railway.json").read_text())["deploy"]["startCommand"] == "python -m app.live_runtime web"
+    assert (root / "Procfile").read_text().strip() == "web: python -m app.live_runtime web"
+    calls = []
+    monkeypatch.setattr("os.execve", lambda exe, argv, env: calls.append(argv))
+    prepare_runtime_launch("web", {"PORT": "8000"}).execute()
+    assert len(calls) == 1 and "--no-access-log" in calls[0]

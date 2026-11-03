@@ -820,6 +820,10 @@ async def checkout_complete(request: Request, slug: str, options: list[str] = Fo
     if billing_type not in {"one_time","subscription"} or purchase_agreement != "yes": raise HTTPException(422)
     if billing_type == "subscription" and not settings.demo_mode:
         raise HTTPException(409, "現在は買い切りのみご利用いただけます。月額プランは今後の対応予定です")
+    # Gate before reservation and before every cached/recovered handoff. A
+    # connection/setup stage must not reopen a previously created Checkout.
+    if not settings.demo_mode and not settings.stripe_ready:
+        raise HTTPException(503, "決済受付の開始前です。開始までお待ちください")
     try: order, created = store.buy(user, slug, options, coupon, billing_type, payment_pending=not settings.demo_mode, return_created=True)
     except ValueError as exc:
         if str(exc) == "blocked": raise HTTPException(403, "この販売者の商品は購入できません") from exc
@@ -1454,7 +1458,22 @@ async def seller_payment_settings(request: Request):
     user = current_user(request)
     if not user: return RedirectResponse("/login?next=/seller/payments",303)
     account = store.connected_accounts.get(user["id"])
-    if account and settings.stripe_ready and not settings.demo_mode:
+    setup_mode = settings.stripe_connection_mode == "live_setup_only"
+    setup_ready = False
+    if setup_mode:
+        from .deployment_check import _live_configuration_verified
+        from .live_seller_onboarding import prepare_live_seller_onboarding
+        setup_ready = _live_configuration_verified(settings)
+        if setup_ready:
+            try:
+                plan = await prepare_live_seller_onboarding(database_store, store, stripe, settings, mfa, request, seller_id=user["id"])
+                if plan.account_id:
+                    account = {"account_id": plan.account_id, **dict(plan.account_status)}
+                if plan.action in {"outcome_unknown", "operator_review_required", "reconcile_intent_needed", "reconcile_mapping_needed"}:
+                    account = {**(account or {}), "sync_error": True}
+            except RuntimeError:
+                account = {**(account or {}), "sync_error": True}
+    elif account and settings.stripe_ready and not settings.demo_mode:
         try:
             remote = await stripe.retrieve_account(account["account_id"])
             from .connect_status import account_status
@@ -1464,6 +1483,7 @@ async def seller_payment_settings(request: Request):
             account["sync_error"] = True
     return templates.TemplateResponse(request,"seller_payments.html",context(
         request, account=account, stripe_ready=settings.stripe_ready,
+        seller_setup_ready=setup_ready, seller_setup_only=setup_mode,
         onboarding_refresh=request.query_params.get("refresh") == "1",
         onboarding_returned=request.query_params.get("returned") == "1",
     ))
@@ -1477,6 +1497,22 @@ async def seller_payment_onboard(request: Request):
         store.connected_accounts[user["id"]] = {"account_id":f"acct_demo_{user['id'][:8]}","charges_enabled":True,"payouts_enabled":True,"details_submitted":True}
         store.audit(user["id"],"connect.demo_enabled",user["id"],request.headers.get("x-request-id", ""))
         return RedirectResponse("/seller/payments?connected=1",303)
+    if settings.stripe_connection_mode == "live_setup_only":
+        from .live_seller_execution import execute_live_seller_account, execute_live_seller_account_link
+        try:
+            result = await execute_live_seller_account(database_store, store, stripe, settings, mfa, request, seller_id=user["id"])
+            if result.action not in {"account_mapped", "account_ready", "onboarding_link_needed"}:
+                raise HTTPException(503, "受取登録の処理結果を確認中です。重複登録を避けるため、運営が確認します")
+            result = await execute_live_seller_account_link(database_store, store, stripe, settings, mfa, request, seller_id=user["id"])
+            if result.action == "account_ready":
+                return RedirectResponse("/seller/payments?connected=1", 303, headers={"Cache-Control": "no-store"})
+            if result.action == "link_unavailable":
+                raise HTTPException(409, "登録リンクは発行済みです。開いたStripe画面で続けるか、リンクの期限後に再度お試しください")
+            if result.action != "link_created" or result.handoff is None:
+                raise HTTPException(503, "登録リンクの発行結果を確認できません。運営が確認します")
+            return payment_handoff(request, result.handoff.for_redirect(), onboarding=True)
+        except RuntimeError:
+            raise HTTPException(503, "決済受取設定を安全に開始できませんでした。運営が確認します") from None
     if not settings.stripe_ready: raise HTTPException(503,"Stripe Connectが未設定です")
     account = store.connected_accounts.get(user["id"])
     try:

@@ -106,6 +106,21 @@ class LiveStripeWebhookService(StripeWebhookService):
         except RuntimeError:
             raise HTTPException(503, "provider reconciliation unavailable") from None
 
+    def _ledger_metadata(self, metadata, *, required=False):
+        """ledger_id identifies the common dataset, not a paid-out refund case.
+
+        Keep pre-existing unscoped live notification evidence compatible, but
+        never ignore an explicit empty/foreign ledger or drop a scoped signed
+        snapshot's ledger when inspecting its current provider object.
+        """
+        present = isinstance(metadata, dict) and "ledger_id" in metadata
+        _require(not required or present, "financial ledger reconciliation required", 409)
+        if present:
+            scope = self.provider.financial_scope
+            _require(scope is not None and metadata["ledger_id"] == scope.ledger_id,
+                     "financial ledger reconciliation required", 409)
+        return present
+
     def _validate_payout(self, obj, state, event):
         payout = state["payout"]
         try:
@@ -126,6 +141,12 @@ class LiveStripeWebhookService(StripeWebhookService):
         charge = payment.get("latest_charge")
         _require(isinstance(charge, dict) and type(charge.get("disputed")) is bool
                  and charge.get("transfer_group") == f"order-{order['id']}")
+        require_ledger = state.get("require_ledger_metadata", False)
+        self._ledger_metadata(payment.get("metadata"), required=require_ledger)
+        self._ledger_metadata(charge.get("metadata"), required=require_ledger)
+        if require_ledger:
+            _require(_metadata_matches(charge.get("metadata"), order, extra),
+                     "payment source reconciliation required", 409)
         # The common source proof forbids disputed sources for financial writes.
         # A dispute notification must still prove that same source, while making
         # no write permission claim. Only this already-checked bool is relaxed.
@@ -162,10 +183,11 @@ class LiveStripeWebhookService(StripeWebhookService):
             return
         order, extra = state["order"], state["extra"]
         if kind in {"refund.updated", "charge.refunded"}:
+            state["require_ledger_metadata"] = self._ledger_metadata(state["metadata"])
             paid_allocation = any(p.get("finance_v2") and (p.get("status") == "paid" or p.get("paid_at"))
                 and any(a.get("order_id") == order["id"] for a in p.get("allocations", []))
                 for p in self.store.payouts)
-            special = ("paid_out_case_id" in state["metadata"] or "ledger_id" in state["metadata"]
+            special = ("paid_out_case_id" in state["metadata"]
                        or "paid_out_refund_case" in order or paid_allocation)
             if special:
                 _require(self.paid_out_refund_reconciler is not None,
@@ -205,8 +227,10 @@ class LiveStripeWebhookService(StripeWebhookService):
                  and current.get("currency") == "jpy")
         if kind in {"refund.updated", "charge.refunded"}:
             metadata = current.get("metadata") or {}
-            _require(isinstance(metadata, dict) and not {"paid_out_case_id", "ledger_id"} & set(metadata),
+            _require(isinstance(metadata, dict) and "paid_out_case_id" not in metadata,
                      "paid-out refund reconciliation required", 409)
+            state["require_ledger_metadata"] = self._ledger_metadata(
+                metadata, required=state["require_ledger_metadata"])
         proof = await self._source_payment(state, current.get("payment_intent"), dispute=kind == "charge.dispute.created")
         _require(current.get("id") == proof["charge"] if kind == "charge.refunded" else current.get("charge") == proof["charge"])
         if kind == "charge.refunded":
