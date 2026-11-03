@@ -176,21 +176,109 @@ def _auth_error_category(response: httpx.Response) -> str:
     return "unclassified"
 
 
-async def _diagnose_head_auth(client, url, headers, params):
+def _jwt_claim_category(message: str) -> str:
+    return {"JWT expired": "expired", "JWT not yet valid": "not_yet_valid",
+            "JWT issued at future": "issued_at_future", "JWT not in audience": "audience_mismatch",
+            "Parsing claims failed": "claims_parse_failed",
+            "The JWT 'exp' claim must be a number": "exp_type_invalid",
+            "The JWT 'nbf' claim must be a number": "nbf_type_invalid",
+            "The JWT 'iat' claim must be a number": "iat_type_invalid",
+            "The JWT 'aud' claim must be a string or an array of strings": "aud_type_invalid"}.get(message, "unclassified")
+
+
+def _response_evidence(response: httpx.Response) -> dict:
+    """Allowlisted edge metadata only; never dump headers or response content.
+
+    CF-Ray is a validated request-correlation identifier, not proof that two
+    requests reached the same connection, gateway worker or PostgREST instance.
+    Cache classifications describe the observed header, not its correctness.
+    """
+    cache = response.headers.get("cf-cache-status", "")
+    ray = response.headers.get("cf-ray", "")
+    age = response.headers.get("age", "")
+    version = response.extensions.get("http_version", b"")
+    proxy = re.fullmatch(r"PostgREST;\s*error=(PGRST30[0-3]|42501)", response.headers.get("proxy-status", ""))
+    challenge = re.search(r'(?:^|,\s*)error_description="([^"\r\n]*)"', response.headers.get("www-authenticate", ""))
+    request_id = response.headers.get("sb-request-id", "")
+    return {
+        "http_version": {b"HTTP/1.0": "HTTP/1.0", b"HTTP/1.1": "HTTP/1.1",
+                         b"HTTP/2": "HTTP/2", b"HTTP/3": "HTTP/3"}.get(version, "unknown")
+                        if isinstance(version, bytes) else "unknown",
+        "cache_status": cache if cache in {"HIT", "MISS", "DYNAMIC", "BYPASS", "EXPIRED",
+                                           "STALE", "REVALIDATED", "UPDATING"}
+                        else ("missing" if not cache else "unknown"),
+        "cf_ray": ray if re.fullmatch(r"[0-9a-fA-F]{16,32}-[A-Z]{3}", ray) else None,
+        "sb_request_id": request_id if re.fullmatch(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", request_id) else None,
+        "postgrest_error": proxy.group(1) if proxy else None,
+        "jwt_claim_category": _jwt_claim_category(challenge.group(1)) if challenge else "unclassified",
+        "age_seconds": int(age) if re.fullmatch(r"[0-9]{1,10}", age) and int(age) <= 2147483647 else None,
+        "set_cookie_present": "set-cookie" in response.headers,
+        "www_authenticate_present": "www-authenticate" in response.headers,
+        "gateway_metadata_present": any(name in response.headers for name in (
+            "sb-gateway-mode", "sb-gateway-version", "x-kong-proxy-latency", "x-kong-upstream-latency")),
+    }
+
+
+def _request_evidence(request: httpx.Request, expected_headers: dict) -> dict:
+    """Describe actual outgoing auth/browser shape without values or digests."""
+    key = request.headers.get("apikey", "")
+    user_agent = request.headers.get("user-agent", "")
+    expected = httpx.Headers(expected_headers)
+    try:
+        body_empty = request.content == b""
+    except httpx.RequestNotRead:
+        body_empty = False
+    return {
+        "api_key_kind": ("opaque_secret" if key.startswith("sb_secret_") else
+                         "opaque_publishable" if key.startswith("sb_publishable_") else
+                         "legacy_or_other" if key else "missing"),
+        "configured_auth_matches": all(request.headers.get_list(name) == expected.get_list(name)
+                                       for name in ("apikey", "authorization")),
+        "user_agent_kind": ("python_httpx" if re.fullmatch(r"python-httpx/[0-9]+\.[0-9]+\.[0-9]+", user_agent)
+                            else "browser_like" if "Mozilla/" in user_agent else "other" if user_agent else "missing"),
+        "origin_present": "origin" in request.headers,
+        "fetch_metadata_present": any(name.startswith("sec-fetch-") for name in request.headers),
+        "cookie_present": "cookie" in request.headers,
+        "body_empty": body_empty,
+    }
+
+
+def _request_comparison(head: httpx.Request, get: httpx.Request) -> dict:
+    # Compare entirely in memory. Never emit auth values, URLs, query strings,
+    # Cookie values or digests of those values, even if they differ.
+    try:
+        body_matches = head.content == get.content
+    except httpx.RequestNotRead:
+        body_matches = False
+    return {
+        "diagnostic_request_auth_matches_head": all(head.headers.get_list(name) == get.headers.get_list(name)
+                                                    for name in ("apikey", "authorization")),
+        "diagnostic_request_headers_match_head": sorted(head.headers.multi_items()) == sorted(get.headers.multi_items()),
+        "diagnostic_request_url_matches_head": head.url == get.url,
+        "diagnostic_request_body_matches_head": body_matches,
+    }
+
+
+async def _diagnose_head_auth(client, url, headers, params, *, head_response):
     """A single zero-row GET explains a failed HEAD; it never changes its verdict.
 
     Keep credentials on the same configured endpoint, forbid redirects, and
     discard all response content except a small fixed classification vocabulary.
     """
+    evidence = {"head_response": _response_evidence(head_response),
+                "head_request": _request_evidence(head_response.request, headers)}
     started = time.monotonic()
     try:
         response = await client.get(url, headers=headers, params=params)
-        return {"diagnostic_get_status": response.status_code,
+        return {**evidence, "diagnostic_get_status": response.status_code,
                 "diagnostic_auth_category": (_auth_error_category(response)
                                              if response.status_code in {401, 403} else "not_auth_error"),
+                "diagnostic_response": _response_evidence(response),
+                "diagnostic_request": _request_evidence(response.request, headers),
+                **_request_comparison(head_response.request, response.request),
                 "diagnostic_elapsed_ms": round((time.monotonic() - started) * 1000)}
     except httpx.HTTPError as error:
-        return {"diagnostic_failure": _http_failure_code(error),
+        return {**evidence, "diagnostic_failure": _http_failure_code(error),
                 "diagnostic_elapsed_ms": round((time.monotonic() - started) * 1000)}
 
 
@@ -357,8 +445,8 @@ async def connection_checks(settings: Settings) -> dict[str, bool]:
                 diagnostic = {}
                 if name in {"profile_api", "badge_api"} and method == "HEAD" and status in {401, 403}:
                     diagnostic = await _diagnose_head_auth(
-                        client, settings.supabase_url + path, headers, params)
-                # Fixed check names and scalar diagnostics only. Never log the
+                        client, settings.supabase_url + path, headers, params, head_response=response)
+                # Fixed categories, booleans and validated correlation IDs only. Never log the
                 # request, headers, response body, exception text or traceback.
                 logger.warning("connection_preflight_failure %s", json.dumps({
                     "check": name, "failure": failure, "status_code": status,

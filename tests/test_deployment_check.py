@@ -234,3 +234,130 @@ def test_public_monitor_head_matches_get_without_body(path):
     assert response.content == b"" and get.content
     assert response.headers["content-type"] == get.headers["content-type"]
     assert "no-store" in response.headers["cache-control"]
+
+
+@pytest.mark.parametrize("cookie", [False, True])
+def test_head_auth_evidence_preserves_failure_and_detects_cookie_change(monkeypatch, caplog, cookie):
+    async def probe(backend):
+        return True
+    monkeypatch.setattr(checks.PostgresStateStore, "probe", probe)
+    seen = []
+    def transport(request):
+        seen.append(request)
+        if request.url.path.endswith("creator_badges"):
+            if request.method == "HEAD":
+                return httpx.Response(401, headers={
+                    "cf-ray": "0123456789abcdef-NRT", "cf-cache-status": "DYNAMIC",
+                    **({"set-cookie": "private_cookie=PRIVATE_COOKIE; Path=/"} if cookie else {}),
+                }, extensions={"http_version": b"HTTP/1.1"})
+            return httpx.Response(200, json=[], headers={
+                "cf-ray": "fedcba9876543210-KIX", "cf-cache-status": "MISS", "age": "0",
+            }, extensions={"http_version": b"HTTP/1.1"})
+        return httpx.Response(401 if request.headers["apikey"] == "anon-fixture" and request.method == "HEAD" else 200)
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: real_client(transport=httpx.MockTransport(transport), **kwargs))
+    with caplog.at_level("WARNING", logger=checks.__name__):
+        results = asyncio.run(checks.connection_checks(configured()))
+    assert results["badge_api"] is False and len(seen) == 5
+    entry = json.loads(next(r.getMessage() for r in caplog.records if r.name == checks.__name__).split(" ", 1)[1])
+    assert entry["head_response"]["cf_ray"] == "0123456789abcdef-NRT"
+    assert entry["head_response"]["http_version"] == "HTTP/1.1"
+    assert entry["head_response"]["cache_status"] == "DYNAMIC"
+    assert entry["head_request"]["user_agent_kind"] == "python_httpx"
+    assert entry["head_request"]["configured_auth_matches"] is True
+    assert entry["diagnostic_request"]["cookie_present"] is cookie
+    assert entry["diagnostic_request_headers_match_head"] is (not cookie)
+    assert entry["diagnostic_request_auth_matches_head"] is True
+    assert entry["diagnostic_request_url_matches_head"] is True
+    assert entry["diagnostic_request_body_matches_head"] is True
+    assert entry["diagnostic_response"]["age_seconds"] == 0
+    for secret in ("PRIVATE_COOKIE", "service-fixture", "anon-fixture", "project.supabase.co"):
+        assert secret not in caplog.text
+
+
+@pytest.mark.parametrize("headers,version", [
+    ({"cf-ray": "PRIVATE_RESPONSE", "cf-cache-status": "PRIVATE_RESPONSE", "age": "PRIVATE_RESPONSE"}, b"PRIVATE_VERSION"),
+    ({"cf-ray": "0123456789abcdef-NRT\nPRIVATE_RESPONSE", "age": "-1"}, b"HTTP/2"),
+    ({"cf-ray": "0123456789abcdef-NRT", "age": "999999999999999999999999"}, b"HTTP/3"),
+])
+def test_response_evidence_never_exports_unrecognized_headers(headers, version):
+    result = checks._response_evidence(httpx.Response(401, headers=headers, extensions={"http_version": version}))
+    encoded = json.dumps(result)
+    assert "PRIVATE" not in encoded
+    assert result["cache_status"] in {"missing", "unknown"}
+    assert result["age_seconds"] is None
+    assert result["cf_ray"] in {None, "0123456789abcdef-NRT"}
+
+
+def test_parallel_preflight_keeps_opaque_admin_and_anon_auth_separate(monkeypatch, caplog):
+    async def probe(backend):
+        return True
+    monkeypatch.setattr(checks.PostgresStateStore, "probe", probe)
+    seen = []
+    async def transport(request):
+        await asyncio.sleep(0)
+        seen.append(request)
+        assert "authorization" not in request.headers and request.content == b""
+        if request.url.path.endswith("creator_badges") and request.method == "HEAD":
+            return httpx.Response(401)
+        if request.method == "HEAD" and request.headers["apikey"] == "sb_publishable_SYNTHETIC":
+            return httpx.Response(401)
+        return httpx.Response(200, json=[])
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: real_client(transport=httpx.MockTransport(transport), **kwargs))
+    with caplog.at_level("WARNING", logger=checks.__name__):
+        result = asyncio.run(checks.connection_checks(configured(
+            supabase_anon_key="sb_publishable_SYNTHETIC", supabase_service_role_key="sb_secret_SYNTHETIC")))
+    assert result["badge_api"] is False and len(seen) == 5
+    for request in seen:
+        if request.url.path.endswith("creator_badges"):
+            assert request.headers["apikey"] == "sb_secret_SYNTHETIC"
+        elif request.url.path.endswith("settings"):
+            assert request.headers["apikey"] == "sb_publishable_SYNTHETIC"
+    entry = json.loads(caplog.records[-1].getMessage().split(" ", 1)[1])
+    assert entry["head_request"]["api_key_kind"] == "opaque_secret"
+    assert entry["head_request"]["configured_auth_matches"] is True
+    assert entry["diagnostic_request_headers_match_head"] is True
+    assert "SYNTHETIC" not in caplog.text
+
+
+def test_request_evidence_classifies_browser_ua_without_echoing_it():
+    expected = {"apikey": "sb_secret_PRIVATE_KEY"}
+    request = httpx.Request("HEAD", "https://private.example/rest/v1/profiles?limit=0", headers={
+        **expected, "user-agent": "Mozilla/5.0 PRIVATE_UA", "origin": "PRIVATE_ORIGIN",
+        "sec-fetch-mode": "cors", "cookie": "PRIVATE_COOKIE",
+    })
+    result = checks._request_evidence(request, expected)
+    assert result == {"api_key_kind": "opaque_secret", "configured_auth_matches": True,
+                      "user_agent_kind": "browser_like", "origin_present": True,
+                      "fetch_metadata_present": True, "cookie_present": True, "body_empty": True}
+    assert "PRIVATE" not in json.dumps(result)
+    assert checks._request_evidence(request, {"apikey": "different"})["configured_auth_matches"] is False
+
+
+@pytest.mark.parametrize("message,expected", [
+    ("JWT expired", "expired"), ("JWT not yet valid", "not_yet_valid"),
+    ("JWT issued at future", "issued_at_future"), ("JWT not in audience", "audience_mismatch"),
+    ("PRIVATE_ERROR sb_secret_PRIVATE_KEY", "unclassified"),
+])
+def test_head_auth_claim_reason_is_fixed_without_exposing_challenge(message, expected):
+    response = httpx.Response(401, headers={
+        "proxy-status": "PostgREST; error=PGRST303",
+        "www-authenticate": f'Bearer error="invalid_token", error_description="{message}"',
+        "sb-request-id": "01a1a0ed-d180-70c7-ab79-122a39c93847",
+    })
+    result = checks._response_evidence(response)
+    assert result["postgrest_error"] == "PGRST303"
+    assert result["jwt_claim_category"] == expected
+    assert result["sb_request_id"] == "01a1a0ed-d180-70c7-ab79-122a39c93847"
+    assert "PRIVATE" not in json.dumps(result)
+
+
+def test_response_evidence_rejects_injected_proxy_and_request_id():
+    result = checks._response_evidence(httpx.Response(401, headers={
+        "proxy-status": "PostgREST; error=PGRST303; PRIVATE_RESPONSE",
+        "sb-request-id": "sk_live_PRIVATE_KEY", "www-authenticate": "PRIVATE_RESPONSE",
+    }))
+    assert result["postgrest_error"] is None and result["sb_request_id"] is None
+    assert result["jwt_claim_category"] == "unclassified"
+    assert "PRIVATE" not in json.dumps(result)
