@@ -119,3 +119,98 @@ def test_repository_deploy_commands_both_use_reviewed_wrapper():
     assert config['deploy']['startCommand'] == 'python -m app.live_runtime web'
     assert config['deploy']['preDeployCommand'] == ['python -m app.live_runtime preflight']
     assert (project/'Procfile').read_text(encoding='utf-8').strip() == 'web: python -m app.live_runtime web'
+
+
+@pytest.mark.parametrize("changes,reason", [
+    ({"LIVE_RUNTIME_CONFIG": "private-invalid-selection"}, "runtime_selection_invalid"),
+    ({"STRIPE_LIVE_REFUNDS_ENABLED": "private-not-bool"}, "operation_flags_invalid"),
+    ({"STRIPE_LIVE_SELLER_SETUP_ENABLED": "false"}, "connection_stage_invalid"),
+    ({"STRIPE_LIVE_REFUNDS_ENABLED": "true"}, "connection_stage_invalid"),
+    ({"APP_ENV": "private-development"}, "deployment_environment_invalid"),
+    ({"STRIPE_API_VERSION": "private-version"}, "stripe_source_configuration_invalid"),
+    ({"SUPABASE_URL": "https://private-source.invalid"}, "auth_storage_configuration_invalid"),
+    ({"STRIPE_LEDGER_ID": "private-ledger"}, "ledger_invalid"),
+    ({"PGOPTIONS": "private-options"}, "inherited_database_options"),
+    ({"TOOLBAKO_LIVE_MIGRATION_PASSWORD": ""}, "database_secret_missing"),
+    ({"TOOLBAKO_LIVE_MIGRATION_PASSWORD": "private-password\x00suffix"}, "database_secret_invalid"),
+    ({"STRIPE_LIVE_PENDING_SECRET_KEY": ""}, "stripe_key_missing"),
+    ({"STRIPE_LIVE_PENDING_SECRET_KEY": "private-key"}, "stripe_key_invalid"),
+    ({"STRIPE_LIVE_PENDING_WEBHOOK_SECRET": "private-platform"}, "webhook_platform_secret_invalid"),
+    ({"STRIPE_LIVE_PENDING_CONNECT_WEBHOOK_SECRET": "private-connect"}, "webhook_connect_secret_invalid"),
+    ({"STRIPE_LIVE_PENDING_WEBHOOK_SECRET": ""}, "webhook_secret_pair_missing"),
+    ({"STRIPE_LIVE_PENDING_CONNECT_WEBHOOK_SECRET": ""}, "webhook_secret_pair_missing"),
+    ({"STRIPE_LIVE_PENDING_CONNECT_WEBHOOK_SECRET": "whsec_platform"}, "webhook_secrets_not_distinct"),
+    ({"STRIPE_WEBHOOK_API_VERSION": "private-hook-version"}, "webhook_version_unsupported"),
+    ({"PORT": "private-port"}, "web_port_invalid"),
+])
+def test_fixed_failure_categories_preserve_generic_error_and_never_print_inputs(changes, reason, monkeypatch, capsys):
+    from app import live_runtime
+    env = fixture_env(STRIPE_CONNECTION_MODE="live_setup_only", STRIPE_LIVE_SELLER_SETUP_ENABLED="true",
+        STRIPE_LIVE_PENDING_WEBHOOK_SECRET="whsec_platform", STRIPE_LIVE_PENDING_CONNECT_WEBHOOK_SECRET="whsec_connect",
+        STRIPE_WEBHOOK_API_VERSION="2026-06-24.dahlia")
+    env.update(changes)
+    monkeypatch.setattr(live_runtime.os, "environ", env)
+    monkeypatch.setattr(sys, "argv", ["app.live_runtime", "web"])
+    monkeypatch.setattr(live_runtime.os, "execve", lambda *args: pytest.fail("Invalid configuration must not launch"))
+    with pytest.raises(RuntimeLaunchError) as error:
+        prepare_runtime_launch("web", env)
+    assert str(error.value) == "runtime_launch_configuration_unverified"
+    assert error.value.reason == reason
+    with pytest.raises(SystemExit) as exit_error:
+        live_runtime.main()
+    assert exit_error.value.code == 1
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert output.err == "runtime_launch_configuration_unverified\nruntime_launch_reason=" + reason + "\n"
+    assert "private-" not in output.err and "whsec_" not in output.err and "rk_live_" not in output.err
+    assert not any(name in output.err for name in env)
+
+
+def test_ca_or_database_builder_failure_is_fixed_and_does_not_echo_original_exception(monkeypatch, capsys):
+    from app import live_runtime
+    def fail(*args, **kwargs):
+        raise ValueError("private-CA-path and private-password")
+    monkeypatch.setattr(live_runtime, "build_live_database_config", fail)
+    monkeypatch.setattr(live_runtime.os, "environ", fixture_env())
+    monkeypatch.setattr(sys, "argv", ["app.live_runtime", "preflight"])
+    with pytest.raises(SystemExit) as error:
+        live_runtime.main()
+    assert error.value.code == 1
+    assert capsys.readouterr().err == (
+        "runtime_launch_configuration_unverified\nruntime_launch_reason=database_ca_or_config_invalid\n")
+
+
+@pytest.mark.parametrize("reason", ["private-secret-reason", {"private": "value"}, None])
+def test_arbitrary_reason_is_not_an_output_channel(reason):
+    error = RuntimeLaunchError(reason)
+    assert str(error) == "runtime_launch_configuration_unverified"
+    assert error.reason == "configuration_unverified"
+
+
+def test_unexpected_exec_failure_never_prints_original_exception(monkeypatch, capsys):
+    from app import live_runtime
+    def fail(*args, **kwargs):
+        raise OSError("private-executable-path private-password")
+    monkeypatch.setattr(live_runtime.os, "execve", fail)
+    monkeypatch.setattr(live_runtime.os, "environ", fixture_env())
+    monkeypatch.setattr(sys, "argv", ["app.live_runtime", "preflight"])
+    with pytest.raises(SystemExit) as error:
+        live_runtime.main()
+    assert error.value.code == 1
+    assert capsys.readouterr().err == (
+        "runtime_launch_configuration_unverified\nruntime_launch_reason=unexpected_launch_failure\n")
+
+
+def test_setup_dahlia_receivers_preserve_clover_api_and_financial_stop(monkeypatch, capsys):
+    env = fixture_env(STRIPE_CONNECTION_MODE="live_setup_only", STRIPE_LIVE_SELLER_SETUP_ENABLED="true",
+        STRIPE_LIVE_PENDING_WEBHOOK_SECRET="whsec_platform", STRIPE_LIVE_PENDING_CONNECT_WEBHOOK_SECRET="whsec_connect",
+        STRIPE_API_VERSION="2026-02-25.clover", STRIPE_WEBHOOK_API_VERSION="2026-06-24.dahlia",
+        STRIPE_LIVE_REFUNDS_ENABLED="false", STRIPE_LIVE_PAYOUTS_ENABLED="false")
+    calls = []
+    monkeypatch.setattr("os.execve", lambda exe, argv, child: calls.append(child))
+    prepare_runtime_launch("preflight", env).execute()
+    child = calls[0]
+    assert child["STRIPE_API_VERSION"] == "2026-02-25.clover"
+    assert child["STRIPE_WEBHOOK_API_VERSION"] == "2026-06-24.dahlia"
+    assert child["STRIPE_LIVE_REFUNDS_ENABLED"] == child["STRIPE_LIVE_PAYOUTS_ENABLED"] == "false"
+    assert capsys.readouterr().out == ""
