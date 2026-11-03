@@ -60,7 +60,7 @@ from .payout_worker import sandbox_payouts_ready
 from .reconciliation import propose_recovery, approve_recovery
 from .payout_recovery import propose_failed_payout, approve_failed_payout
 from .payment_reconciliation import KINDS as PAYMENT_RECOVERY_KINDS, payment_recovery_inventory, propose_payment_recovery, approve_payment_recovery
-from .refund_resumption import refund_resumption_inventory, propose_refund_resumption, approve_refund_resumption
+from .refund_resumption import refund_resumption_inventory, propose_refund_resumption, approve_refund_resumption, inspect_refund_resumption_live
 from .deployment_check import deployment_database_check
 from .supabase_api import supabase_headers
 from .object_storage import SupabaseObjectStorage, ObjectStorageError, storage_ready, delivery_upload_available
@@ -2743,8 +2743,32 @@ async def admin(request: Request, section: str = "overview"):
         values.update(finance=store.finance_snapshot(ledger=bool(database_store)), finance_controls_ready=settings.demo_mode or sandbox_payouts_ready(settings), payout_labels=PAYOUT_LABELS,
             payment_recoveries=await payment_recovery_inventory(database_store, store) if database_store else {"items": [], "truncated": False},
             paid_out_refunds=paid_out_refund_inventory(store, settings, database_store),
-            refund_resumptions=refund_resumption_inventory(store), payment_recovery_ready=bool(database_store and sandbox_payouts_ready(settings) and len(set(settings.admin_user_ids)) >= 2))
+            refund_resumptions=refund_resumption_inventory(store), payment_recovery_ready=bool(database_store and sandbox_payouts_ready(settings) and len(set(settings.admin_user_ids)) >= 2),
+            refund_live_inspection_available=bool(database_store and not settings.demo_mode
+                and settings.stripe_charge_mode == "separate" and stripe.financial_scope
+                and stripe.financial_scope.mode == "live" and len(set(settings.admin_user_ids)) >= 2))
     return templates.TemplateResponse(request, "admin.html", context(request, **values))
+
+
+@app.post("/admin/orders/{order_id}/refund-inspection", response_class=HTMLResponse)
+async def admin_inspect_live_refund(request: Request, order_id: str):
+    headers = {"Cache-Control": "no-store, private", "Referrer-Policy": "no-referrer"}
+    if not is_admin(current_user(request)):
+        raise HTTPException(403, "管理者のみアクセスできます", headers=headers)
+    if not mfa.recent(request):
+        return RedirectResponse("/security/mfa?next=%2Fadmin%3Fsection%3Dfinance", 303, headers=headers)
+    if not database_store:
+        raise HTTPException(409, "本番返金の取引台帳を確認できません", headers=headers)
+    try:
+        # Read-only evidence for this response, never a stored/consumable approval.
+        # Include account/scope GETs in the deadline, not only individual parts.
+        async with asyncio.timeout(35):
+            inspection = await inspect_refund_resumption_live(
+                database_store, store, stripe, settings, mfa, request, order_id=order_id)
+    except (FinanceConflict, RuntimeError, TimeoutError):
+        raise HTTPException(409, "本番返金の元決済・返金明細を照合できません。返金は実行していません。運営で確認してください", headers=headers) from None
+    return templates.TemplateResponse(request, "admin_refund_inspection.html",
+        context(request, admin_sections=ADMIN_SECTIONS, admin_section="finance", inspection=inspection), headers=headers)
 
 
 @app.post("/admin/orders/{order_id}/refund-resumption/{action}")

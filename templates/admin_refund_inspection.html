@@ -1,0 +1,16 @@
+{% extends "admin_base.html" %}
+{% block title %}本番返金の承認前検査 — ツールバコ運営管理{% endblock %}
+{% block admin_content %}
+<header class="admin-page-title"><span class="section-kicker">OPERATIONS CONSOLE</span><h1>本番返金の承認前検査</h1><p>元決済と返金明細の読取照合が完了しました。</p></header>
+<section class="finance-flow-note" aria-label="返金の読取検査結果">
+  <p role="status"><strong>返金は実行していません。承認も記録していません。</strong></p>
+  <dl>
+    <dt>注文番号</dt><dd>{{ inspection.order_id }}</dd>
+    <dt>照合時刻（UTC）</dt><dd>{{ inspection.observed_at.strftime('%Y-%m-%d %H:%M:%S') }}</dd>
+    <dt>既存の全額返金を確認できた明細</dt><dd>{{ inspection.verified_refund_count }}件</dd>
+    <dt>まだ返金を要求していない明細</dt><dd>{{ inspection.remaining_count }}件 · 合計 ¥{{ '{:,}'.format(inspection.remaining_amount) }}</dd>
+  </dl>
+  <p>この表示は照合時点の結果です。返金を承認・実行する場合は、その時点での再照合と別々の管理者2名による承認が必要です。本番の返金実行は引き続き停止しています。</p>
+  <p><a href="/admin?section=finance#refund-resumption">売上・振込の管理画面に戻る</a></p>
+</section>
+{% endblock %}

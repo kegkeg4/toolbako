@@ -156,13 +156,17 @@
   </details>
   <details id="refund-resumption" class="finance-details">
     {% set resumptions = refund_resumptions|default({'items': [], 'truncated': false}) %}
-    <summary>全額返金の開始・再開を確認する（テスト環境）</summary>
-    <p>キャンセル合意だけでは返金しません。元の決済・金額・全明細を照合し、別々の管理者2名・直近の2段階認証・30分以内の承認を経て、未要求の明細を1件ずつ返金します。途中から再開するときは既存返金の全額成功も確認します。結果不明の返金は再送しません。</p>
-    {% if not payment_recovery_ready %}<p class="control-unavailable">テスト用Stripe・永続DB・別々の管理者2名を接続した後に操作できます。本番では使えません。</p>{% endif %}
+    <summary>全額返金の開始・再開を確認する{% if not refund_live_inspection_available %}（テスト環境）{% endif %}</summary>
+    {% if refund_live_inspection_available %}<p>本番では承認前の読取検査のみ行えます。元決済と既存の返金明細をStripeから取得して照合します。検査結果は承認として保存されず、返金も実行しません。</p>{% endif %}
+    <p>キャンセル合意だけでは返金しません。テスト環境の承認・実行では、元の決済・金額・全明細を照合し、別々の管理者2名・直近の2段階認証・30分以内の承認を経て、未要求の明細を1件ずつ返金します。途中から再開するときは既存返金の全額成功も確認します。結果不明の返金は再送しません。</p>
+    {% if not payment_recovery_ready %}<p class="control-unavailable">返金の承認・実行はテスト用Stripe・永続DB・別々の管理者2名を接続した後に操作できます。本番では使えません。</p>{% endif %}
     {% if resumptions.truncated %}<p role="alert">100件まで表示しています。残りも保留中です。</p>{% endif %}
     {% for recovery in resumptions['items'] %}
     <article class="finance-flow-note">
       <b>{{ recovery.tool_name }} · {{ recovery.order_id[:8] }}</b>
+      {% if refund_live_inspection_available %}
+      <form method="post" action="/admin/orders/{{ recovery.order_id }}/refund-inspection"><button>本番返金の承認前検査（読取のみ）</button></form>
+      {% endif %}
       {% set proposal = recovery.proposal or {} %}
       {% if proposal.status == 'proposed' %}
       <small>未要求 {{ proposal.remaining_count }}件 · 次の返金 ¥{{ '{:,}'.format(proposal.next_amount) }}{% if not proposal.next_operation %}（既存返金の状態復元のみ）{% endif %} · 確認者 {{ proposal.proposed_by }}</small>
