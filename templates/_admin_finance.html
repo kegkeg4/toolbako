@@ -34,7 +34,25 @@
       <span>¥{{ '{:,}'.format(seller.held) }}</span>
       <span class="finance-state state-{{ seller.connect_status }}">{{ {'ready':'有効','reviewing':'審査中','not_connected':'未接続'}[seller.connect_status] }}</span>
       <span>
-        {% if finance_controls_ready %}
+        {% if live_recovery_ready %}
+          {% if seller.payouts_paused %}
+            <small class="hold-label">運営保留中</small>
+            {% if live_payout_execution_ready %}
+              {% set release = (live_payout_release_reviews|default({})).get(seller.seller_id, {}) %}
+              {% if release.status == 'proposed' %}
+                {% if release.proposed_by != user.id %}
+                <form action="/admin/sellers/{{ seller.seller_id }}/payouts/release-approve" method="post">
+                  <input type="hidden" name="proposal_id" value="{{ release.id }}">
+                  <button data-confirm="口座と売上を再照合し、運営保留だけを解除します。送金は実行しません。">別の管理者として保留解除を承認</button>
+                </form>
+                {% else %}<small>別の管理者による承認を待っています（30分以内）。</small>{% endif %}
+              {% endif %}
+              <form action="/admin/sellers/{{ seller.seller_id }}/payouts/release" method="post"><button>保留解除の確認を記録</button></form>
+            {% else %}<small>本番振込の有効化後、別々の管理者2名で解除できます。</small>{% endif %}
+          {% else %}
+          <form action="/admin/sellers/{{ seller.seller_id }}/payouts/hold" method="post"><button data-confirm="新しい振込申請・分配・振込を保留します。既に銀行へ送信済みの振込は取り消されません。">振込を保留</button></form>
+          {% endif %}
+        {% elif finance_controls_ready %}
           <form action="/admin/sellers/{{ seller.seller_id }}/payouts/{{ 'release' if seller.payouts_paused else 'hold' }}" method="post">
             <button data-confirm="販売者への振込を{{ '再開' if seller.payouts_paused else '保留' }}します。よろしいですか？">{{ '振込を再開' if seller.payouts_paused else '振込を保留' }}</button>
           </form>
@@ -68,7 +86,7 @@
     <summary>振込履歴を表示</summary>
     <div class="finance-table payout-finance-table">
       <div class="finance-row finance-head"><span>振込ID</span><span>販売者</span><span>金額</span><span>状態</span><span>受付日時</span></div>
-      {% for payout in finance.payouts %}<div class="finance-row"><span>{{ payout.id[:8] }}</span><span>{{ payout.seller_id }}</span><span>¥{{ '{:,}'.format(payout.net_amount|default(payout.amount)) }}<small>申請額 ¥{{ '{:,}'.format(payout.amount) }}／手数料 ¥{{ '{:,}'.format(payout.fee|default(0)) }}</small></span><span>{{ payout_labels.get(payout.status, '運営確認中') }}{% if payout.hold_reason %}<small>{{ payout.hold_reason }}</small>{% endif %}{% if finance_controls_ready and payout.finance_v2 and not payout.provider_payout_id and payout.status in ['requested','transferring','awaiting_funds','held','review'] %}<form method="post" action="/admin/payouts/{{ payout.id }}/cancel"><button data-confirm="テスト環境の申請です。銀行振込を開始していない分配を取り消し、Stripeで資金の戻しを確認してから予約を解除します。">申請・分配の取消（テスト）</button></form>{% endif %}</span><span>{{ payout.created_at.strftime('%Y/%m/%d %H:%M') }}</span></div>{% else %}<p>振込履歴はありません。</p>{% endfor %}
+      {% for payout in finance.payouts %}<div class="finance-row"><span>{{ payout.id[:8] }}</span><span>{{ payout.seller_id }}</span><span>¥{{ '{:,}'.format(payout.net_amount|default(payout.amount)) }}<small>申請額 ¥{{ '{:,}'.format(payout.amount) }}／手数料 ¥{{ '{:,}'.format(payout.fee|default(0)) }}</small></span><span>{{ payout_labels.get(payout.status, '運営確認中') }}{% if payout.hold_reason %}<small>{{ payout.hold_reason }}</small>{% endif %}{% if live_recovery_ready and payout.finance_v2 and not payout.provider_payout_id and payout.status in ['requested','held'] %}<form method="post" action="/admin/payouts/{{ payout.id }}/cancel"><button data-confirm="分配の要求がまだないことを照合し、この振込申請だけを取り消します。送金は実行しません。">分配開始前の申請を取り消す</button></form>{% elif finance_controls_ready and payout.finance_v2 and not payout.provider_payout_id and payout.status in ['requested','transferring','awaiting_funds','held','review'] %}<form method="post" action="/admin/payouts/{{ payout.id }}/cancel"><button data-confirm="テスト環境の申請です。銀行振込を開始していない分配を取り消し、Stripeで資金の戻しを確認してから予約を解除します。">申請・分配の取消（テスト）</button></form>{% endif %}</span><span>{{ payout.created_at.strftime('%Y/%m/%d %H:%M') }}</span></div>{% else %}<p>振込履歴はありません。</p>{% endfor %}
     </div>
   </details>
 
@@ -99,25 +117,26 @@
   {% endif %}
 
   <details id="failed-payout-recovery" class="finance-details">
-    <summary>失敗した銀行振込の資金を回収する（テスト環境）</summary>
+    <summary>失敗した銀行振込の資金を回収する{% if not live_recovery_ready %}（テスト環境）{% endif %}</summary>
     <p>銀行振込の失敗とStripe残高への全額返却を照合します。別々の管理者2名が2段階認証後に30分以内に確認し、1回の承認で分配を1件回収します。全額回収を再確認するまで残高の予約を維持します。取消後は販売者が振込先を確認して再申請してください。着金履歴のある振込は個別の会計確認が必要です。</p>
-    {% if not payment_recovery_ready %}<p class="control-unavailable">操作にはテスト用Stripe・永続DB・別々の管理者2名が必要です。</p>{% endif %}
+    {% if not (payment_recovery_ready or live_recovery_ready) %}<p class="control-unavailable">操作には対象のStripe口座・永続DB・別々の管理者2名が必要です。</p>{% endif %}
+    {% if live_recovery_ready %}<p>元の銀行振込への返却が確定した分配だけを回収します。販売者への自動引落し・債権回収・銀行への再振込はしません。回収結果が不明な場合は照合だけを行います。</p>{% endif %}
     {% for payout in finance.payouts if payout.finance_v2 and payout.status == 'bank_failed' %}
     <article class="finance-flow-note">
       <b>申請 {{ payout.id[:8] }} · ¥{{ '{:,}'.format(payout.net_amount) }}</b>
       <small>{{ payout.hold_reason|default('振込先と資金の戻りを確認してください') }}</small>
       {% set recovery = payout.failed_payout_recovery|default({}) %}
       {% if payout.paid_at %}<p>着金履歴があります。個別の会計確認が必要です。</p>
-      {% elif payment_recovery_ready %}
+      {% elif payment_recovery_ready or live_recovery_ready %}
       {% if recovery.status == 'proposed' %}
       {% set action_labels = {'reverse':'分配を1件回収','reconcile':'回収結果を1件照合','release':'資金回収を確認して申請取消'} %}
-      <small>次の操作: {{ action_labels.get(recovery.action, '要確認') }} · 確認者: {{ recovery.proposed_by }}</small>
-      {% if recovery.proposed_by != user.id %}
+      <small>次の操作: {{ action_labels.get(recovery.action, '要確認') }}{% if live_recovery_ready and recovery.amount is defined %} · ¥{{ '{:,}'.format(recovery.amount) }}{% endif %} · 確認者: {{ recovery.proposed_by }}</small>
+      {% if recovery.proposed_by != user.id and (not live_recovery_ready or recovery.action != 'reverse' or live_payout_execution_ready) %}
       <form method="post" action="/admin/payouts/{{ payout.id }}/recover-failure/approve">
         <input type="hidden" name="proposal_id" value="{{ recovery.id }}">
-        <button data-confirm="Stripeの記録を再照合し、表示された回収・照合・申請取消を実行します。銀行への再振込は行いません。">別の管理者として承認：{{ action_labels.get(recovery.action, '確認') }}</button>
+        <button data-confirm="Stripeの記録を再照合し、{% if live_recovery_ready and recovery.action == 'reverse' %}本番の分配回収{{ recovery.amount }}円を1件{% else %}表示された回収・照合・申請取消を{% endif %}実行します。銀行への再振込は行いません。">別の管理者として承認：{{ action_labels.get(recovery.action, '確認') }}</button>
       </form>
-      {% else %}<small>別の管理者による承認を待っています。</small>{% endif %}
+      {% elif recovery.proposed_by == user.id %}<small>別の管理者による承認を待っています。</small>{% else %}<small>本番の分配回収は停止中です。</small>{% endif %}
       {% endif %}
       <form method="post" action="/admin/payouts/{{ payout.id }}/recover-failure/propose"><button>失敗・資金返却・分配を読み取り照合</button></form>
       {% endif %}

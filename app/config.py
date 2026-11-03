@@ -51,6 +51,7 @@ class Settings:
     # Separate, explicit setup-only permission. This never enables payment,
     # refund, transfer or payout APIs and cannot extend live_read_only.
     stripe_live_seller_setup_enabled: bool = os.getenv("STRIPE_LIVE_SELLER_SETUP_ENABLED", "false") == "true"
+    stripe_live_checkout_enabled: bool = _strict_operation_flag("STRIPE_LIVE_CHECKOUT_ENABLED")
     # Independent financial capabilities. Neither changes Checkout readiness
     # or the generic Stripe POST denial; domain executors still verify proofs.
     stripe_live_refunds_enabled: bool = _strict_operation_flag("STRIPE_LIVE_REFUNDS_ENABLED")
@@ -100,6 +101,7 @@ class Settings:
     # Dedicated Postgres database or Supabase *session* pooler, never port 6543.
     # Runtime storage is private and separate from the public PostgREST schema.
     database_url: str = os.getenv("DATABASE_URL", "").strip()
+    live_database_role: str = os.getenv("LIVE_DATABASE_ROLE", "migration_admin")
     private_storage_path: str = os.getenv("PRIVATE_STORAGE_PATH", "private_uploads")
     storage_provider: str = os.getenv("STORAGE_PROVIDER", "local").strip().lower()
     supabase_private_bucket: str = os.getenv("SUPABASE_PRIVATE_BUCKET", "").strip()
@@ -112,7 +114,7 @@ class Settings:
 
     def __post_init__(self) -> None:
         if any(type(value) is not bool for value in (
-                self.stripe_live_refunds_enabled, self.stripe_live_payouts_enabled)):
+                self.stripe_live_checkout_enabled, self.stripe_live_refunds_enabled, self.stripe_live_payouts_enabled)):
             raise ValueError("Invalid financial operation boolean configuration")
         configured_providers = self.oauth_providers if isinstance(self.oauth_providers, tuple) else ()
         object.__setattr__(self, "oauth_providers", tuple(

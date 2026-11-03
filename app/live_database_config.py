@@ -22,6 +22,8 @@ from psycopg.conninfo import conninfo_to_dict, make_conninfo
 TARGET_PROJECT = "xijdnqnsuhuciqyygnkg"
 TARGET_HOST = "aws-0-ap-northeast-1.pooler.supabase.com"
 TARGET_USER = "postgres." + TARGET_PROJECT
+RUNTIME_ROLE = "toolbako_web_live_v1"
+RUNTIME_USER = RUNTIME_ROLE + "." + TARGET_PROJECT
 CA_FILENAME = "supabase-prod-ca-2021.crt"
 CA_SHA256 = "700723581420dd1ac98fd7e9ac529f0ef210eadcaf87fc868a3ad7d114c2f3b7"
 
@@ -95,7 +97,7 @@ class LiveDatabaseConfig:
 _BUILD_TOKEN = object()
 
 
-def build_live_database_config(password, *, environment=None):
+def _build_database_config(password, *, environment, user):
     """Generate exact session-pooler conninfo; no connection or writes.
 
     Local public-CA and environment validation are the only reads. A clean
@@ -107,7 +109,7 @@ def build_live_database_config(password, *, environment=None):
     _require(type(password) is str and bool(password) and "\x00" not in password)
     ca_path = _verified_ca_path()
     expected = {
-        "host": TARGET_HOST, "port": "5432", "dbname": "postgres", "user": TARGET_USER,
+        "host": TARGET_HOST, "port": "5432", "dbname": "postgres", "user": user,
         "password": password, "sslmode": "verify-full", "sslrootcert": ca_path,
     }
     try:
@@ -118,3 +120,13 @@ def build_live_database_config(password, *, environment=None):
         raise
     except Exception:
         raise LiveDatabaseConfigError() from None
+
+
+def build_live_database_config(password, *, environment=None):
+    """Temporary migration-admin path, retained only for explicit transition."""
+    return _build_database_config(password, environment=environment, user=TARGET_USER)
+
+
+def build_runtime_database_config(password, *, environment=None):
+    """Fixed non-owner runtime role; never falls back to the migration admin."""
+    return _build_database_config(password, environment=environment, user=RUNTIME_USER)

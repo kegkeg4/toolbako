@@ -10,6 +10,10 @@ from .config import Settings
 def readiness_checks(settings: Settings, *, runtime_database_ready: bool = False, runtime_storage_ready: bool = False, runtime_security_ready: dict[str, bool] | None = None) -> list[dict[str, Any]]:
     """Return non-secret launch checks used by health and the admin console."""
     security_ready = runtime_security_ready or {}
+    from .live_checkout import checkout_configuration_ready
+    financial_configured = (checkout_configuration_ready(settings) and runtime_database_ready
+        and settings.stripe_live_refunds_enabled is True and settings.stripe_live_payouts_enabled is True
+        and settings.live_database_role == "runtime_v1" and len(set(settings.admin_user_ids)) >= 2)
     checks = [
         ("production_mode", "本番モード", settings.is_production and not settings.demo_mode, "あなた", "APP_ENV=production、DEMO_MODE=false"),
         ("https", "独自ドメイン・HTTPS", settings.site_base_url.startswith("https://"), "あなた", "公開ドメインをSITE_BASE_URLへ設定"),
@@ -20,7 +24,7 @@ def readiness_checks(settings: Settings, *, runtime_database_ready: bool = False
         ("demo_persistence", "保存先の設定", bool(settings.database_url) if settings.is_production else bool(settings.database_url or (settings.state_db_path and Path(settings.state_db_path).is_absolute())), "接続設定", "本番はDATABASE_URL、デモのみSTATE_DB_PATH。デモデータは本番へ移行しない"),
         ("transaction_database", "本番データ保存の接続", bool(settings.database_url) and runtime_database_ready, "接続・検証", "Postgres互換repository・全更新の排他制御を実装。マイグレーション・TLS・session接続が必要。高負荷対応と金融台帳は別途検証"),
         ("service_role", "サーバー用プロフィール更新権限", bool(settings.supabase_service_role_key), "あなた", "SUPABASE_SERVICE_ROLE_KEY（サーバー内限定）"),
-        ("payments", "本番決済・売上分配の検証", False, "実機検証・残実装が必要", "単発JPYの台帳・分配・振込・取消worker、結果不明の分配／振込を別管理者2名で照合する処理をローカル検証。実Stripe試験、再振込・振込後回収、保有期限対応は未完了。初回は買い切りのみ、月額契約は後日対応。live書込は停止中"),
+        ("payments", "本番決済・売上分配の接続設定", financial_configured, "接続・実機検証", "本番口座・独立DB・専用DB権限・署名通知・購入/返金/振込の個別有効化と管理者2名を確認。初回は単発JPYのみ。この判定は実決済・銀行着金・通知到達の完了証拠ではありません"),
         ("email", "取引メール", settings.email_ready, "あなた", "メール送信APIと送信元ドメイン"),
         ("file_scan", "納品ファイル検査の接続・定義鮮度", bool(settings.clamav_host) and security_ready.get("clamav") is True and security_ready.get("clamav_signatures") is True, "接続・運用確認", "直近2分以内のClamAV応答と読み込み済み定義の72時間以内を確認。最新バージョンとの一致・同時負荷・外部異常通知は別途検証"),
         ("private_storage", "永続ファイル保管の接続", runtime_storage_ready if settings.storage_provider == "supabase" else settings.demo_mode and Path(settings.private_storage_path).is_absolute(), "接続・検証", "Supabaseの非公開納品bucketと公開画像bucketの実設定を確認。ローカル保存はデモのみ。ウイルス検査・実ファイルE2E・保持運用は別途必要"),

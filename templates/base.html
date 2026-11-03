@@ -16,7 +16,7 @@
 </head>
 <body class="{% block body_class %}{% endblock %}">
   <a class="skip-link" href="#main-content">本文へ移動</a>
-  {% if preview_mode %}<aside class="preview-notice" aria-label="公開準備中のサイトについて"><strong>公開準備中 · {% if demo_mode %}デモ版{% else %}接続テスト環境{% endif %}</strong><p>{% if demo_mode %}購入・振込はシミュレーションです。実際のお支払い・送金は行われません。{% else %}一般のお客様向けのサービスはまだ開始していません。決済テストは専用のテスト情報で行ってください。{% endif %}<br>商品・販売件数・評価にはサンプルを含みます。個人情報や本物のカード情報を入力しないでください。</p></aside>{% endif %}
+  {% if preview_mode %}<aside class="preview-notice" aria-label="公開準備中のサイトについて"><strong>公開準備中 · {% if demo_mode %}デモ版{% elif live_receiving_setup %}販売者の受取設定{% else %}接続テスト環境{% endif %}</strong><p>{% if live_receiving_setup and not demo_mode %}購入受付はまだ開始していません。販売者はStripeの登録画面で、本番の事業者情報・売上受取口座を登録できます。{% else %}{% if demo_mode %}購入・振込はシミュレーションです。実際のお支払い・送金は行われません。{% else %}一般のお客様向けのサービスはまだ開始していません。決済テストは専用のテスト情報で行ってください。{% endif %}<br>商品・販売件数・評価にはサンプルを含みます。個人情報や本物のカード情報を入力しないでください。{% endif %}</p></aside>{% endif %}
   {% block site_header %}<header class="site-header"><a class="brand brand-logo-link" href="/" aria-label="ツールバコ ホーム"><img class="brand-logo-header" src="/static/brand/toolbako-logo-header.png?v=20261024-fb23db15" width="1774" height="887" alt="" fetchpriority="high"><span class="sr-only">ツールバコ</span></a>
     {% block header_search %}{% endblock %}
     <nav>{% block header_nav %}<a href="/tools">ツールを探す</a><a href="/transfers">独占譲渡</a><a href="/creators">つくれる人</a><a href="/match" class="nav-feature">AI診断</a><a href="/requests">募集を探す</a>

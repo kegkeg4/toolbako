@@ -135,6 +135,23 @@ def test_account_intent_precedes_post_and_receipt_mapping_audit_are_durable(live
     assert "PRIVATE_EMAIL" not in json.dumps(journal(e, first.operation_id))
 
 
+def test_financial_stage_keeps_explicit_seller_setup_lane(live):
+    e = live
+    e.settings = replace(e.settings, stripe_connection_mode='live_financial')
+    e.mfa.settings = e.settings
+    first = run(e)
+    assert first.action == 'account_mapped' and len(e.posts) == 1
+    assert all(path == '/v1/accounts' for path, *_ in e.posts)
+
+
+@pytest.mark.parametrize('mode,flag',[('live_read_only',True),('live_financial',False)])
+def test_seller_setup_stage_and_flag_still_guard_posts(live,mode,flag):
+    e=live
+    e.settings=replace(e.settings,stripe_connection_mode=mode,stripe_live_seller_setup_enabled=flag)
+    with pytest.raises(execution.SellerSetupError): run(e)
+    assert e.requests == []
+
+
 @pytest.mark.parametrize("fault", ["timeout_before", "timeout_after", "invalid"])
 def test_unknown_creation_is_get_only_after_restart_even_when_no_result(live, fault):
     e = live

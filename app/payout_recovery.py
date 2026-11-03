@@ -8,6 +8,8 @@ review and are deliberately excluded from this workflow.
 The separate live Transfer/Payout creation gate does not authorize reversals.
 This module retains the Sandbox-only gate; do not activate it by enabling the
 live payout flag or by calling the generic integration with a live credential.
+The shared DB commit validator delegates scoped live records to the separate
+live_payout_failure proof; this does not enable these Sandbox mutation APIs.
 """
 import asyncio
 from datetime import datetime, timedelta, timezone
@@ -206,6 +208,9 @@ async def approve_failed_payout(backend, store, stripe, settings, payout, actor_
 
 async def validate_failed_release(conn, payout):
     """DB commit guard: cancellation cannot bypass confirmed bank/reversal intents."""
+    if isinstance(payout.get("scope"), dict) and payout["scope"].get("mode") == "live":
+        from .live_payout_failure import validate_live_failed_release
+        return await validate_live_failed_release(conn, payout)
     proof = payout.get("failed_payout_recovery") or {}
     bank = proof.get("bank") or {}
     if (proof.get("status") != "released" or proof.get("action") != "release" or payout.get("paid_at")

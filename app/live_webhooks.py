@@ -209,14 +209,30 @@ class LiveStripeWebhookService(StripeWebhookService):
                 return
         if kind.startswith("checkout.session."):
             _require(original.get("object") == "checkout.session" and _reference(original.get("id"), "cs"))
+            from .live_checkout import checkout_metadata, _metadata_matches as checkout_metadata_matches, validate_live_checkout_receipt, session_receipt
+            financial_scope = self.provider.financial_scope
+            try:
+                expected_metadata = checkout_metadata(financial_scope, order, extra)
+            except FinanceConflict:
+                raise HTTPException(409, "live checkout intent reconciliation required") from None
+            _require(checkout_metadata_matches(original.get("metadata"), expected_metadata),
+                     "live checkout ledger reconciliation required", 409)
             current = await self._get_current("checkout/sessions/" + original["id"])
             _require(current.get("id") == original["id"] and current.get("object") == "checkout.session"
                      and current.get("livemode") is True and current.get("mode") == "payment"
                      and current.get("currency") == "jpy" and _amount(current.get("amount_total"), state["expected_amount"])
                      and _metadata_matches(current.get("metadata"), order, extra))
+            try:
+                state["recovered_checkout_session_id"] = await validate_live_checkout_receipt(
+                    self.journal, self.provider, financial_scope, order, extra, current)
+            except FinanceConflict:
+                raise HTTPException(409, "live checkout intent reconciliation required") from None
+            except RuntimeError:
+                raise HTTPException(503, "provider reconciliation unavailable") from None
+            state["require_ledger_metadata"] = True
             status, payment_status = current.get("status"), current.get("payment_status")
             _require((status, payment_status) in {("complete", "paid"), ("complete", "unpaid"), ("expired", "unpaid")})
-            state["obj"] = current
+            state["obj"] = session_receipt(current)
             state["live_checkout_outcome"] = "paid" if payment_status == "paid" else "expired" if status == "expired" else "pending"
             if payment_status == "paid":
                 proof = await self._source_payment(state, current.get("payment_intent"))

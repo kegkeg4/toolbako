@@ -12,7 +12,7 @@ import re
 import sys
 from uuid import UUID
 
-from .live_database_config import build_live_database_config
+from .live_database_config import build_live_database_config, build_runtime_database_config
 
 
 _FAILURE_REASONS = frozenset({
@@ -21,6 +21,7 @@ _FAILURE_REASONS = frozenset({
     "stripe_source_configuration_invalid", "auth_storage_configuration_invalid",
     "ledger_invalid", "inherited_database_options", "database_secret_missing",
     "database_secret_invalid", "database_ca_or_config_invalid", "stripe_key_missing",
+    "database_role_invalid", "database_credential_conflict",
     "stripe_key_invalid", "webhook_platform_secret_invalid", "webhook_connect_secret_invalid",
     "webhook_secret_pair_missing",
     "webhook_secrets_not_distinct", "webhook_version_unsupported", "web_port_invalid",
@@ -73,11 +74,11 @@ def prepare_runtime_launch(action, environment):
         mode = env.get("STRIPE_CONNECTION_MODE")
         flag = env.get("STRIPE_LIVE_SELLER_SETUP_ENABLED", "false")
         financial_flags = [env.get(name, "false") for name in
-                           ("STRIPE_LIVE_REFUNDS_ENABLED", "STRIPE_LIVE_PAYOUTS_ENABLED")]
+                           ("STRIPE_LIVE_REFUNDS_ENABLED", "STRIPE_LIVE_PAYOUTS_ENABLED", "STRIPE_LIVE_CHECKOUT_ENABLED")]
         _require(flag in {"true", "false"} and all(value in {"true", "false"} for value in financial_flags),
                  "operation_flags_invalid")
         _require(((mode, flag) in {("live_read_only", "false"), ("live_setup_only", "true")}
-                  and financial_flags == ["false", "false"] or mode == "live_financial"),
+                  and financial_flags == ["false", "false", "false"] or mode == "live_financial"),
                  "connection_stage_invalid")
         _require(env.get("APP_ENV") in {"staging", "production"}
                  and env.get("DEMO_MODE", "false") == "false", "deployment_environment_invalid")
@@ -100,14 +101,24 @@ def prepare_runtime_launch(action, environment):
         _require(not any(k.upper().startswith("PG") and k != "PGPASSWORD" for k in env),
                  "inherited_database_options")
         env.pop("PGPASSWORD", None)
-        password = env.pop("TOOLBAKO_LIVE_MIGRATION_PASSWORD", "")
+        role = env.get("LIVE_DATABASE_ROLE", "migration_admin")
+        _require(role in {"migration_admin", "runtime_v1"}, "database_role_invalid")
+        _require(not any(value == "true" for value in financial_flags) or role == "runtime_v1",
+                 "database_role_invalid")
+        source = "TOOLBAKO_LIVE_RUNTIME_PASSWORD" if role == "runtime_v1" else "TOOLBAKO_LIVE_MIGRATION_PASSWORD"
+        other = "TOOLBAKO_LIVE_MIGRATION_PASSWORD" if role == "runtime_v1" else "TOOLBAKO_LIVE_RUNTIME_PASSWORD"
+        # Even an empty alternative variable is rejected: no ambiguous fallback.
+        _require(other not in env, "database_credential_conflict")
+        password = env.pop(source, "")
+        env["LIVE_DATABASE_ROLE"] = role
         key = env.pop("STRIPE_LIVE_PENDING_SECRET_KEY", "")
         _require(bool(key), "stripe_key_missing")
         _require(re.fullmatch(r"rk_live_[A-Za-z0-9]+", key) is not None, "stripe_key_invalid")
         _require(bool(password), "database_secret_missing")
         _require("\x00" not in password, "database_secret_invalid")
         try:
-            env["DATABASE_URL"] = build_live_database_config(password, environment=env).for_connection(environment=env)
+            builder = build_runtime_database_config if role == "runtime_v1" else build_live_database_config
+            env["DATABASE_URL"] = builder(password, environment=env).for_connection(environment=env)
         except Exception:
             raise RuntimeLaunchError("database_ca_or_config_invalid") from None
         env["STRIPE_SECRET_KEY"] = key

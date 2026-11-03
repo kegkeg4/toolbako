@@ -8,6 +8,7 @@ from app.config import Settings, _strict_operation_flag
 from app import deployment_check as checks
 from app.integrations import StripeIntegration
 from app.live_runtime import RuntimeLaunchError, prepare_runtime_launch
+from app.live_database_config import build_runtime_database_config
 from app.live_setup_plan import STRIPE_API_VERSION, WEBHOOK_API_VERSIONS
 from app.production import readiness_summary
 from test_live_connection_stage import stage, Backend
@@ -15,10 +16,14 @@ from test_live_runtime import fixture_env
 
 
 def financial(**changes):
+    runtime = {}
+    if any(changes.get(name) is True for name in ("stripe_live_refunds_enabled", "stripe_live_payouts_enabled", "stripe_live_checkout_enabled")):
+        runtime = {"live_database_role": "runtime_v1", "database_url": build_runtime_database_config(
+            "synthetic-runtime", environment={}).for_connection(environment={})}
     return stage(**{"stripe_connection_mode": "live_financial",
         "stripe_api_version": STRIPE_API_VERSION,
         "stripe_webhook_secret": "whsec_platform", "stripe_connect_webhook_secret": "whsec_connect",
-        **changes})
+        **runtime, **changes})
 
 
 @pytest.mark.parametrize("refunds,payouts", [(False, False), (True, False), (False, True), (True, True)])
@@ -93,6 +98,9 @@ def test_isolated_projection_preserves_exact_flags_and_separate_webhook_version(
         STRIPE_LIVE_PAYOUTS_ENABLED=payouts, STRIPE_LIVE_PENDING_WEBHOOK_SECRET="whsec_platform",
         STRIPE_LIVE_PENDING_CONNECT_WEBHOOK_SECRET="whsec_connect", STRIPE_WEBHOOK_API_VERSION=version,
         STRIPE_API_VERSION=STRIPE_API_VERSION)
+    if refunds == "true" or payouts == "true":
+        env["LIVE_DATABASE_ROLE"] = "runtime_v1"
+        env["TOOLBAKO_LIVE_RUNTIME_PASSWORD"] = env.pop("TOOLBAKO_LIVE_MIGRATION_PASSWORD")
     prepare_runtime_launch("preflight", env).execute()
     child = captured[0]
     assert child["STRIPE_WEBHOOK_API_VERSION"] == version and child["STRIPE_API_VERSION"] == STRIPE_API_VERSION

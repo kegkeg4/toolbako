@@ -39,11 +39,17 @@ def _live_database_config(settings: Settings) -> dict:
     """Reject implicit/rerouted targets. Never return this dict in diagnostics."""
     from psycopg.conninfo import conninfo_to_dict
     config = conninfo_to_dict(settings.database_url)
+    from .live_database_config import TARGET_HOST, RUNTIME_USER, _verified_ca_path
+    role = getattr(settings, "live_database_role", "migration_admin")
+    if role not in {"migration_admin", "runtime_v1"}:
+        raise ValueError("connection_stage_target_unverified")
+    endpoints = {(TARGET_HOST, RUNTIME_USER)} if role == "runtime_v1" else LIVE_DATABASE_ENDPOINTS
     allowed = {"host", "port", "dbname", "user", "password", "sslmode", "sslrootcert"}
-    if (set(config) - allowed or any(name.startswith("PG") for name in os.environ)
-            or (config.get("host"), config.get("user")) not in LIVE_DATABASE_ENDPOINTS
+    if (set(config) - allowed or any(name.upper().startswith("PG") for name in os.environ)
+            or (config.get("host"), config.get("user")) not in endpoints
             or config.get("port") != "5432" or config.get("dbname") != "postgres"
-            or config.get("sslmode") != "verify-full" or not config.get("password")):
+            or config.get("sslmode") != "verify-full" or not config.get("password")
+            or (role == "runtime_v1" and config.get("sslrootcert") != _verified_ca_path())):
         raise ValueError("connection_stage_target_unverified")
     return config
 
@@ -52,7 +58,8 @@ def _live_configuration_verified(settings: Settings) -> bool:
     try:
         from .live_setup_plan import STRIPE_API_VERSION, WEBHOOK_API_VERSIONS
         scope = configured_scope(settings)
-        flags = (settings.stripe_live_refunds_enabled, settings.stripe_live_payouts_enabled)
+        flags = (settings.stripe_live_refunds_enabled, settings.stripe_live_payouts_enabled,
+                 getattr(settings, "stripe_live_checkout_enabled", False))
         setup_notifications = (
             settings.stripe_api_version == STRIPE_API_VERSION
             and settings.stripe_webhook_api_version in WEBHOOK_API_VERSIONS
@@ -66,6 +73,7 @@ def _live_configuration_verified(settings: Settings) -> bool:
             and settings.stripe_api_version == STRIPE_API_VERSION
             and settings.stripe_connect_accounts_v2 is False
             and all(type(value) is bool for value in flags)
+            and (not any(flags) or getattr(settings, "live_database_role", "migration_admin") == "runtime_v1")
             and type(settings.stripe_live_seller_setup_enabled) is bool
             and ((settings.stripe_connection_mode == "live_setup_only"
                   and settings.stripe_live_seller_setup_enabled is True and setup_notifications and not any(flags))
@@ -108,6 +116,9 @@ async def _live_database_checks(settings: Settings, backend) -> dict[str, bool]:
                     return result
                 result["database_target_verified"] = True
                 await conn.execute("set default_transaction_read_only = on")
+                if getattr(settings, "live_database_role", "migration_admin") == "runtime_v1":
+                    from .live_runtime_role import verify_runtime_role
+                    await verify_runtime_role(conn)
                 row = await (await conn.execute(
                     "select v.version,s.revision,o.endpoint,o.request_hash,o.status,o.response "
                     "from toolbako_runtime.schema_version v "

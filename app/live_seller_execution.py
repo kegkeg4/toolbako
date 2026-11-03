@@ -1,7 +1,7 @@
 """Durable, default-off live Express SETUP executor; never financial mutations.
 
 Only the authenticated seller's explicit POST may enter this module, inside the
-same locked backend.request(store). Both live_setup_only and the independent
+same locked backend.request(store). An explicit live setup/financial stage and the independent
 server flag are required. StripeIntegration._post remains live-blocked.
 
 Intent commit precedes first provider I/O. Unknown account creates recover by
@@ -66,7 +66,7 @@ class SetupResult:
 
 def _target_bound_connection(backend, settings):
     """Actual locked connection identity, not merely a configured URL."""
-    _require(settings.stripe_connection_mode == "live_setup_only"
+    _require(settings.stripe_connection_mode in {"live_setup_only", "live_financial"}
              and getattr(settings, "stripe_live_seller_setup_enabled", False) is True
              and _live_configuration_verified(settings)
              and backend.dsn == settings.database_url)
@@ -85,7 +85,7 @@ def _actor(mfa, request, seller_id):
 
 async def _prepare(backend, store, stripe, settings, mfa, request, seller_id):
     # Default-off check must precede all credential use, DB/provider reads.
-    _require(settings.stripe_connection_mode == "live_setup_only"
+    _require(settings.stripe_connection_mode in {"live_setup_only", "live_financial"}
              and getattr(settings, "stripe_live_seller_setup_enabled", False) is True)
     _target_bound_connection(backend, settings)
     _actor(mfa, request, seller_id)

@@ -3,7 +3,7 @@
 GETs never authorize another POST, even if a complete list has no match.
 Provider proofs are re-fetched at approval. Journal, state, audit and email
 outbox are committed together; no synthetic webhook events are generated.
-Checkout recovery remains Sandbox-only. Live full-refund recovery requires
+Live Checkout and full-refund recovery require
 the real admin session/MFA, bound live scope and exact original intent hash.
 """
 import asyncio
@@ -132,7 +132,12 @@ async def _target(backend, store, stripe, order, kind, extra_id, scope=None):
                 or (not extra and order.get("payment_status") != "pending")):
             raise FinanceConflict("購入の状態が変更されています。運営で詳細確認してください")
         destination = (store.connected_accounts.get(order["seller_id"]) or {}).get("account_id", "")
-        data = stripe.extra_checkout_data(order, extra, destination) if extra else stripe.checkout_data(order, destination)
+        if scope is not None:
+            from .live_checkout import checkout_request_data
+            key, data = checkout_request_data(stripe, scope, order, extra)
+            data = {**data, "_idempotency_key": key}
+        else:
+            data = stripe.extra_checkout_data(order, extra, destination) if extra else stripe.checkout_data(order, destination)
         endpoint = "checkout/sessions"
     else:
         if scope is not None and "paid_out_refund_case" in order:
@@ -183,7 +188,7 @@ async def _inspect(backend, store, stripe, order, kind, extra_id, at, scope=None
     if operation["endpoint"] == "refunds": params["payment_intent"] = data["payment_intent"]
     # In live refund recovery, an older/manual refund must not be hidden by a
     # time filter. One original full-refund intent must match exactly one fact.
-    filters = {"payment_intent": data["payment_intent"]} if scope is not None else params
+    filters = {"payment_intent": data["payment_intent"]} if scope is not None and operation["endpoint"] == "refunds" else params
     objects = await stripe.list_financial_objects(operation["endpoint"], params=filters)
     if any(not isinstance(obj.get("metadata"), dict) for obj in objects):
         raise FinanceConflict("Stripeの照合記録の形式を確認できません")
@@ -191,7 +196,8 @@ async def _inspect(backend, store, stripe, order, kind, extra_id, at, scope=None
     if len(matches) != 1:
         raise FinanceConflict("該当記録が0件または複数あります。再送せずStripeで詳細確認してください")
     remote = matches[0]
-    if scope is not None and (len(objects) != 1 or remote["metadata"].get("ledger_id") != scope.ledger_id
+    if scope is not None and ((operation["endpoint"] == "refunds" and len(objects) != 1)
+                              or remote["metadata"].get("ledger_id") != scope.ledger_id
                               or ("livemode" in remote and remote["livemode"] is not True)):
         raise FinanceConflict("本番返金の元要求・台帳・明細を一意に確認できません")
     if (type(remote.get("created")) is not int or remote["created"] < int(params["created[gte]"])
@@ -199,7 +205,23 @@ async def _inspect(backend, store, stripe, order, kind, extra_id, at, scope=None
         raise FinanceConflict("照合記録の作成日時・通貨が一致しません")
     part = extra or order
     proof = None
-    if operation["endpoint"] == "checkout/sessions":
+    if operation["endpoint"] == "checkout/sessions" and scope is not None:
+        from .live_checkout import checkout_session_proof, session_receipt
+        # A list locates the fact; a fresh exact GET supplies the reviewed proof.
+        listed_id = remote.get("id")
+        import re
+        if not isinstance(listed_id, str) or not re.fullmatch(r"cs_live_[A-Za-z0-9]+", listed_id):
+            raise FinanceConflict("本番購入の照合先を確認できません")
+        remote = await stripe._get("checkout/sessions/" + listed_id)
+        if remote.get("id") != listed_id:
+            raise FinanceConflict("本番購入の照合先が変更されています")
+        proof = await checkout_session_proof(stripe, scope, order, extra, remote, data, at=at,
+                                             since=int(operation["created_at"].timestamp()))
+        if remote.get("status") == "complete" and remote.get("payment_status") != "paid":
+            raise FinanceConflict("入金が未確定です。再送せず照合を続けてください")
+        remote = session_receipt(remote)
+        identity = remote
+    elif operation["endpoint"] == "checkout/sessions":
         if (remote.get("object") != "checkout.session" or not str(remote.get("id", "")).startswith("cs_test_")
                 or remote.get("livemode") is not False or remote.get("mode") != "payment"
                 or type(remote.get("amount_total")) is not int or remote["amount_total"] != amount
@@ -255,10 +277,14 @@ async def _review_context(backend, store, stripe, settings, order, kind, actor_i
     if key_mode(stripe.secret_key) != "live":
         require_sandbox_review(backend, store, stripe, settings, actor_id)
         return None, set(settings.admin_user_ids)
-    if kind not in {"refund", "refund_extra"}:
-        raise FinanceConflict("本番では元要求の全額返金だけ照合できます")
+    if kind not in KINDS:
+        raise FinanceConflict("本番決済の照合種別を確認できません")
     from .refund_resumption import live_refund_context
     actor, admins, scope = await live_refund_context(backend, store, stripe, settings, mfa, request)
+    if kind in {"checkout", "extra"}:
+        from .live_payout_execution import service_context
+        if await service_context(backend, store, stripe, settings) != scope:
+            raise FinanceConflict("本番購入の接続先を確認できません")
     if (actor != actor_id or request.method != "POST"
             or sum(o.get("id") == order.get("id") for o in store.orders) != 1
             or not any(o is order for o in store.orders) or backend._emails):
@@ -284,6 +310,15 @@ async def propose_payment_recovery(backend, store, stripe, settings, order, kind
     return proposal
 
 
+def _recheck_live_checkout_approval(store, settings, mfa, request, actor_id, proposal):
+    # Deliberately no await: the last provider GET cannot outlive authorization.
+    from .live_payout_execution import _actor
+    admins = _actor(store, settings, mfa, request, actor_id)
+    if (proposal["proposed_by"] == actor_id or proposal["proposed_by"] not in admins
+            or not timedelta(0) <= datetime.now(timezone.utc) - proposal["proposed_at"] <= timedelta(minutes=30)):
+        raise FinanceConflict("購入照合の追加認証・承認期限が切れています")
+
+
 async def approve_payment_recovery(backend, store, stripe, settings, order, kind, actor_id, proposal_id, email_sender, *, extra_id="", at=None, mfa=None, request=None):
     scope, admins = await _review_context(backend, store, stripe, settings, order, kind, actor_id, mfa, request)
     extra = _part(order, kind, extra_id)
@@ -302,10 +337,19 @@ async def approve_payment_recovery(backend, store, stripe, settings, order, kind
             or operation["request_hash"] != proposal["request_hash"] or remote["id"] != proposal["provider_reference"]
             or fingerprint != proposal["fingerprint"]):
         raise FinanceConflict("照合結果が変更されています。再確認が必要です")
+    if scope is not None and kind in {"checkout", "extra"}:
+        # Provider GETs may outlast the session or the review window.
+        fresh_scope, fresh_admins = await _review_context(backend, store, stripe, settings, order, kind, actor_id, mfa, request)
+        if (fresh_scope != scope or proposal["proposed_by"] not in fresh_admins
+                or not timedelta(0) <= datetime.now(timezone.utc) - proposal["proposed_at"] <= timedelta(minutes=30)):
+            raise FinanceConflict("購入照合の追加認証・承認期限が切れています")
+        _recheck_live_checkout_approval(store, settings, mfa, request, actor_id, proposal)
     part = extra or order
     emails = []
     if kind in {"checkout", "extra"}:
         part.update(checkout_session_id=remote["id"], checkout_url=remote.get("url") if remote["status"] == "open" else "")
+        if scope is not None:
+            part["checkout_session_url"] = part["checkout_url"]
         if remote["status"] == "complete":
             # Recovery is about financial identity, not changing the account's
             # contact email based on payer details in a Checkout response.
@@ -331,6 +375,8 @@ async def approve_payment_recovery(backend, store, stripe, settings, order, kind
     try:
         for message in emails:
             await email_sender(*message)  # In DB mode this queues, it never sends.
+        if scope is not None and kind in {"checkout", "extra"}:
+            _recheck_live_checkout_approval(store, settings, mfa, request, actor_id, proposal)
         await backend.reconcile_operation(operation_id, endpoint=operation["endpoint"], request_hash=operation["request_hash"], response=remote)
     except Exception:
         if scope is not None:

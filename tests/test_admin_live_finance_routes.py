@@ -58,18 +58,20 @@ def test_live_payout_admission_runs_before_domain(monkeypatch,actor,recent,enabl
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("lane,action",[(lane,action) for lane in ("payout","refund","payout_recovery","payment_recovery") for action in ("propose","approve")])
+@pytest.mark.parametrize("lane,action",[(lane,action) for lane in ("payout","refund","payout_recovery","payment_recovery","payout_failure") for action in ("propose","approve")])
 def test_routes_forward_server_mfa_and_request_to_domains(monkeypatch,lane,action):
     req=wire(monkeypatch,mode="live_financial",refunds=True,payouts=True)
     calls=[]
     async def record(*args,**kwargs): calls.append((args,kwargs))
     names={"payout":("propose_live_payout","approve_live_payout"),"refund":("propose_refund_resumption","approve_refund_resumption"),
-        "payout_recovery":("propose_recovery","approve_recovery"),"payment_recovery":("propose_payment_recovery","approve_payment_recovery")}
+        "payout_recovery":("propose_recovery","approve_recovery"),"payment_recovery":("propose_payment_recovery","approve_payment_recovery"),
+        "payout_failure":("propose_live_failed_payout","approve_live_failed_payout")}
     monkeypatch.setattr(main,names[lane][action=="approve"],record)
     async def run():
         if lane=="payout": return await main.admin_execute_live_payout(req,"payout",action,"proposal")
         if lane=="refund": return await main.admin_resume_refund(req,"order",action,"proposal")
         if lane=="payout_recovery": return await main.admin_reconcile_payout(req,"payout",action,"proposal")
+        if lane=="payout_failure": return await main.admin_recover_failed_payout(req,"payout",action,"proposal")
         return await main.admin_reconcile_payment(req,"order","refund",action,"proposal","")
     result=asyncio.run(run())
     assert result.status_code==303 and result.headers['location'].startswith('/admin?section=finance')
@@ -97,7 +99,8 @@ def test_finance_template_keeps_unsupported_live_actions_closed_and_shows_exact_
         live_recovery_ready=True,live_payout_execution_ready=True,refund_execution_ready=False,payout_labels={},
         payment_recoveries={"items":[],"truncated":False},user={"id":"two"})
     assert '/execute-live/approve' in html and '400円で1件実行' in html
-    assert '/cancel"' not in html and '/recover-failure/approve' not in html and '/refund-resumption/approve' not in html
+    assert '/cancel"' in html  # Unstarted requests can be cancelled without provider writes.
+    assert '/recover-failure/approve' not in html and '/refund-resumption/approve' not in html
     assert '本番の送金です' in html
 
 

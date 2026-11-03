@@ -62,6 +62,11 @@ from .payout_recovery import propose_failed_payout, approve_failed_payout
 from .payment_reconciliation import KINDS as PAYMENT_RECOVERY_KINDS, payment_recovery_inventory, propose_payment_recovery, approve_payment_recovery
 from .refund_resumption import refund_resumption_inventory, propose_refund_resumption, approve_refund_resumption, inspect_refund_resumption_live
 from .live_payout_execution import propose_live_payout, approve_live_payout
+from .live_checkout import checkout_configuration_ready, execute_live_checkout
+from .live_payout_requests import (live_payout_requests_ready, request_live_payout,
+    hold_live_seller_payouts, propose_live_seller_release, approve_live_seller_release,
+    cancel_unstarted_live_payout)
+from .live_payout_failure import propose_live_failed_payout, approve_live_failed_payout
 from .deployment_check import deployment_database_check
 from .supabase_api import supabase_headers
 from .object_storage import SupabaseObjectStorage, ObjectStorageError, storage_ready, delivery_upload_available
@@ -311,6 +316,7 @@ def context(request: Request, **values):
     values["instant_ready"] = lambda tool: instant_ready(tool, production=not settings.demo_mode)
     values["artifact_ready"] = lambda artifact: artifact_ready(artifact, production=not settings.demo_mode)
     values["subscription_checkout_ready"] = settings.demo_mode
+    values["live_receiving_setup"] = settings.stripe_connection_mode in {"live_read_only", "live_setup_only"}
     status_labels = {"in_progress":"取引中","awaiting_acceptance":"納品確認待ち","completed":"取引完了","cancel_pending":"キャンセル確認中","cancelled":"キャンセル済み"}
     user = current_user(request)
     # Shared error/auth pages must not drop operators into the public-site shell.
@@ -367,15 +373,25 @@ async def stripe_outcome_unknown(request: Request, exc: StripeOutcomeUnknown):
     # Preserve the existing order/extra/contract reservation. A timeout is not
     # evidence of a failed payment and must not allow a fresh purchase ID.
     user = current_user(request)
+    requires_reconciliation = True
+    if database_store and settings.stripe_connection_mode == "live_financial" and exc.operation_id.startswith(("checkout-", "extra-")):
+        try:
+            details = await database_store.operation_details(exc.operation_id)
+            if details and details.get("status") == "succeeded":
+                requires_reconciliation = False  # A failed fresh GET is not another unknown POST.
+        except Exception:
+            pass  # Keep the conservative hold if the durable state cannot be read.
     for order in store.orders:
         keys = {f"checkout-{order['id']}", f"refund-{order['id']}"}
         for extra in order.get("pending_extras", []):
             keys.update((f"extra-{extra['id']}", f"refund-extra-{order['id']}-{extra['id']}"))
-        if exc.operation_id in keys:
+        if requires_reconciliation and exc.operation_id in keys:
             order["payment_reconciliation_required"] = True
-    store.audit(user["id"] if user else None, "stripe.reconciliation_required", exc.operation_id)
+    store.audit(user["id"] if user else None, "stripe.reconciliation_required" if requires_reconciliation else "stripe.checkout_recheck_failed", exc.operation_id)
     await persist_state()
     message = "決済・返金サービスからの応答を確認できませんでした。二重処理を防ぐため注文を保留しています。再購入せず、返金申請も繰り返さず、購入履歴を確認してサポートへお問い合わせください。"
+    if not requires_reconciliation:
+        message = "決済画面の最新状態を確認できませんでした。注文は保持されています。時間をおいて購入履歴から同じ注文の決済を再開してください。"
     return await friendly_http_error(request, HTTPException(502, message))
 
 
@@ -823,7 +839,7 @@ async def checkout_complete(request: Request, slug: str, options: list[str] = Fo
         raise HTTPException(409, "現在は買い切りのみご利用いただけます。月額プランは今後の対応予定です")
     # Gate before reservation and before every cached/recovered handoff. A
     # connection/setup stage must not reopen a previously created Checkout.
-    if not settings.demo_mode and not settings.stripe_ready:
+    if not settings.demo_mode and not (settings.stripe_ready or checkout_configuration_ready(settings)):
         raise HTTPException(503, "決済受付の開始前です。開始までお待ちください")
     try: order, created = store.buy(user, slug, options, coupon, billing_type, payment_pending=not settings.demo_mode, return_created=True)
     except ValueError as exc:
@@ -833,6 +849,17 @@ async def checkout_complete(request: Request, slug: str, options: list[str] = Fo
     if not settings.demo_mode:
         if not created and order.get("payment_status") == "paid":
             raise HTTPException(409, "この商品は購入済みです")
+        if settings.stripe_connection_mode == "live_financial":
+            try:
+                session = await execute_live_checkout(database_store, store, stripe, settings, session_service, request, order)
+            except FinanceConflict:
+                if created:
+                    with store._lock:
+                        store.release_coupon(order)
+                        if order in store.orders: store.orders.remove(order)
+                        store.subscriptions[:] = [x for x in store.subscriptions if x.get("order_id") != order["id"]]
+                raise HTTPException(409, "購入条件と決済の状態を確認できません。購入履歴を確認してからお試しください") from None
+            return payment_handoff(request, session["url"])
         if not created and order.get("payment_status") == "pending" and order.get("checkout_session_url"):
             return payment_handoff(request, order["checkout_session_url"])
         if not created and order.get("payment_status") == "pending":
@@ -1064,10 +1091,17 @@ async def select_application(request: Request, request_id: str, application_id: 
     if not candidate_application: raise HTTPException(404)
     if not settings.demo_mode:
         account = store.connected_accounts.get(candidate_application["applicant_id"])
-        if not settings.stripe_ready or not account or not account.get("charges_enabled"): raise HTTPException(503, "応募者の決済受取設定が完了していません")
+        if not (settings.stripe_ready or checkout_configuration_ready(settings)) or not account or not account.get("charges_enabled"): raise HTTPException(503, "応募者の決済受取設定が完了していません")
     try: item, application, order = store.contract_request(user, request_id, application_id, payment_pending=not settings.demo_mode)
     except ValueError: raise HTTPException(409, "この募集はすでに契約済みです")
     if not settings.demo_mode:
+        if settings.stripe_connection_mode == "live_financial":
+            try:
+                session = await execute_live_checkout(database_store, store, stripe, settings, session_service, request, order)
+            except FinanceConflict:
+                store.rollback_request_contract(item, application, order)
+                raise HTTPException(409, "契約と決済の状態を確認できません。取引履歴を確認してください") from None
+            return payment_handoff(request, session["url"])
         try: session = await stripe.create_checkout(order, account["account_id"])
         except RuntimeError as exc:
             store.rollback_request_contract(item, application, order)
@@ -1085,21 +1119,29 @@ async def select_application(request: Request, request_id: str, application_id: 
 async def payouts(request: Request):
     user=current_user(request)
     if not user: return RedirectResponse("/login?next=/payouts",303)
-    return templates.TemplateResponse(request,"payouts.html",context(request,balance=available_balance(user["id"]),payouts=[x for x in store.payouts if x["seller_id"]==user["id"]], payout_labels=PAYOUT_LABELS, payout_requests_ready=settings.demo_mode or sandbox_payouts_ready(settings), payout_request_key=secrets.token_urlsafe(24)))
+    return templates.TemplateResponse(request,"payouts.html",context(request,balance=available_balance(user["id"]),payouts=[x for x in store.payouts if x["seller_id"]==user["id"]], payout_labels=PAYOUT_LABELS, payout_requests_ready=settings.demo_mode or sandbox_payouts_ready(settings) or live_payout_requests_ready(settings), live_payouts=settings.stripe_connection_mode in {"live_read_only", "live_setup_only", "live_financial"}, payout_request_key=secrets.token_urlsafe(24)))
 
 
 @app.post("/payouts")
 async def payout_request(request: Request, amount: int = Form(...), request_key: str = Form("")):
     user=current_user(request)
-    if not user or not (identity_verified(user) if claim_policy.requires_live() else user.get("is_verified")): raise HTTPException(403,"本人確認が必要です")
-    if not settings.demo_mode and not sandbox_payouts_ready(settings):
+    if not user: raise HTTPException(403,"本人確認が必要です")
+    # Live admission verifies fresh Connect KYC, the scoped account journal and
+    # server MFA in request_live_payout; the public profile badge is independent.
+    if not live_payout_requests_ready(settings) and not (identity_verified(user) if claim_policy.requires_live() else user.get("is_verified")):
+        raise HTTPException(403,"本人確認が必要です")
+    if not settings.demo_mode and not (sandbox_payouts_ready(settings) or live_payout_requests_ready(settings)):
         raise HTTPException(409,"本番の振込は公開前検証中です。実際の銀行振込はまだ開始されません")
     balance = available_balance(user["id"])
     if amount < settings.payout_minimum or (not database_store and amount > balance): raise HTTPException(422, f"振込申請は{settings.payout_minimum:,}円以上、振込可能残高以下で指定してください")
     if database_store and not re.fullmatch(r"[A-Za-z0-9_-]{32}", request_key):
         raise HTTPException(422, "申請画面を再読み込みしてください")
     try:
-        if database_store:
+        if live_payout_requests_ready(settings):
+            await request_live_payout(database_store, store, stripe, settings, user["id"], amount,
+                                     request_key, mfa=mfa, request=request)
+            return RedirectResponse("/payouts?requested=1", 303)
+        elif database_store:
             request_payout(store, settings, user["id"], amount, request_key=request_key)
         else:
             store.create_payout(user["id"], amount)
@@ -1143,8 +1185,24 @@ async def transaction_room(request: Request, order_id: str):
     if not settings.demo_mode and order.get("payment_status") != "paid":
         payment_status = order.get("payment_status", "pending")
         status_code = 202 if payment_status == "pending" else (402 if payment_status == "past_due" else 410)
-        return templates.TemplateResponse(request,"payment_pending.html",context(request,order=order,payment_status=payment_status),status_code=status_code)
+        return templates.TemplateResponse(request,"payment_pending.html",context(request,order=order,payment_status=payment_status,
+            checkout_resume_ready=payment_status == "pending" and user["id"] == order["buyer_id"] and checkout_configuration_ready(settings)),status_code=status_code)
     return templates.TemplateResponse(request, "transaction.html", context(request, order=order, room_open=store.room_is_open(order), review_open=store.review_is_open(order)))
+
+
+@app.post("/orders/{order_id}/checkout")
+async def resume_order_checkout(request: Request, order_id: str):
+    user = current_user(request)
+    order = user and store.get_order(order_id, user["id"])
+    if not order or user["id"] != order["buyer_id"]: raise HTTPException(404)
+    if not checkout_configuration_ready(settings): raise HTTPException(503, "決済受付を開始する準備中です")
+    if order.get("payment_status") != "pending": raise HTTPException(409, "現在の注文状態では決済を再開できません")
+    try:
+        session = await execute_live_checkout(database_store, store, stripe, settings, session_service, request, order)
+    except FinanceConflict:
+        raise HTTPException(409, "決済状況を確認できません。購入し直さず、運営へお問い合わせください") from None
+    # The existing reservation and intent are retained on every uncertain result.
+    return payment_handoff(request, session["url"])
 
 
 @app.post("/orders/{order_id}/message")
@@ -1339,8 +1397,15 @@ async def extra_payment(request: Request, order_id: str, amount: int = Form(...)
     note = clean_visible_text(note, 1, 200, "追加支払いの内容")
     if not settings.demo_mode:
         account = store.connected_accounts.get(order["seller_id"])
-        if not settings.stripe_ready or not account or not account.get("charges_enabled"): raise HTTPException(503,"追加支払いを開始できません")
+        if not (settings.stripe_ready or checkout_configuration_ready(settings)) or not account or not account.get("charges_enabled"): raise HTTPException(503,"追加支払いを開始できません")
         extra, created = store.reserve_extra_payment(order, amount, note)
+        if settings.stripe_connection_mode == "live_financial":
+            try:
+                session = await execute_live_checkout(database_store, store, stripe, settings, session_service, request, order, extra=extra)
+            except FinanceConflict:
+                if created: store.rollback_extra_payment(order, extra)
+                raise HTTPException(409, "追加支払いの状態を確認できません。取引履歴を確認してください") from None
+            return payment_handoff(request, session["url"])
         if not created and extra.get("checkout_session_url"): return payment_handoff(request, extra["checkout_session_url"])
         if not created: raise HTTPException(409, "決済画面を準備中です。数秒後にもう一度お試しください", headers={"Retry-After":"3"})
         try: session = await stripe.create_extra_checkout(order,extra,account["account_id"])
@@ -1459,7 +1524,7 @@ async def seller_payment_settings(request: Request):
     user = current_user(request)
     if not user: return RedirectResponse("/login?next=/seller/payments",303)
     account = store.connected_accounts.get(user["id"])
-    setup_mode = settings.stripe_connection_mode == "live_setup_only"
+    setup_mode = settings.stripe_connection_mode in {"live_setup_only", "live_financial"}
     setup_ready = False
     if setup_mode:
         from .deployment_check import _live_configuration_verified
@@ -1484,7 +1549,8 @@ async def seller_payment_settings(request: Request):
             account["sync_error"] = True
     return templates.TemplateResponse(request,"seller_payments.html",context(
         request, account=account, stripe_ready=settings.stripe_ready,
-        seller_setup_ready=setup_ready, seller_setup_only=setup_mode,
+        seller_setup_ready=setup_ready and settings.stripe_live_seller_setup_enabled,
+        seller_setup_only=setup_mode and not checkout_configuration_ready(settings),
         onboarding_refresh=request.query_params.get("refresh") == "1",
         onboarding_returned=request.query_params.get("returned") == "1",
     ))
@@ -1498,7 +1564,7 @@ async def seller_payment_onboard(request: Request):
         store.connected_accounts[user["id"]] = {"account_id":f"acct_demo_{user['id'][:8]}","charges_enabled":True,"payouts_enabled":True,"details_submitted":True}
         store.audit(user["id"],"connect.demo_enabled",user["id"],request.headers.get("x-request-id", ""))
         return RedirectResponse("/seller/payments?connected=1",303)
-    if settings.stripe_connection_mode == "live_setup_only":
+    if settings.stripe_connection_mode in {"live_setup_only", "live_financial"}:
         from .live_seller_execution import execute_live_seller_account, execute_live_seller_account_link
         try:
             result = await execute_live_seller_account(database_store, store, stripe, settings, mfa, request, seller_id=user["id"])
@@ -1807,7 +1873,7 @@ async def buy_proposal(request: Request, conversation_id: str, proposal_id: str)
     proposal = conversation and next((x for x in conversation["proposals"] if x["id"] == proposal_id and x["status"] == "open"), None)
     if not conversation or not proposal or conversation.get("conversation_type") == "transfer": raise HTTPException(409)
     account = store.connected_accounts.get(conversation["seller_id"])
-    if not settings.demo_mode and (not settings.stripe_ready or not account or not account.get("charges_enabled")):
+    if not settings.demo_mode and (not (settings.stripe_ready or checkout_configuration_ready(settings)) or not account or not account.get("charges_enabled")):
         raise HTTPException(503, "販売者の決済受取設定が完了していません")
     try: order = store.buy_proposal(user, conversation_id, proposal_id)
     except ValueError as exc:
@@ -1815,6 +1881,15 @@ async def buy_proposal(request: Request, conversation_id: str, proposal_id: str)
         raise HTTPException(409) from exc
     order.update({"buyer_email":user.get("email"),"seller_email":store.registered_users.get(conversation["seller_username"],{}).get("email"),"payment_status":"paid" if settings.demo_mode else "pending","sales_recorded":False,"checkout_cancel_path":f"/messages/{conversation_id}"})
     if not settings.demo_mode:
+        if settings.stripe_connection_mode == "live_financial":
+            try:
+                session = await execute_live_checkout(database_store, store, stripe, settings, session_service, request, order)
+            except FinanceConflict:
+                with store._lock:
+                    if order in store.orders: store.orders.remove(order)
+                    proposal["status"] = "open"
+                raise HTTPException(409, "見積りと決済の状態を確認できません。取引履歴を確認してください") from None
+            return payment_handoff(request, session["url"])
         try: session = await stripe.create_checkout(order, account["account_id"])
         except RuntimeError as exc:
             with store._lock:
@@ -2757,12 +2832,13 @@ async def admin(request: Request, section: str = "overview"):
     if section == "finance":
         values.update(live_payout_execution_ready=live_finance_route_ready("payouts"),
             live_recovery_ready=live_finance_route_ready(),
+            live_payout_release_reviews={sid:account.get("live_payout_release_review", {}) for sid,account in store.connected_accounts.items()},
             refund_execution_ready=bool(database_store and (sandbox_payouts_ready(settings)
                 or live_finance_route_ready("refunds")) and len(set(settings.admin_user_ids)) >= 2))
         values.update(finance=store.finance_snapshot(ledger=bool(database_store)), finance_controls_ready=settings.demo_mode or sandbox_payouts_ready(settings), payout_labels=PAYOUT_LABELS,
             payment_recoveries=await payment_recovery_inventory(database_store, store) if database_store else {"items": [], "truncated": False},
             paid_out_refunds=paid_out_refund_inventory(store, settings, database_store),
-            refund_resumptions=refund_resumption_inventory(store), payment_recovery_ready=bool(database_store and sandbox_payouts_ready(settings) and len(set(settings.admin_user_ids)) >= 2),
+            refund_resumptions=refund_resumption_inventory(store), payment_recovery_ready=bool(database_store and (sandbox_payouts_ready(settings) or live_finance_route_ready()) and len(set(settings.admin_user_ids)) >= 2),
             refund_live_inspection_available=bool(database_store and not settings.demo_mode
                 and settings.stripe_charge_mode == "separate" and stripe.financial_scope
                 and stripe.financial_scope.mode == "live" and len(set(settings.admin_user_ids)) >= 2))
@@ -2839,9 +2915,23 @@ async def admin_reconcile_payment(request: Request, order_id: str, kind: str, ac
 
 
 @app.post("/admin/sellers/{seller_id}/payouts/{action}")
-async def admin_seller_payout_hold(request: Request, seller_id: str, action: str):
+async def admin_seller_payout_hold(request: Request, seller_id: str, action: str, proposal_id: str = Form("")):
     user = current_user(request)
-    if not is_admin(user) or action not in {"hold", "release"}: raise HTTPException(403)
+    if not is_admin(user) or action not in {"hold", "release", "release-approve"}: raise HTTPException(403)
+    if live_finance_route_ready():
+        if not mfa.recent(request):
+            return RedirectResponse("/security/mfa?next=%2Fadmin%3Fsection%3Dfinance", 303)
+        try:
+            if action == "hold":
+                await hold_live_seller_payouts(database_store, store, stripe, settings, seller_id, user["id"], mfa=mfa, request=request)
+            elif action == "release":
+                await propose_live_seller_release(database_store, store, stripe, settings, seller_id, user["id"], mfa=mfa, request=request)
+            else:
+                await approve_live_seller_release(database_store, store, stripe, settings, seller_id, user["id"], proposal_id, mfa=mfa, request=request)
+        except (FinanceConflict, RuntimeError, TimeoutError):
+            raise HTTPException(409, "振込保留・解除の口座と承認を確認できません。操作履歴を確認してください") from None
+        return RedirectResponse("/admin?section=finance", 303)
+    if action == "release-approve": raise HTTPException(409)
     if not settings.demo_mode and not sandbox_payouts_ready(settings):
         raise HTTPException(503, "本番の振込保留はStripe Connectと金融台帳を接続した後に有効化されます")
     if not any(order.get("seller_id") == seller_id for order in store.orders): raise HTTPException(404)
@@ -2861,6 +2951,16 @@ async def admin_seller_payout_hold(request: Request, seller_id: str, action: str
 async def admin_cancel_payout(request: Request, payout_id: str):
     user = current_user(request)
     if not is_admin(user): raise HTTPException(403)
+    if live_finance_route_ready():
+        if not mfa.recent(request):
+            return RedirectResponse("/security/mfa?next=%2Fadmin%3Fsection%3Dfinance", 303)
+        payout = next((p for p in store.payouts if p["id"] == payout_id and p.get("finance_v2")), None)
+        if not payout: raise HTTPException(404)
+        try:
+            await cancel_unstarted_live_payout(database_store, store, stripe, settings, payout, user["id"], mfa=mfa, request=request)
+        except (FinanceConflict, RuntimeError):
+            raise HTTPException(409, "処理開始済みの振込はここで取り消せません。元の申請を照合してください") from None
+        return RedirectResponse("/admin?section=finance", 303)
     if not database_store or not sandbox_payouts_ready(settings):
         raise HTTPException(409, "分配取消は接続済みのテスト環境のみ操作できます")
     payout = next((p for p in store.payouts if p["id"] == payout_id and p.get("finance_v2")), None)
@@ -2925,20 +3025,25 @@ async def admin_recover_failed_payout(request: Request, payout_id: str, action: 
     user = current_user(request)
     if not is_admin(user) or action not in {"propose", "approve"}:
         raise HTTPException(403)
-    if not database_store or not sandbox_payouts_ready(settings):
-        raise HTTPException(409, "振込失敗の復旧は接続済みのテスト環境のみ操作できます")
+    if not database_store or not (sandbox_payouts_ready(settings) or live_finance_route_ready()):
+        raise HTTPException(409, "振込失敗の照合接続が有効ではありません")
     if not mfa.recent(request):
         return RedirectResponse("/security/mfa?next=/admin", 303)
     payout = next((p for p in store.payouts if p["id"] == payout_id and p.get("finance_v2")), None)
     if not payout:
         raise HTTPException(404)
     try:
-        if action == "propose":
+        if live_finance_route_ready():
+            if action == "propose":
+                await propose_live_failed_payout(database_store, store, stripe, settings, payout, user["id"], mfa=mfa, request=request)
+            else:
+                await approve_live_failed_payout(database_store, store, stripe, settings, payout, user["id"], proposal_id, mfa=mfa, request=request)
+        elif action == "propose":
             await propose_failed_payout(database_store, store, stripe, settings, payout, user["id"])
         else:
             await approve_failed_payout(database_store, store, stripe, settings, payout, user["id"], proposal_id)
-    except (FinanceConflict, RuntimeError) as exc:
-        raise HTTPException(409, str(exc)) from None
+    except (FinanceConflict, RuntimeError):
+        raise HTTPException(409, "振込失敗の照合・承認を確認できません。再送せず運営で確認してください") from None
     return RedirectResponse("/admin?section=finance", 303)
 
 
@@ -3150,7 +3255,7 @@ async def deployment_health():
     # Allows a secure DB/Auth staging build to start before money movement is
     # approved. /readyz remains the independent, strict public launch verdict.
     connected = await deployment_database_check(settings, database_store)
-    return JSONResponse({"status": "ok" if connected else "unavailable", "live_payments_enabled": False},
+    return JSONResponse({"status": "ok" if connected else "unavailable", "live_payments_enabled": bool(connected and checkout_configuration_ready(settings))},
                         status_code=200 if connected else 503, headers={"Cache-Control": "no-store"})
 
 

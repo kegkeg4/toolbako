@@ -15,7 +15,9 @@ from fastapi.testclient import TestClient
 
 from app.config import Settings
 from app.data import DemoStore
-from app.database import snapshot, restore
+from app.database import snapshot, restore, content_hash
+from app.live_checkout import checkout_request_data, checkout_metadata, session_receipt, ACCOUNT_FIELD
+from datetime import datetime, timezone
 from app.financial_scope import FinancialScope, FinancialScopeError
 from app.finance import FinanceConflict
 from app.integrations import StripeIntegration
@@ -72,6 +74,10 @@ class MemoryBoundary:
 
     async def operation_result(self, operation_id):
         return self.operations.get(operation_id)
+
+    async def operation_details(self, operation_id):
+        result = self.operations.get(operation_id)
+        return result and {key: result[key] for key in ("endpoint", "request_hash", "status", "created_at")}
 
     async def save(self):
         if self.fail_save:
@@ -131,7 +137,8 @@ def seed():
     store.tools = [{"id": "tool", "slug": "tool", "sales_count": 0}]
     store.orders = [{"id": "order_source", "seller_id": "seller", "buyer_id": "buyer", "tool_name": "Synthetic",
         "tool_slug": "tool", "amount": 1000, "platform_fee": 200, "status": "in_progress",
-        "payment_status": "pending", "checkout_session_id": "cs_live_fixture", "billing_type": "one_time"}]
+        "payment_status": "pending", "checkout_session_id": "cs_live_fixture", "billing_type": "one_time",
+        ACCOUNT_FIELD: "acct_seller"}]
     return store
 
 
@@ -149,7 +156,10 @@ def event(kind="account.updated", obj=None, *, identifier="evt_fixture"):
 def checkout(status="complete", paid="paid"):
     return {"object": "checkout.session", "id": "cs_live_fixture", "livemode": True,
             "currency": "jpy", "amount_total": 1000, "mode": "payment", "status": status,
-            "payment_status": paid, "payment_intent": "pi_source", "metadata": {"order_id": "order_source"}}
+            "payment_status": paid, "payment_intent": "pi_source", "metadata": checkout_metadata(SCOPE, seed().orders[0]),
+            "created": 100, "expires_at": 86500,
+            "success_url": "https://toolbako.example/orders/order_source?payment=success",
+            "cancel_url": "https://toolbako.example/checkout/tool?payment=cancelled", "url": None}
 
 
 def build_app(handler, settings):
@@ -171,6 +181,9 @@ def fixture(monkeypatch):
     backend = MemoryBoundary(store)
     provider = StripeIntegration(settings.stripe_secret_key, settings.site_base_url,
         charge_mode="separate", api_version=settings.stripe_api_version, journal=backend, financial_scope=SCOPE)
+    key, data = checkout_request_data(provider, SCOPE, store.orders[0])
+    backend.operations[key] = {"endpoint": "checkout/sessions", "request_hash": content_hash(data),
+        "status": "succeeded", "created_at": datetime.fromtimestamp(100, timezone.utc), "response": session_receipt(checkout())}
     handler = build_live_webhook_handler(settings, store, backend, provider)
     assert handler is not None
     return build_app(handler, settings), store, backend, provider, responses, handler
@@ -197,7 +210,10 @@ def checkout_evidence(responses, *, kind="checkout.session.completed", status="c
     notification = event(kind, obj, identifier=identifier)
     responses.event(notification)
     responses.objects[("checkout/sessions/cs_live_fixture", None)] = obj
-    responses.objects[("payment_intents/pi_source", None)] = source("live")
+    payment = source("live")
+    payment["metadata"] = deepcopy(obj["metadata"])
+    payment["latest_charge"]["metadata"] = deepcopy(obj["metadata"])
+    responses.objects[("payment_intents/pi_source", None)] = payment
     return notification
 
 
@@ -378,7 +394,7 @@ def test_checkout_amount_parent_and_mapping_mismatches_are_not_receipts(fixture,
     elif fault == "wrong_order": payment["metadata"]["order_id"] = "other"
     else: payment["latest_charge"]["amount_refunded"] = 1000
     assert deliver(client, notification, path=PLATFORM_PATH, secret=SECRET).status_code == (
-        503 if fault == "test_parent" else 409 if fault in {"wrong_charge", "refunded_before_receipt"} else 400)
+        503 if fault == "test_parent" else 409 if fault in {"wrong_charge", "refunded_before_receipt", "wrong_order"} else 400)
     assert store.orders[0]["payment_status"] == "pending" and not store.processed_webhook_events
 
 
