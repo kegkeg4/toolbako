@@ -126,3 +126,15 @@ def test_existing_inquiry_navigation_takes_priority_after_a_block(
     assert f'/transfer-inquiries/{inquiry["id"]}' in actions.links
     assert "相談を受付済みです" in response.text
     assert "この販売者とは現在取引できません" not in response.text
+
+
+@pytest.mark.parametrize("rating, label", [(None, "新着"), (4.7, "4.7")])
+def test_transfer_rating_matches_existing_product_card_fallback(
+    transfer_page, rating, label,
+):
+    client, _, tool, _, _, _ = transfer_page
+    tool["rating"] = rating
+    response = client.get(f'/tools/{tool["slug"]}/transfer')
+    assert response.status_code == 200
+    assert f"<span>★ {label}</span>" in response.text
+    assert "★ None" not in response.text
