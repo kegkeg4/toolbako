@@ -56,7 +56,7 @@ def test_password_validation_keeps_private_recovery_form_without_provider_call(c
     assert 'action="/auth/recovery"' in response.text
     assert token not in str(response.headers)
     assert "no-store" in response.headers["cache-control"]
-    assert response.headers["referrer-policy"] == "no-referrer"
+    assert response.headers["referrer-policy"] == "strict-origin"
 
 
 def test_prefetch_does_not_consume_token_or_create_login(confirmation):
@@ -66,7 +66,7 @@ def test_prefetch_does_not_consume_token_or_create_login(confirmation):
     assert response.status_code == 200 and not calls
     assert TOKEN not in response.text and TOKEN not in response.headers.get("set-cookie", "")
     assert main.store.account_sessions == before
-    assert response.headers["referrer-policy"] == "no-referrer"
+    assert response.headers["referrer-policy"] == "strict-origin"
     assert "no-store" in response.headers["cache-control"]
     assert 'data-email-confirmation-form hidden' in response.text
 
@@ -91,7 +91,7 @@ def test_recovery_keeps_access_token_in_private_form_not_redirect_or_cookie(conf
     assert 'value="test-access-' in response.text
     assert "test-access-" not in str(response.headers)
     assert "no-store" in response.headers["cache-control"]
-    assert response.headers["referrer-policy"] == "no-referrer"
+    assert response.headers["referrer-policy"] == "strict-origin"
     assert TOKEN not in response.text
 
 

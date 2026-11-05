@@ -2281,16 +2281,19 @@ async def forgot_password_submit(request: Request, email: str = Form(...)):
 
 @app.get("/auth/recovery", response_class=HTMLResponse)
 async def password_recovery(request: Request):
-    return templates.TemplateResponse(request, "password_recovery.html", context(request, error=None))
+    return templates.TemplateResponse(request, "password_recovery.html", context(request, error=None),
+                                      headers={"Referrer-Policy": "strict-origin"})
 
 
 @app.get("/auth/confirm", response_class=HTMLResponse)
 async def email_confirmation(request: Request):
     # Email tokens arrive in the URL fragment, never in our request URL/logs.
     # Loading the page (including a mail scanner's prefetch) consumes no token.
+    # Native form POSTs under no-referrer carry Origin: null and fail our origin
+    # guard. strict-origin preserves the origin without exposing paths or tokens.
     csrf = request.session.setdefault("mail_confirm_csrf", secrets.token_urlsafe(32))
     return templates.TemplateResponse(request, "email_confirmation.html", context(request, confirmation_csrf=csrf),
-                                      headers={"Referrer-Policy": "no-referrer"})
+                                      headers={"Referrer-Policy": "strict-origin"})
 
 
 @app.post("/auth/confirm", response_class=HTMLResponse)
@@ -2315,7 +2318,7 @@ async def email_confirmation_submit(request: Request, token_hash: str = Form("")
     if not valid_user:
         return templates.TemplateResponse(request, "email_confirmation.html",
                                           context(request, confirmation_error="リンクが無効または期限切れです。登録・再設定の案内からやり直してください。"),
-                                          status_code=400, headers={"Referrer-Policy": "no-referrer"})
+                                          status_code=400, headers={"Referrer-Policy": "strict-origin"})
     if confirmation_type == "signup":
         # Confirmation alone must not create an application login/admin session.
         return RedirectResponse("/login?email_confirmed=1", 303, headers={"Referrer-Policy": "no-referrer"})
@@ -2324,7 +2327,7 @@ async def email_confirmation_submit(request: Request, token_hash: str = Form("")
         raise HTTPException(400, "再設定リンクが無効です。再設定メールをもう一度送信してください。")
     # Keep recovery credentials out of redirects, cookies and persistent state.
     return templates.TemplateResponse(request, "password_recovery.html", context(request, error=None, recovery_access_token=access_token),
-                                      headers={"Referrer-Policy": "no-referrer"})
+                                      headers={"Referrer-Policy": "strict-origin"})
 
 
 @app.post("/auth/recovery", response_class=HTMLResponse)
@@ -2335,7 +2338,7 @@ async def password_recovery_submit(request: Request, access_token: str = Form(..
         return templates.TemplateResponse(request, "password_recovery.html", context(request,
                                           error="パスワードは10文字以上で、確認欄と同じ内容を入力してください。",
                                           recovery_access_token=access_token if 20 <= len(access_token) <= 4096 else ""),
-                                          status_code=422, headers={"Referrer-Policy": "no-referrer"})
+                                          status_code=422, headers={"Referrer-Policy": "strict-origin"})
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             result = await client.put(
@@ -2346,7 +2349,8 @@ async def password_recovery_submit(request: Request, access_token: str = Form(..
     except httpx.HTTPError:
         result = None
     if not result or result.status_code >= 400:
-        return templates.TemplateResponse(request, "password_recovery.html", context(request, error="再設定リンクが無効または期限切れです。もう一度メールを送信してください。"), status_code=400)
+        return templates.TemplateResponse(request, "password_recovery.html", context(request, error="再設定リンクが無効または期限切れです。もう一度メールを送信してください。"),
+                                          status_code=400, headers={"Referrer-Policy": "strict-origin"})
     auth_user = result.json()
     if auth_user.get("id"):
         revoke_user_sessions(auth_user["id"])
