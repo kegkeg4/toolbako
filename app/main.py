@@ -5,6 +5,7 @@ import base64
 import hashlib
 import hmac
 import io
+import logging
 import re
 import secrets
 import time
@@ -38,6 +39,7 @@ from .config import settings
 from .data import AI_OPTIONS, CATEGORIES, DIST_LABELS, PRICE_LABELS, TRANSFER_ASSET_LABELS, TRANSFER_STATUS_LABELS, store
 from .ogp import generate_og, generate_site_og
 from .middleware import ProductionGuardMiddleware
+from .password_recovery import RecoveryMFAError, recovery_mfa_factors, valid_factor_id, valid_recovery_token, verify_recovery_mfa
 from .migration_maintenance import MigrationMaintenanceMiddleware
 from .monitoring import initialize_monitoring
 from .security_services import SecurityServiceMonitor, unchecked_snapshot
@@ -2334,11 +2336,25 @@ async def email_confirmation_submit(request: Request, token_hash: str = Form("")
 async def password_recovery_submit(request: Request, access_token: str = Form(...), password: str = Form(...), password_confirmation: str = Form(...)):
     if not settings.supabase_ready:
         raise HTTPException(503, "パスワード再設定基盤が未設定です")
-    if not 10 <= len(password) <= 128 or password != password_confirmation or not 20 <= len(access_token) <= 4096:
-        return templates.TemplateResponse(request, "password_recovery.html", context(request,
-                                          error="パスワードは10文字以上で、確認欄と同じ内容を入力してください。",
-                                          recovery_access_token=access_token if 20 <= len(access_token) <= 4096 else ""),
-                                          status_code=422, headers={"Referrer-Policy": "strict-origin"})
+
+    provider_status = 0
+
+    def failed(message: str, status: int, category: str, *, retry_token: bool = False):
+        # Categories are fixed below. Never log credentials, response messages,
+        # request bodies, user IDs, or exception text from the Auth service.
+        logging.getLogger("toolbako.auth").warning(
+            "password_recovery_result category=%s provider_status=%d", category, provider_status)
+        return templates.TemplateResponse(request, "password_recovery.html",
+            context(request, error=message, recovery_access_token=access_token if retry_token else ""),
+            status_code=status, headers={"Referrer-Policy": "strict-origin"})
+
+    if not valid_recovery_token(access_token):
+        return failed("再設定リンクを確認できません。再設定メールから開き直してください。", 400, "invalid_token_input")
+    if not 10 <= len(password) <= 128 or password != password_confirmation:
+        return failed("パスワードは10文字以上で、確認欄と同じ内容を入力してください。",
+                      422, "password_input", retry_token=True)
+
+    unknown_message = "更新結果を確認できません。入力した新しいパスワードでログインできるか確認してください。ログインできない場合は、時間をおいて再設定をやり直してください。"
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             result = await client.put(
@@ -2348,15 +2364,120 @@ async def password_recovery_submit(request: Request, access_token: str = Form(..
             )
     except httpx.HTTPError:
         result = None
-    if not result or result.status_code >= 400:
-        return templates.TemplateResponse(request, "password_recovery.html", context(request, error="再設定リンクが無効または期限切れです。もう一度メールを送信してください。"),
-                                          status_code=400, headers={"Referrer-Policy": "strict-origin"})
-    auth_user = result.json()
-    if auth_user.get("id"):
-        revoke_user_sessions(auth_user["id"])
-        store.audit(auth_user["id"], "account.password_recovered", auth_user.get("email", ""), request.headers.get("x-request-id", ""))
+    if result is None:
+        return failed(unknown_message, 503, "outcome_unknown")
+    provider_status = result.status_code if 100 <= result.status_code <= 599 else 0
+    if result.status_code >= 500 or not 200 <= result.status_code < 500:
+        return failed(unknown_message, 503, "outcome_unknown")
+    try:
+        payload = result.json()
+    except ValueError:
+        payload = None
+
+    if 200 <= result.status_code < 300:
+        if not isinstance(payload, dict) or not isinstance(payload.get("id"), str) or not payload["id"].strip():
+            return failed(unknown_message, 503, "outcome_unknown")
+    elif 300 <= result.status_code < 400:
+        return failed(unknown_message, 503, "outcome_unknown")
+    else:
+        # Supabase uses error_code in its initial API and string code in the
+        # 2024-01-01 API. Do not infer categories from prose or nested details.
+        codes = {payload[field] for field in ("code", "error_code")
+                 if isinstance(payload, dict) and isinstance(payload.get(field), str)}
+        code = next(iter(codes)) if len(codes) == 1 else ""
+        if result.status_code == 429:
+            return failed("操作が混み合っています。時間をおいてから、もう一度入力して更新してください。",
+                          429, "rate_limited", retry_token=True)
+        if result.status_code in {400, 422} and code == "same_password":
+            return failed("現在と異なる新しいパスワードを入力してください。", 422, "same_password", retry_token=True)
+        if result.status_code in {400, 422} and code == "weak_password":
+            return failed("パスワードが安全性の条件を満たしていません。推測されにくい別のパスワードを入力してください。",
+                          422, "weak_password", retry_token=True)
+        if code in {"bad_jwt", "session_expired", "session_not_found"}:
+            return failed("再設定の認証が無効または期限切れです。再設定メールをもう一度送信してください。", 400, "invalid_session")
+        if code == "insufficient_aal":
+            logging.getLogger("toolbako.auth").warning(
+                "password_recovery_result category=insufficient_aal provider_status=%d", provider_status)
+            return await recovery_mfa_page(request, access_token)
+        if code in {"reauthentication_needed", "reauthentication_not_valid"}:
+            return failed("追加の本人確認が必要なため、パスワードを更新できませんでした。ログインして本人確認を行うか、運営へお問い合わせください。",
+                          403, "reauthentication_required")
+        if code == "user_banned":
+            return failed("このアカウントではパスワードの更新を受け付けられません。運営へお問い合わせください。", 403, "account_restricted")
+        return failed("パスワードの更新を受け付けられませんでした。ログインできるか確認し、解決しない場合は運営へお問い合わせください。",
+                      400, "provider_rejected")
+
+    revoke_user_sessions(payload["id"])
+    store.audit(payload["id"], "account.password_recovered", payload.get("email", ""), request.headers.get("x-request-id", ""))
     request.session.clear()
     return RedirectResponse("/login?password_reset=1", 303)
+
+
+async def recovery_mfa_page(request: Request, access_token: str, *, error: str | None = None,
+                            status: int = 200, started_at: int | None = None):
+    """Render a recovery-only challenge; no app session or provider token saved."""
+    factors = []
+    try:
+        async with asyncio.timeout(15):
+            factors = await recovery_mfa_factors(settings, access_token)
+    except (RecoveryMFAError, TimeoutError):
+        error, status = "追加の本人確認を開始できません。時間をおいて再設定をやり直すか、運営へお問い合わせください。", 403
+    now = int(time.time())
+    started_at = now if started_at is None else started_at
+    if not factors or not 0 <= now - started_at < 600:
+        request.session.pop("recovery_mfa", None)
+        return templates.TemplateResponse(request, "password_recovery_mfa.html",
+            context(request, error=error or "利用できる認証アプリを確認できません。運営へお問い合わせください。",
+                    recovery_factors=[], recovery_access_token="", recovery_mfa_csrf=""),
+            status_code=403, headers={"Referrer-Policy": "strict-origin"})
+    nonce = secrets.token_urlsafe(32)
+    request.session["recovery_mfa"] = {"csrf": nonce, "started_at": started_at}
+    return templates.TemplateResponse(request, "password_recovery_mfa.html",
+        context(request, error=error, recovery_factors=factors, recovery_access_token=access_token,
+                recovery_mfa_csrf=nonce), status_code=status, headers={"Referrer-Policy": "strict-origin"})
+
+
+@app.post("/auth/recovery/mfa", response_class=HTMLResponse)
+async def password_recovery_mfa_submit(request: Request, access_token: str = Form(""),
+                                       recovery_mfa_csrf: str = Form(""), factor_id: str = Form(""), code: str = Form("")):
+    pending = request.session.get("recovery_mfa")
+    expected = pending.get("csrf") if isinstance(pending, dict) else None
+    started_at = pending.get("started_at") if isinstance(pending, dict) else None
+    if (not isinstance(expected, str) or not re.fullmatch(r"[A-Za-z0-9_-]{43}", expected)
+            or not re.fullmatch(r"[A-Za-z0-9_-]{43}", recovery_mfa_csrf)
+            or not hmac.compare_digest(expected, recovery_mfa_csrf)):
+        raise HTTPException(403, "本人確認の画面から操作をやり直してください。")
+    if type(started_at) is not int or not 0 <= int(time.time()) - started_at < 600:
+        request.session.pop("recovery_mfa", None)
+        raise HTTPException(403, "本人確認の時間を過ぎました。再設定をやり直してください。")
+    if not valid_recovery_token(access_token):
+        raise HTTPException(400, "再設定の認証情報を確認できません。")
+    if not valid_factor_id(factor_id) or not re.fullmatch(r"[0-9]{6}", code):
+        return await recovery_mfa_page(request, access_token, error="認証アプリの6桁の数字を入力してください。",
+                                       status=422, started_at=started_at)
+    # A matched, valid submission is one-use. Rejected/missing CSRF above must
+    # not consume the legitimate browser's current flow.
+    request.session.pop("recovery_mfa", None)
+    try:
+        async with asyncio.timeout(40):
+            upgraded = await verify_recovery_mfa(settings, access_token, factor_id, code)
+        if not 0 <= int(time.time()) - started_at < 600:
+            raise RecoveryMFAError("flow_expired")
+    except (RecoveryMFAError, TimeoutError) as exc:
+        if isinstance(exc, RecoveryMFAError) and exc.retry:
+            message = ("認証回数が多くなっています。時間をおいて入力してください。" if exc.category == "rate_limited"
+                       else "認証を確認できませんでした。認証アプリの新しい6桁の数字を入力してください。")
+            return await recovery_mfa_page(request, access_token, error=message,
+                status=429 if exc.category == "rate_limited" else 400, started_at=started_at)
+        return templates.TemplateResponse(request, "password_recovery_mfa.html",
+            context(request, error="追加の本人確認を完了できませんでした。再設定をやり直すか、運営へお問い合わせください。",
+                    recovery_factors=[], recovery_access_token="", recovery_mfa_csrf=""),
+            status_code=403, headers={"Referrer-Policy": "strict-origin"})
+    # MFA proves only recovery authority. Password update still requires the
+    # person's next form submission; no app login/privileged MFA state is made.
+    return templates.TemplateResponse(request, "password_recovery.html",
+        context(request, error=None, recovery_access_token=upgraded),
+        headers={"Referrer-Policy": "strict-origin"})
 
 
 @app.post("/signup")

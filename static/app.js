@@ -261,18 +261,46 @@ if (confirmationForm) {
 
 const recoveryForm = document.querySelector('[data-recovery-form]');
 if (recoveryForm) {
-  const hash = new URLSearchParams(location.hash.slice(1));
-  const suppliedToken = recoveryForm.querySelector('[data-recovery-token]').value;
-  const token = suppliedToken || hash.get('access_token');
-  const recoveryType = hash.get('type');
+  const tokenInput = recoveryForm.querySelector('[data-recovery-token]');
   const error = document.querySelector('[data-recovery-error]');
-  if (token && (suppliedToken || recoveryType === 'recovery')) {
-    recoveryForm.querySelector('[data-recovery-token]').value = token;
+  const serverError = document.querySelector('[data-recovery-server-error]');
+  const validToken = token => typeof token === 'string' && token.length >= 20 && token.length <= 4096;
+  const clearPasswords = () => recoveryForm.querySelectorAll('[data-password-input]').forEach(input => { input.value = ''; });
+  const loadRecoveryLink = (useSuppliedToken = false) => {
+    const hash = new URLSearchParams(location.hash.slice(1));
+    const suppliedToken = useSuppliedToken ? tokenInput.value : '';
+    const fragmentToken = hash.get('access_token');
+    const validFragment = hash.getAll('access_token').length === 1 && hash.getAll('type').length === 1
+      && hash.get('type') === 'recovery' && validToken(fragmentToken)
+      && !['error', 'error_code', 'error_description', 'token_hash'].some(key => hash.has(key));
+    const token = validToken(suppliedToken) ? suppliedToken : validFragment ? fragmentToken : '';
+    // Strip successful and failed fragments without copying any credential to storage.
     history.replaceState(null, '', location.pathname);
-  } else {
-    recoveryForm.hidden = true;
-    error.hidden = false;
-  }
+    clearPasswords();
+    if (!useSuppliedToken && serverError) serverError.hidden = true;
+    tokenInput.value = token;
+    recoveryForm.hidden = !token;
+    // The server's classified error already explains this attempt.
+    error.hidden = Boolean(token || (serverError && !serverError.hidden));
+  };
+  loadRecoveryLink(true);
+  window.addEventListener('hashchange', () => {
+    const hash = new URLSearchParams(location.hash.slice(1));
+    if (['access_token', 'type', 'token_hash', 'error', 'error_code', 'error_description'].some(key => hash.has(key))) {
+      loadRecoveryLink();
+    } else if (location.hash) {
+      history.replaceState(null, '', location.pathname);
+    }
+  });
+  window.addEventListener('pageshow', event => { if (event.persisted) clearPasswords(); });
+}
+
+const recoveryMfaForm = document.querySelector('[data-recovery-mfa-form]');
+if (recoveryMfaForm) {
+  // Leave one-time-code autofill intact; clear only stale back/forward state.
+  window.addEventListener('pageshow', event => {
+    if (event.persisted) recoveryMfaForm.querySelector('[data-recovery-mfa-code]').value = '';
+  });
 }
 
 const chatMessages = document.querySelector('[data-chat-messages]');
