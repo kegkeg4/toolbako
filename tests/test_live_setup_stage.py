@@ -123,6 +123,6 @@ def test_route_preserves_executor_outcomes_and_safe_handoff(account_action, link
         assert response.status_code == expected and 'no-store' in response.headers['cache-control']
         if expected == 303: assert response.headers['location'] == '/seller/payments?connected=1'
         else:
-            assert response.headers['referrer-policy'] == 'no-referrer'
+            assert response.headers['referrer-policy'] == 'strict-origin'
             assert b'https://connect.stripe.com/setup/synthetic' in response.body
     assert calls == (['account'] if link_action is None else ['account','link'])

@@ -126,7 +126,7 @@ def test_connect_route_reuses_account_and_finishes_form_locally(monkeypatch):
         assert "location" not in response.headers
         assert 'href="https://connect.stripe.com/setup/test"' in response.text
         assert "form-action 'self'" in response.headers["content-security-policy"]
-        assert response.headers["referrer-policy"] == "no-referrer"
+        assert response.headers["referrer-policy"] == "strict-origin"
         assert "no-store" in response.headers["cache-control"]
     assert calls == ["create", "link", "link"]
 

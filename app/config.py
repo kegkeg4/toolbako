@@ -42,8 +42,9 @@ class Settings:
     canonical_redirect_hosts: tuple[str, ...] = tuple(x.strip().lower() for x in os.getenv("CANONICAL_REDIRECT_HOSTS", "").split(",") if x.strip())
     session_max_age: int = int(os.getenv("SESSION_MAX_AGE", "604800"))
     asset_version: str = os.getenv("ASSET_VERSION", "20261019-public-audit2")
-    # Delivery files support 50 MB; leave room for multipart metadata.
-    max_request_bytes: int = int(os.getenv("MAX_REQUEST_BYTES", "52500000"))
+    # Listing forms allow a 50 MB delivery plus a 5 MB image in one upload.
+    # Retain the 2.5 MB multipart/text allowance; individual file caps stay fixed.
+    max_request_bytes: int = int(os.getenv("MAX_REQUEST_BYTES", "57500000"))
     rate_limit_per_minute: int = int(os.getenv("RATE_LIMIT_PER_MINUTE", "120"))
     auth_rate_limit_per_minute: int = int(os.getenv("AUTH_RATE_LIMIT_PER_MINUTE", "10"))
     redis_url: str = os.getenv("REDIS_URL", "").strip()

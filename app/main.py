@@ -797,7 +797,7 @@ def payment_handoff(request: Request, destination: str, *, onboarding: bool = Fa
         raise HTTPException(502, "決済サービスの移動先を確認できませんでした")
     return templates.TemplateResponse(request, "payment_handoff.html",
         context(request, destination=destination, onboarding=onboarding),
-        headers={"Cache-Control": "no-store, private", "Referrer-Policy": "no-referrer"})
+        headers={"Cache-Control": "no-store, private", "Referrer-Policy": "strict-origin"})
 
 
 @app.get("/checkout/{slug}", response_class=HTMLResponse)
@@ -1984,7 +1984,7 @@ def identity_handoff(request: Request, destination: str):
     # form-action 'self'. Finish the POST locally, then navigate via a link.
     # Callers must first validate the provider URL, session and owner.
     return templates.TemplateResponse(request, "identity_handoff.html", context(request, destination=destination),
-                                      headers={"Cache-Control": "no-store, private", "Referrer-Policy": "no-referrer"})
+                                      headers={"Cache-Control": "no-store, private", "Referrer-Policy": "strict-origin"})
 
 
 @app.post("/verification/start")
@@ -2419,10 +2419,19 @@ async def demo_login(request: Request, next: str = "/"):
 @app.get("/auth/callback", response_class=HTMLResponse)
 async def auth_callback(request: Request, code: str = "", state: str = "", next: str = "/", error: str = ""):
     """Complete social login server-side using one-time PKCE credentials."""
-    expected_state = str(request.session.pop("oauth_state", ""))
-    code_verifier = str(request.session.pop("oauth_code_verifier", ""))
-    if error or not code or not code_verifier or not expected_state or not hmac.compare_digest(state, expected_state):
-        return templates.TemplateResponse(request, "auth_callback.html", context(request, auth_error="ログインを確認できませんでした。最初からやり直してください。"), status_code=400)
+    callback_headers = {"Referrer-Policy": "strict-origin"}
+    expected_state = str(request.session.get("oauth_state", ""))
+    code_verifier = str(request.session.get("oauth_code_verifier", ""))
+    # An older tab or unrelated callback must not consume the latest flow.
+    # Matching callbacks are still consumed before any provider request.
+    state_matches = (bool(expected_state) and state.isascii() and expected_state.isascii()
+                     and hmac.compare_digest(state, expected_state))
+    if not state_matches:
+        return templates.TemplateResponse(request, "auth_callback.html", context(request, auth_error="ログインを確認できませんでした。最初からやり直してください。"), status_code=400, headers=callback_headers)
+    request.session.pop("oauth_state", None)
+    request.session.pop("oauth_code_verifier", None)
+    if error or not code or not code_verifier:
+        return templates.TemplateResponse(request, "auth_callback.html", context(request, auth_error="ログインを確認できませんでした。最初からやり直してください。"), status_code=400, headers=callback_headers)
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             token_response = await client.post(
@@ -2443,7 +2452,7 @@ async def auth_callback(request: Request, code: str = "", state: str = "", next:
         auth_user = {}
     profiles = profile_response.json() if profile_response is not None and profile_response.status_code == 200 else []
     if token_response is None or token_response.status_code != 200 or not profiles or profiles[0].get("is_banned"):
-        return templates.TemplateResponse(request, "auth_callback.html", context(request, auth_error="アカウントを確認できませんでした。運営へお問い合わせください。"), status_code=403)
+        return templates.TemplateResponse(request, "auth_callback.html", context(request, auth_error="アカウントを確認できませんでした。運営へお問い合わせください。"), status_code=403, headers=callback_headers)
     metadata = auth_user.get("user_metadata") or {}; profile = profiles[0]
     session_user = {
         "id":auth_user["id"],
@@ -2472,7 +2481,7 @@ async def auth_callback(request: Request, code: str = "", state: str = "", next:
     store.audit(session_user["id"], "account.oauth_logged_in", session_user["username"], request.headers.get("x-request-id", ""))
     mfa.attach_tokens(request, token_data)
     await persist_state()
-    return RedirectResponse(safe_next(next), 303)
+    return RedirectResponse(safe_next(next), 303, headers=callback_headers)
 
 
 @app.post("/auth/session")
@@ -2867,7 +2876,7 @@ async def admin(request: Request, section: str = "overview"):
 
 @app.post("/admin/orders/{order_id}/refund-inspection", response_class=HTMLResponse)
 async def admin_inspect_live_refund(request: Request, order_id: str):
-    headers = {"Cache-Control": "no-store, private", "Referrer-Policy": "no-referrer"}
+    headers = {"Cache-Control": "no-store, private", "Referrer-Policy": "strict-origin"}
     if not is_admin(current_user(request)):
         raise HTTPException(403, "管理者のみアクセスできます", headers=headers)
     if not mfa.recent(request):

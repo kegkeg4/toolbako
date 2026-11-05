@@ -96,7 +96,7 @@ def test_resume_reuses_session_instead_of_creating_a_second_one(identity_route):
         assert 'href="https://verify.stripe.com/start/test"' in response.body.decode()
         assert 'data-identity-destination' in response.body.decode()
         assert response.headers['cache-control'] == 'no-store, private'
-        assert response.headers['referrer-policy'] == 'no-referrer'
+        assert response.headers['referrer-policy'] == 'strict-origin'
     assert calls==['create','retrieve']
 
 
@@ -109,7 +109,7 @@ def test_identity_post_finishes_locally_without_relaxing_csp(identity_route):
     assert 'href="https://verify.stripe.com/start/test"' in response.text
     assert '/static/identity-handoff.js?v=20261024-1' in response.text
     assert 'no-store' in response.headers['cache-control']
-    assert response.headers['referrer-policy'] == 'no-referrer'
+    assert response.headers['referrer-policy'] == 'strict-origin'
     assert main.store.identity_applications['identity-owner']['provider_reference']=='vs_owned'
     assert main.store.identity_applications['identity-owner']['status']=='pending'
     assert 'url' not in main.store.identity_applications['identity-owner']
