@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block main %}
+<section class="hero">
+  <h1>{{ site.tagline }}</h1>
+  <p>{{ site.description }}</p>
+</section>
+<h2 class="section-title">新着・更新記事</h2>
+{% include "_list.html" %}
+{% endblock %}

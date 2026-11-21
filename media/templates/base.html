@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}{{ site.name }}｜{{ site.tagline }}{% endblock %}</title>
+<meta name="description" content="{% block description %}{{ site.description }}{% endblock %}">
+{% if not site.production %}<meta name="robots" content="noindex,nofollow">{% endif %}
+<link rel="canonical" href="{{ site.url }}{{ path }}">
+<meta property="og:site_name" content="{{ site.name }}">
+<meta property="og:title" content="{{ self.title() }}">
+<meta property="og:description" content="{{ self.description() }}">
+<meta property="og:url" content="{{ site.url }}{{ path }}">
+<meta property="og:type" content="{% block og_type %}website{% endblock %}">
+<meta name="twitter:card" content="summary">
+<link rel="alternate" type="application/rss+xml" title="{{ site.name }}" href="/feed.xml">
+<link rel="stylesheet" href="/static/style.css">
+{% block head %}{% endblock %}
+</head>
+<body>
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="/">{{ site.name }}</a>
+    <nav aria-label="カテゴリ">
+      {% for slug, item in categories.items() %}<a href="/category/{{ slug }}/">{{ item.name }}</a>{% endfor %}
+    </nav>
+  </div>
+</header>
+<main class="wrap">
+{% block main %}{% endblock %}
+</main>
+<footer class="site-footer">
+  <div class="wrap">
+    <p>当サイトの一部の記事には広告（アフィリエイトリンク）が含まれます。広告を含む記事には、冒頭にその旨を表示しています。</p>
+    <nav aria-label="サイト情報">
+      {% for page in nav_pages %}<a href="{{ page.url }}">{{ page.title }}</a>{% endfor %}
+    </nav>
+    <small>© {{ year }} {{ site.operator.name or site.name }}</small>
+  </div>
+</footer>
+{% if site.production and site.analytics_token %}
+<script defer src="https://static.cloudflareinsights.com/beacon.min.js" data-cf-beacon='{"token": "{{ site.analytics_token }}"}'></script>
+{% endif %}
+</body>
+</html>

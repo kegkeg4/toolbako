@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block title %}{{ category.name }}の記事一覧｜{{ site.name }}{% endblock %}
+{% block description %}{{ category.description }}{% endblock %}
+{% block main %}
+<nav class="crumbs" aria-label="パンくず"><a href="/">ホーム</a> › {{ category.name }}</nav>
+<h1>{{ category.name }}</h1>
+<p class="lead">{{ category.description }}</p>
+{% include "_list.html" %}
+{% endblock %}

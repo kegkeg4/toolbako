@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}{{ article.title }}｜{{ site.name }}{% endblock %}
+{% block description %}{{ article.description }}{% endblock %}
+{% block og_type %}article{% endblock %}
+{% block head %}<script type="application/ld+json">{{ json_ld | safe }}</script>{% endblock %}
+{% block main %}
+<nav class="crumbs" aria-label="パンくず"><a href="/">ホーム</a> › <a href="/category/{{ article.category }}/">{{ category.name }}</a></nav>
+<article class="post">
+  {% if article.uses_affiliate %}
+  <p class="pr-note"><b>PR</b> この記事には広告（アフィリエイトリンク）が含まれます。</p>
+  {% endif %}
+  <h1>{{ article.title }}</h1>
+  <p class="meta">
+    <time datetime="{{ article.updated.isoformat() }}">{{ article.updated.strftime('%Y年%-m月%-d日') }} 更新</time>
+    <span>料金・仕様の確認日：{{ article.verified.strftime('%Y年%-m月%-d日') }}</span>
+  </p>
+  <p class="method">この記事は各サービスの公式サイト・公式ヘルプの公開情報をもとに作成しています{% if not article.hands_on %}（編集部による実機検証の記事ではありません）{% endif %}。料金や仕様は変わることがあるため、契約前に公式サイトで最新の内容をご確認ください。</p>
+  {% if article.toc %}
+  <nav class="toc" aria-label="目次">
+    <b>目次</b>
+    <ol>{% for item in article.toc %}<li><a href="#{{ item.id }}">{{ item.name }}</a></li>{% endfor %}</ol>
+  </nav>
+  {% endif %}
+  <div class="body">{{ article.content | safe }}</div>
+  <section class="sources">
+    <h2>出典</h2>
+    <ul>
+      {% for source in article.sources %}<li><a href="{{ source.url }}" rel="noopener" target="_blank">{{ source.title }}</a></li>{% endfor %}
+    </ul>
+    <p>内容の誤りにお気づきの場合は、<a href="/about/">運営者情報</a>の窓口までお知らせください。確認のうえ訂正します。</p>
+  </section>
+</article>
+{% if related %}
+<h2 class="section-title">あわせて読む</h2>
+{% with articles = related %}{% include "_list.html" %}{% endwith %}
+{% endif %}
+{% endblock %}

@@ -1,0 +1,27 @@
+# サイト全体の設定。公開URLは環境変数 SITE_URL で渡す（未設定ならnoindexのプレビュー）。
+name: ツールバコ マガジン
+tagline: 仕事で使うAIツールを、公式情報で比べる
+description: 個人と小さな事業者のためのAIツール比較メディア。料金・機能・データの扱いを公式情報にもとづいて整理し、確認日と出典を明記します。
+
+# 本番公開には name と contact が必須（build.py が検査する）。
+operator:
+  name: ""        # 例: 合同会社ONE
+  contact: ""     # 例: 問い合わせフォームのURL または メールアドレス
+  x_account: ""   # 例: toolbako_mag （@なし）
+
+# Cloudflare Web Analytics のトークン（任意・Cookieを使わない計測）
+analytics_token: ""
+
+categories:
+  minutes:
+    name: AI議事録・文字起こし
+    description: 会議の録音・文字起こし・要約を自動化するツールの比較と選び方。
+  writing:
+    name: AIライティング
+    description: 文章作成・校正・記事制作を助けるAIツールの比較と選び方。
+  slides:
+    name: AI資料作成
+    description: スライドや提案書をAIで作るツールの比較と選び方。
+  basics:
+    name: AI活用の基本
+    description: 業務でAIを使うときの注意点、料金の考え方、データの扱い。

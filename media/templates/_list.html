@@ -1,0 +1,14 @@
+<ul class="article-list">
+{% for article in articles %}
+  <li>
+    <a href="{{ article.url }}">
+      <span class="tag">{{ categories[article.category].name }}</span>
+      <strong>{{ article.title }}</strong>
+      <span class="desc">{{ article.description }}</span>
+      <time datetime="{{ article.updated.isoformat() }}">{{ article.updated.strftime('%Y年%-m月%-d日') }} 更新</time>
+    </a>
+  </li>
+{% else %}
+  <li class="empty">記事を準備中です。</li>
+{% endfor %}
+</ul>
