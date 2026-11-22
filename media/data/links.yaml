@@ -2,3 +2,24 @@
 # affiliate_url が空の間は公式URLへ普通のリンクを張る。提携承認後に affiliate_url を
 # 入れると、全記事のリンクが自動で提携リンク(rel="sponsored")に切り替わり、
 # その記事の冒頭にPR表記が出る。
+
+notta:
+  name: Notta
+  official_url: https://www.notta.ai/
+  affiliate_url: ""
+plaud:
+  name: Plaud
+  official_url: https://jp.plaud.ai/
+  affiliate_url: ""
+tldv:
+  name: tl;dv
+  official_url: https://tldv.io/ja/
+  affiliate_url: ""
+rimo:
+  name: Rimo
+  official_url: https://rimo.app/voice
+  affiliate_url: ""
+otter:
+  name: Otter
+  official_url: https://otter.ai/
+  affiliate_url: ""
