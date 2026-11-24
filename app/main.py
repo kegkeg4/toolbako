@@ -3352,6 +3352,11 @@ async def admin_creator_badge(request: Request, username: str, badge: str, actio
     return RedirectResponse("/admin?section=users", 303)
 
 
+@app.get("/sell", response_class=HTMLResponse)
+async def sell_guide(request: Request):
+    return templates.TemplateResponse(request, "sell.html", context(request))
+
+
 @app.get("/about", response_class=HTMLResponse)
 @app.get("/terms", response_class=HTMLResponse)
 @app.get("/privacy", response_class=HTMLResponse)
@@ -3367,7 +3372,7 @@ async def static_page(request: Request):
 async def sitemap():
     if not settings.is_production:
         return Response('<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"/>', media_type="application/xml")
-    static_urls = ["", "/tools", "/transfers", "/creators", "/requests", "/match", "/about", "/terms", "/privacy", "/tokushoho"]
+    static_urls = ["", "/tools", "/sell", "/support", "/transfers", "/creators", "/requests", "/match", "/about", "/terms", "/privacy", "/tokushoho"]
     dynamic_urls = [f"/tools/{x['slug']}" for x in store.list_tools()] + [f"/requests/{x['id']}" for x in store.requests if x.get("status") == "open"]
     dynamic_urls.extend(f"/tools/{x['slug']}/transfer" for x in store.list_tools() if store.transfer_is_public(x))
     profiles = sorted({x["author_username"] for x in store.list_tools()})

@@ -7,7 +7,7 @@ from .data import DemoStore
 
 CATALOG_PATHS = frozenset({"/", "/tools"})
 PUBLIC_READ_PATHS = CATALOG_PATHS | frozenset({
-    "/login", "/support", "/about", "/terms", "/privacy", "/tokushoho", "/match",
+    "/login", "/support", "/sell", "/about", "/terms", "/privacy", "/tokushoho", "/match",
 })
 
 

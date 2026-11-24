@@ -1,6 +1,10 @@
 {% extends "base.html" %}
-{% block title %}ツールバコ — 個人がつくるAIツールのマーケット{% endblock %}
-{% block description %}個人がつくったAIツールを、必要な人や小さな事業へ。検索・相談・購入・仕事の依頼まで、安心してつながれるAIツール専門マーケット。{% endblock %}
+{% block title %}AIツールの販売・購入マーケット｜ツールバコ{% endblock %}
+{% block description %}自作AIツールを販売したい人と、仕事に使えるツールを探す人をつなぐツールバコ。出品方法・手数料を確認して販売を始めたり、用途に合うツールを比較・購入したりできます。{% endblock %}
+{% block og_title %}{{ self.title() }}{% endblock %}
+{% block og_description %}{{ self.description() }}{% endblock %}
+{% block twitter_title %}{{ self.title() }}{% endblock %}
+{% block twitter_description %}{{ self.description() }}{% endblock %}
 {% block body_class %}market-home{% endblock %}
 {% block page_styles %}<link rel="stylesheet" href="/static/home-premium.css?v={{ asset_version }}">{% endblock %}
 
@@ -124,7 +128,7 @@
   </section>
 
   <section class="market-seller-cta">
-    <div><span>FOR CREATORS</span><h2>そのツール、誰かの仕事を変えるかもしれない。</h2><p>趣味や自分用につくったAIツールを、自分で決めた価格で販売できます。</p></div><div><a href="/tools/new">無料で出品を始める <b>→</b></a><a href="/requests">募集中の仕事を見る</a></div><span class="seller-visual" aria-hidden="true"><i>ツ</i><i>¥</i><i>↗</i></span>
+    <div><span>FOR CREATORS</span><h2>自作AIツールを、必要な人へ。</h2><p>AIツールを売りたい方へ。出品の準備、販売手数料、購入後の納品まで、はじめての販売をガイドします。</p></div><div><a href="/sell">AIツールの販売方法を見る <b>→</b></a><a href="/tools/new">出品を始める</a></div><span class="seller-visual" aria-hidden="true"><i>ツ</i><i>¥</i><i>↗</i></span>
   </section>
 </div>
 {% endblock %}

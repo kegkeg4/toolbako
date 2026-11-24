@@ -1,0 +1,94 @@
+{% extends "base.html" %}
+{% block title %}AIツールを売りたい方へ｜自作AIツールの販売・出品 — ツールバコ{% endblock %}
+{% block description %}自作のAIツールを販売するならツールバコ。出品に必要な準備、販売手数料、掲載審査、購入後の納品までを案内します。紹介用の画像と納品物を分けて、自分で決めた価格で出品できます。{% endblock %}
+{% block og_title %}{{ self.title() }}{% endblock %}
+{% block og_description %}{{ self.description() }}{% endblock %}
+{% block twitter_title %}{{ self.title() }}{% endblock %}
+{% block twitter_description %}{{ self.description() }}{% endblock %}
+{% block page_styles %}<link rel="stylesheet" href="/static/sell.css?v=20261124-1">{% endblock %}
+{% block content %}
+<article class="sell-guide">
+  <nav class="sell-breadcrumb" aria-label="パンくず"><a href="/">ホーム</a><span aria-hidden="true">/</span><span>AIツールを販売したい方へ</span></nav>
+
+  <header class="sell-hero">
+    <div class="sell-hero-copy">
+      <p class="sell-eyebrow">AIツールを売りたい方へ</p>
+      <h1>自作のAIツールを、<br><em>必要な人に販売しよう。</em></h1>
+      <p class="sell-lead">自分の仕事を楽にするためにつくったものが、誰かにも役立つかもしれません。ツールバコは、AIツールの紹介・購入前の相談・決済・納品をつなぐマーケットです。</p>
+      <div class="sell-actions"><a class="sell-button" href="/tools/new">無料で出品を始める <span aria-hidden="true">→</span></a><a class="sell-text-link" href="/support#guide-sell">出品の操作手順を見る</a></div>
+      <p class="sell-small">登録・出品の初期費用は0円。販売成立時に所定の手数料がかかります。</p>
+    </div>
+    <aside class="sell-hero-note" aria-label="紹介と納品の考え方">
+      <span class="sell-note-label">伝えるものと、渡すもの。</span>
+      <div class="sell-preview" aria-hidden="true"><span>AI</span><div><i></i><i></i><i></i></div></div>
+      <h2>まずは、使うイメージを。</h2>
+      <p>商品画像と説明で、用途・操作・できあがりを紹介。実際に渡すファイルや導入手順は、購入後の納品に用意します。</p>
+      <a class="sell-text-link" href="#sell-preview">公開する内容の決め方 <span aria-hidden="true">↓</span></a>
+    </aside>
+  </header>
+
+  <nav class="sell-index" aria-label="販売ガイドの目次"><a href="#sell-examples">販売できるもの</a><a href="#sell-preparation">出品の準備</a><a href="#sell-flow">公開までの流れ</a><a href="#sell-fees">手数料</a><a href="#sell-faq">よくある質問</a></nav>
+
+  <section class="sell-section" id="sell-examples" aria-labelledby="sell-examples-title">
+    <p class="sell-eyebrow">WHAT YOU CAN SELL</p>
+    <h2 id="sell-examples-title">完成品も、導入のサポートも。</h2>
+    <p class="sell-section-intro">提供する内容に合わせて、購入後すぐに渡す方法と、取引ルームで納品する方法を選べます。現在の決済は買い切り・単発のお取引が対象です。</p>
+    <div class="sell-example-grid">
+      <article class="sell-card"><span class="sell-card-label">販売内容の例 01</span><h3>自作の業務ツール</h3><p>文章の整理、帳票の作成など、用途が明確なWebアプリやダウンロード型ツール。対応環境と導入方法を説明します。</p></article>
+      <article class="sell-card"><span class="sell-card-label">販売内容の例 02</span><h3>プロンプト・テキスト</h3><p>特定の作業に使うプロンプトと、その使い方。必要なAIサービスや、別途かかる利用料も明記します。</p></article>
+      <article class="sell-card"><span class="sell-card-label">販売内容の例 03</span><h3>導入・カスタマイズ</h3><p>ツールの設定や用途に合わせた調整。作業範囲・納期・修正回数を合意して、取引ルームで納品します。</p></article>
+    </div>
+    <p class="sell-small">上記は販売内容の例です。掲載には販売・提供する権利の確認と運営の掲載審査が必要です。月額契約は受け付けていません。</p>
+    <a class="sell-text-link" href="/tools">公開中の商品を見る <span aria-hidden="true">→</span></a>
+  </section>
+
+  <section class="sell-section sell-preparation" id="sell-preparation" aria-labelledby="sell-preparation-title">
+    <div><p class="sell-eyebrow">BEFORE YOU LIST</p><h2 id="sell-preparation-title">出品前に、<br>この5つを整理。</h2><p class="sell-section-intro">「何が届くのか」「自分でも使えるか」が分かる説明を用意しましょう。</p></div>
+    <ol class="sell-checklist">
+      <li><div><h3>誰の、どんな作業に役立つか</h3><p>使う場面とできることを具体的に。できないことや、利用者による確認が必要な点も伝えます。</p></div></li>
+      <li><div><h3>動作環境と追加費用</h3><p>OS、必要なソフトやAIサービス、アカウント・APIの準備、別途かかる利用料を記載します。</p></div></li>
+      <li><div><h3>販売する権利と利用条件</h3><p>同梱するコードや素材の権利を確認。商用利用、利用人数、改変・再配布の可否を明確にします。</p></div></li>
+      <li><div><h3>納品物と使い始める手順</h3><p>ファイル・利用案内・設定作業など、渡すものを決めます。即時提供の商品には納品ファイルと導入手順を登録します。</p></div></li>
+      <li><div><h3>価格・納期・サポート範囲</h3><p>販売価格、提供時期、問い合わせへの対応範囲を決めます。更新や修正の扱いも購入前に分かるようにします。</p></div></li>
+    </ol>
+  </section>
+
+  <section class="sell-section sell-preview-section" id="sell-preview" aria-labelledby="sell-preview-title">
+    <p class="sell-eyebrow">SHOW THE VALUE</p><h2 id="sell-preview-title">公開する紹介と、購入後の納品を分ける。</h2>
+    <p class="sell-section-intro">購入前に実物を自由に使える状態にする必要はありません。判断に必要な情報を、画像と説明で伝えられます。</p>
+    <div class="sell-preview-grid">
+      <div><span class="sell-card-label">購入前に見せるもの</span><h3>用途・操作・成果が分かる紹介</h3><p>サンプルデータで操作画面や出力例を撮影し、商品画像と説明に使います。個人情報・認証情報・公開したくないコードは写さないでください。</p><p>デモURLの登録は任意です。公開範囲を決めてから設定しましょう。</p></div>
+      <div><span class="sell-card-label">購入後に渡すもの</span><h3>利用に必要な納品物と案内</h3><p>即時提供なら、納品ファイルと導入手順を事前に登録。設定やカスタマイズが必要なら、合意した内容を取引ルームで納品します。</p><p>公開用の商品画像に、納品ファイルの代わりを持たせることはできません。</p></div>
+    </div>
+    <p class="sell-small">画像や説明も閲覧者が保存できるため、コピーを完全に防ぐことはできません。秘密情報は公開せず、購入者の利用範囲は商品ページで明示してください。</p>
+  </section>
+
+  <section class="sell-section" id="sell-flow" aria-labelledby="sell-flow-title">
+    <p class="sell-eyebrow">FROM DRAFT TO PUBLISHED</p><h2 id="sell-flow-title">商品登録から、販売開始まで。</h2>
+    <ol class="sell-flow">
+      <li><span aria-hidden="true">01</span><h3>会員登録・出品</h3><p>商品名、説明、画像、価格、利用条件、提供方法を入力します。必要な納品物も用意します。</p></li>
+      <li><span aria-hidden="true">02</span><h3>掲載審査</h3><p>運営が説明や販売条件を確認します。修正依頼が届いたら、内容を見直して再審査を申請します。</p></li>
+      <li><span aria-hidden="true">03</span><h3>販売者が公開</h3><p>審査の承認後、販売管理で「公開する」を押します。承認されただけでは公開されません。</p></li>
+      <li><span aria-hidden="true">04</span><h3>受取設定を確認</h3><p>購入受付には決済・売上受取の準備も必要です。「決済・口座設定」で本人確認などの手続きを進めます。</p></li>
+    </ol>
+    <p class="sell-small">掲載審査は説明・販売条件の確認です。商品の動作・権利・安全性のすべてを保証するものではありません。公開と受取設定は別の手続きです。</p>
+    <a class="sell-text-link" href="/support#guide-sell">登録・納品の詳しい操作手順 <span aria-hidden="true">→</span></a>
+  </section>
+
+  <section class="sell-section sell-fees" id="sell-fees" aria-labelledby="sell-fees-title">
+    <div><p class="sell-eyebrow">FEES</p><h2 id="sell-fees-title">価格は自分で。<br>手数料は販売成立時に。</h2><p>登録・出品の初期費用は0円です。売上の確定や振込には、取引完了などの条件があります。</p><a class="sell-text-link" href="/tokushoho">手数料・支払・振込の条件を確認 <span aria-hidden="true">→</span></a></div>
+    <div><dl class="sell-fee-table"><div><dt>通常販売</dt><dd>{{ platform_fee_percent }}<small>%</small></dd></div><div><dt>カスタマイズ依頼</dt><dd>{{ custom_fee_percent }}<small>%</small></dd></div></dl><p class="sell-small">いずれも税込・通常のカード決済費込み。銀行振込の手数料は別途かかる場合があります。詳細は手数料・振込条件をご確認ください。</p></div>
+  </section>
+
+  <section class="sell-section sell-faq" id="sell-faq" aria-labelledby="sell-faq-title">
+    <p class="sell-eyebrow">QUESTIONS</p><h2 id="sell-faq-title">出品前によくある質問</h2>
+    <details><summary>個人でもAIツールを販売できますか？</summary><div><p>個人の制作者も出品できます。商品を販売・提供する権利を確認し、利用条件を記載して掲載審査を受けてください。購入受付や売上受取には、必要な本人確認・決済口座の設定も行います。</p></div></details>
+    <details><summary>無料で使えるデモを公開する必要はありますか？</summary><div><p>デモURLは任意です。商品画像や説明、サンプルの出力例で使うイメージを伝えられます。コピーを完全に防ぐ仕組みではないため、公開してよい内容だけを掲載してください。</p></div></details>
+    <details><summary>納品ファイルがなくても出品できますか？</summary><div><p>「購入後すぐに提供」を選ぶ商品には、実際に渡す納品ファイルと導入手順が必要です。設定代行やカスタマイズなど、作業してから渡す場合は「取引ルームで納品」を選び、作業内容と納期を記載してください。紹介画像だけでは即時納品の商品として販売できません。</p></div></details>
+    <details><summary>月額料金で販売できますか？</summary><div><p>現在は買い切り・単発決済のみで、月額契約は受け付けていません。購入者が別途契約するAIサービスなどの費用がある場合は、商品説明に明記してください。</p></div></details>
+    <details><summary>出品すれば必ず売れますか？</summary><div><p>販売や売上は保証されません。誰のどんな作業に役立つか、使い始めるために何が必要か、何が届くかを具体的に伝え、購入前の質問に対応しましょう。</p></div></details>
+  </section>
+
+  <section class="sell-final" aria-labelledby="sell-final-title"><div><p class="sell-eyebrow">YOUR FIRST LISTING</p><h2 id="sell-final-title">まずは、つくったものを整理するところから。</h2><p>用途と利用条件、紹介画像、納品方法が決まったら、出品画面へ。</p></div><div class="sell-actions"><a class="sell-button" href="/tools/new">無料で出品を始める <span aria-hidden="true">→</span></a><a class="sell-text-link" href="/support#guide-sell">操作手順を確認する</a></div></section>
+</article>
+{% endblock %}
